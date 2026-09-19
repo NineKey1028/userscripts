@@ -1,8 +1,12 @@
 // ==UserScript==
 // @name         NovelAI Prompt Weight Hotkeys
 // @namespace    https://novelai.net/
-// @version      2.1.0
+// @version      2.2.0
 // @description  Ctrl+Up/Down: weight; Ctrl+Alt+C: toggle the entire editor's weight format.
+// @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/novelai
+// @supportURL   https://github.com/NineKey1028/userscripts/issues
+// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/novelai/NovelAI-Prompt-Weight-Hotkeys.user.js
+// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/novelai/NovelAI-Prompt-Weight-Hotkeys.user.js
 // @match        https://novelai.net/image*
 // @run-at       document-start
 // @grant        none
