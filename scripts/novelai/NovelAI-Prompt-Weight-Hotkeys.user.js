@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Prompt Weight Hotkeys
 // @namespace    https://novelai.net/
-// @version      2.2.2
+// @version      2.2.3
 // @description  Ctrl+Up/Down: weight; Ctrl+Alt+C: toggle the entire editor's weight format.
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/novelai
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -81,8 +81,11 @@
           const replacement = g.weight === 1 ? body : `(${body.replace(/:+$/, '')}:${fmt(g.weight)})`;
           edits.push({start:g.start,end:g.end,text:replacement});
         } else {
-          edits.push({start:g.start,end:g.bodyStart,text:g.weight===1?'':fmt(g.weight)+'::'});
-          edits.push({start:g.bodyEnd,end:g.end,text:g.weight===1?'':'::'});
+          // Rebuild the whole ComfyUI group so the NovelAI closing :: is
+          // completed before any following comma: 1.2::tag::,.
+          const body = text.slice(g.bodyStart, g.bodyEnd).replace(/:+\s*$/, '').trim();
+          const replacement = g.weight === 1 ? body : `${fmt(g.weight)}::${body}::`;
+          edits.push({start:g.start,end:g.end,text:replacement});
         }
       }
       // ComfyUI treats parentheses as syntax. Escape literal parentheses from
