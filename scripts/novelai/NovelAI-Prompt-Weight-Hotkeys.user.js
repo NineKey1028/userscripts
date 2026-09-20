@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Prompt Weight Hotkeys
 // @namespace    https://novelai.net/
-// @version      2.2.3
+// @version      2.2.4
 // @description  Ctrl+Up/Down: weight; Ctrl+Alt+C: toggle the entire editor's weight format.
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/novelai
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -45,7 +45,7 @@
     if(action==='toggle') {
       // A mixed prompt is first normalized to NovelAI; the next press converts
       // all NovelAI groups to ComfyUI. Selection never limits conversion scope.
-      action=groups(text,'comfy').length ? 'n' : 'c';
+      action=groups(text,'comfy').length || /\\[()]/.test(text) ? 'n' : 'c';
       start=0; end=text.length;
     }
     const source=groups(text,action==='n'?'comfy':'nai');
@@ -72,7 +72,7 @@
         edits.push({start,end:start,text:fmt(1+delta)+'::'},{start:end,end,text:'::'});
       }
     } else {
-      if(!chosen.length && action !== 'c') return null;
+      if(!chosen.length && action !== 'c' && !/\\[()]/.test(text)) return null;
       if(enclosing) {start=enclosing.start; end=enclosing.end;}
       for(const g of chosen) {
         if (action === 'c') {
@@ -83,7 +83,7 @@
         } else {
           // Rebuild the whole ComfyUI group so the NovelAI closing :: is
           // completed before any following comma: 1.2::tag::,.
-          const body = text.slice(g.bodyStart, g.bodyEnd).replace(/:+\s*$/, '').trim();
+          const body = text.slice(g.bodyStart, g.bodyEnd).replace(/\\([()])/g, '$1').replace(/:+\s*$/, '').trim();
           const replacement = g.weight === 1 ? body : `${fmt(g.weight)}::${body}::`;
           edits.push({start:g.start,end:g.end,text:replacement});
         }
@@ -93,6 +93,10 @@
       if (action === 'c') {
         for(let i=0;i<text.length;i++) {
           if((text[i]==='(' || text[i]===')') && !escaped(text,i) && !chosen.some(g=>i>=g.start && i<g.end)) edits.push({start:i,end:i,text:'\\'});
+        }
+      } else {
+        for(let i=0;i<text.length-1;i++) {
+          if(text[i]==='\\' && (text[i+1]==='(' || text[i+1]===')')) edits.push({start:i,end:i+1,text:''});
         }
       }
     }
@@ -149,10 +153,11 @@
     let expected=s.text;
     for(const e of edits) expected=expected.slice(0,e.start)+e.text+expected.slice(e.end);
     const finalEnd=p.end+edits.reduce((n,e)=>n+e.text.length-(e.end-e.start),0);
+    const selectResult=action!=='toggle';
     if(plain) {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(root,expected);
       root.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText'}));
-      root.setSelectionRange(p.start,finalEnd);
+      root.setSelectionRange(p.start,selectResult?finalEnd:p.start);
     } else {
       // Native editing events update ProseMirror. Change syntax only, never its paragraph content.
       for(const e of edits) {
@@ -163,7 +168,7 @@
       }
       const restore=()=>{
         if(revision!==id||document.activeElement!==root) return;
-        if(snapshot(root)?.text===expected) select(root,p.start,finalEnd);
+        if(selectResult && snapshot(root)?.text===expected) select(root,p.start,finalEnd);
       };
       restore(); queueMicrotask(restore); requestAnimationFrame(restore);
     }

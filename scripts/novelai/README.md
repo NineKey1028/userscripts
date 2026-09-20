@@ -20,6 +20,8 @@
 
 轉回 NovelAI 時，輸出為 `1.2::blue hair, green eyes::,`；逗號會放在結尾 `::` 之後。
 
+轉回 NovelAI 時也會移除 ComfyUI 普通括號的跳脫符號，例如 `\\(tag\\)` 會還原為 `(tag)`。格式切換不會反白全文；只有 `Ctrl + ↑`／`Ctrl + ↓` 會反白修改後的強度群組。
+
 腳本支援 NovelAI 的 ProseMirror 編輯器，會保留既有段落與空白行。
 
 轉成 ComfyUI 時，普通括號會自動跳脫，例如 `(tag)` 會變成 `\\(tag\\)`；加權群組的外層括號會保留為格式結構。
