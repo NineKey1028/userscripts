@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Prompt Weight Hotkeys
 // @namespace    https://novelai.net/
-// @version      2.2.1
+// @version      2.2.2
 // @description  Ctrl+Up/Down: weight; Ctrl+Alt+C: toggle the entire editor's weight format.
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/novelai
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -72,17 +72,24 @@
         edits.push({start,end:start,text:fmt(1+delta)+'::'},{start:end,end,text:'::'});
       }
     } else {
-      if(!chosen.length) return null;
+      if(!chosen.length && action !== 'c') return null;
       if(enclosing) {start=enclosing.start; end=enclosing.end;}
       for(const g of chosen) {
         if (action === 'c') {
           // Build the complete group using ComfyUI's single-colon form.
-          const body = text.slice(g.bodyStart, g.bodyEnd);
+          const body = text.slice(g.bodyStart, g.bodyEnd).replace(/[()]/g, '\\$&');
           const replacement = g.weight === 1 ? body : `(${body.replace(/:+$/, '')}:${fmt(g.weight)})`;
           edits.push({start:g.start,end:g.end,text:replacement});
         } else {
           edits.push({start:g.start,end:g.bodyStart,text:g.weight===1?'':fmt(g.weight)+'::'});
           edits.push({start:g.bodyEnd,end:g.end,text:g.weight===1?'':'::'});
+        }
+      }
+      // ComfyUI treats parentheses as syntax. Escape literal parentheses from
+      // the source prompt; generated weighted-group wrappers remain structural.
+      if (action === 'c') {
+        for(let i=0;i<text.length;i++) {
+          if((text[i]==='(' || text[i]===')') && !escaped(text,i) && !chosen.some(g=>i>=g.start && i<g.end)) edits.push({start:i,end:i,text:'\\'});
         }
       }
     }
