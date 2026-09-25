@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.0
+// @version      1.1
 // @description  使用 Q、E 快速更換 type
 // @author       Alex
 // @match        https://editor.rooticare.com/rooti-care/*
@@ -26,7 +26,8 @@
         allPageLinks: '.pagination-container a, .pagination a',
         bItems: '.type-trend',
         activeBIndicator: '.selectedBackground',
-        aRegion: '#right-list'
+        aRegion: '#right-list',
+        selectedImages: '#right-list .ecg-trend .idBackground.selectedBackground'
     };
 
     // 防止按鍵重複觸發的旗標（防止長按導致連續跳轉）
@@ -92,6 +93,9 @@
      * @param {string} direction - 'next' 代表向下一個項目，'prev' 代表向上一個項目
      */
     function switchType(direction) {
+        // 多選時保護目前清單，避免切換 type 造成選取項目狀態意外改變。
+        if (document.querySelectorAll(SELECTORS.selectedImages).length > 1) return;
+
         const items = Array.from(document.querySelectorAll(SELECTORS.bItems));
         let currentIndex = -1;
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.5.3
-// @description  依 ECG 縮圖心搏點間距標記變動率或心律大於等於指定值的縮圖；每次載入預設關閉。
+// @version      1.7.1
+// @description  依 ECG 縮圖心搏點間距標記變動率或以可選比較方式標記指定心律的縮圖；每次載入預設關閉。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -31,6 +31,8 @@
         threshold: 0.12,
         controlId: 'rooticare-ecg-rate-thumbnail-highlighter-control',
         heartRateInputId: 'rooticare-ecg-rate-thumbnail-heart-rate-threshold',
+        heartRateOperatorId: 'rooticare-ecg-rate-thumbnail-heart-rate-operator',
+        variabilityOperatorId: 'rooticare-ecg-rate-thumbnail-variability-operator',
         hitClass: 'rooticare-ecg-rate-thumbnail-hit',
         reclassifiedClass: 'rooticare-ecg-rate-thumbnail-reclassified',
         debounceMs: 180,
@@ -40,6 +42,7 @@
     let heartRateEnabled = false;
     let observer;
     let scheduled = false;
+    let controlContainer;
 
     function hexToRGBA(hex, alpha) {
         const value = hex.replace('#', '');
@@ -97,13 +100,28 @@
             control = document.createElement('div');
             control.id = CONFIG.controlId;
 
+            const variabilityGroup = document.createElement('span');
+            variabilityGroup.style.cssText = 'display:inline-flex;align-items:center;gap:5px';
             const variabilityLabel = document.createElement('label');
             const variabilityCheckbox = document.createElement('input');
             variabilityCheckbox.type = 'checkbox';
             variabilityCheckbox.dataset.mode = 'variability';
             const variabilityText = document.createElement('span');
-            variabilityText.textContent = 'ECG 變動率標記';
+            variabilityText.textContent = 'ECG 變動率';
             variabilityLabel.append(variabilityCheckbox, variabilityText);
+            const variabilityOperator = document.createElement('select');
+            variabilityOperator.id = CONFIG.variabilityOperatorId;
+            variabilityOperator.setAttribute('aria-label', '變動率比較方式');
+            variabilityOperator.title = '選擇變動率的比較方式';
+            for (const [value, text] of [['>=', '≥'], ['<=', '≤']]) {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = text;
+                variabilityOperator.appendChild(option);
+            }
+            variabilityOperator.value = '>=';
+            variabilityOperator.addEventListener('change', scheduleUpdate);
+            variabilityGroup.append(variabilityLabel, variabilityOperator);
 
             const heartRateGroup = document.createElement('span');
             heartRateGroup.style.cssText = 'display:inline-flex;align-items:center;gap:5px';
@@ -112,7 +130,18 @@
             heartRateCheckbox.type = 'checkbox';
             heartRateCheckbox.dataset.mode = 'heart-rate';
             const heartRateText = document.createElement('span');
-            heartRateText.textContent = '心律大於等於';
+            heartRateText.textContent = '紅點心律';
+            const operatorSelect = document.createElement('select');
+            operatorSelect.id = CONFIG.heartRateOperatorId;
+            operatorSelect.setAttribute('aria-label', '心律比較方式');
+            operatorSelect.title = '選擇紅點心律的比較方式';
+            for (const [value, text] of [['>=', '≥'], ['<=', '≤']]) {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = text;
+                operatorSelect.appendChild(option);
+            }
+            operatorSelect.value = '>=';
             const thresholdInput = document.createElement('input');
             thresholdInput.type = 'number';
             thresholdInput.id = CONFIG.heartRateInputId;
@@ -125,7 +154,7 @@
             const bpmText = document.createElement('span');
             bpmText.textContent = 'BPM';
             heartRateLabel.append(heartRateCheckbox, heartRateText);
-            heartRateGroup.append(heartRateLabel, thresholdInput, bpmText);
+            heartRateGroup.append(heartRateLabel, operatorSelect, thresholdInput, bpmText);
             // 防止拖曳反白輸入值時，事件傳到網站的選取／拖曳處理器。
             for (const eventName of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'mousemove', 'click', 'dblclick', 'keydown', 'keyup']) {
                 thresholdInput.addEventListener(eventName, event => event.stopPropagation());
@@ -148,11 +177,17 @@
                 scheduleUpdate();
             });
             thresholdInput.addEventListener('input', scheduleUpdate);
+            operatorSelect.addEventListener('change', scheduleUpdate);
 
-            control.append(variabilityLabel, heartRateGroup);
+            control.append(variabilityGroup, heartRateGroup);
         }
         const variabilityCheckbox = control.querySelector('[data-mode="variability"]');
         const heartRateCheckbox = control.querySelector('[data-mode="heart-rate"]');
+        if (controlContainer && controlContainer !== container) {
+            enabled = false;
+            heartRateEnabled = false;
+        }
+        controlContainer = container;
         if (variabilityCheckbox) variabilityCheckbox.checked = enabled;
         if (heartRateCheckbox) heartRateCheckbox.checked = heartRateEnabled;
         if (control.parentElement !== container) container.appendChild(control);
@@ -169,7 +204,7 @@
             || fill === 'black';
     }
 
-    function findRateHits() {
+    function findRateHits(operator) {
         const hits = new Set();
         const thumbnails = [...document.querySelectorAll('#right-list .ecg-trend')];
         for (const thumbnail of thumbnails) {
@@ -194,7 +229,7 @@
 
             // 同一 SVG 的水平座標以固定比例代表時間；換算成毫秒後，比例在變動率中相消。
             const rate = (previousInterval - currentInterval) / currentInterval;
-            if (rate >= CONFIG.threshold) hits.add(thumbnail);
+            if (operator === '<=' ? rate <= CONFIG.threshold : rate >= CONFIG.threshold) hits.add(thumbnail);
         }
         return hits;
     }
@@ -226,7 +261,7 @@
         return null;
     }
 
-    function findHeartRateHits(thresholdBpm) {
+    function findHeartRateHits(thresholdBpm, operator) {
         const hits = new Set();
         const thumbnails = [...document.querySelectorAll('#right-list .ecg-trend')];
         for (const thumbnail of thumbnails) {
@@ -238,7 +273,9 @@
             if (redIndex < 1 || !isBlackDot(dots[redIndex - 1].dot)) continue;
 
             const heartRateBpm = getRedBeatBpm(thumbnail, dots[redIndex], dots[redIndex - 1]);
-            if (heartRateBpm !== null && heartRateBpm >= thresholdBpm) hits.add(thumbnail);
+            if (heartRateBpm !== null && (operator === '<=' ? heartRateBpm <= thresholdBpm : heartRateBpm >= thresholdBpm)) {
+                hits.add(thumbnail);
+            }
         }
         return hits;
     }
@@ -264,12 +301,16 @@
         if (!enabled && !heartRateEnabled) return;
 
         const thresholdInput = document.getElementById(CONFIG.heartRateInputId);
+        const operatorSelect = document.getElementById(CONFIG.heartRateOperatorId);
+        const variabilityOperator = document.getElementById(CONFIG.variabilityOperatorId);
         const thresholdBpm = Number(thresholdInput?.value);
         if (heartRateEnabled && (!Number.isFinite(thresholdBpm) || thresholdBpm <= 0)) return;
 
         // 變動率與紅點 BPM 模式互斥，各自按其門檻找出需標記的縮圖。
         const currentCategory = getCurrentCategory();
-        const hits = enabled ? findRateHits() : findHeartRateHits(thresholdBpm);
+        const hits = enabled
+            ? findRateHits(variabilityOperator?.value)
+            : findHeartRateHits(thresholdBpm, operatorSelect?.value);
         hits.forEach(thumb => {
             thumb.classList.add(CONFIG.hitClass);
 
@@ -294,8 +335,14 @@
     function init() {
         installStyle();
         enabled = false;
+        heartRateEnabled = false;
         update();
         observer = new MutationObserver(records => {
+            if (!document.querySelector('.morphology > .container')) {
+                enabled = false;
+                heartRateEnabled = false;
+                controlContainer = null;
+            }
             const relevant = records.some(record => {
                 if (record.type !== 'attributes' || record.attributeName !== 'class') return true;
                 const target = record.target;
