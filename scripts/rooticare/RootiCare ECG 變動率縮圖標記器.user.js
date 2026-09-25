@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.3
+// @version      1.4
 // @description  依 ECG 縮圖心搏點間距計算變動率，以可自訂淡藍色標記達 12% 的縮圖；每次載入預設關閉。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -152,6 +152,12 @@
         return label?.textContent.trim().toUpperCase() || '';
     }
 
+    function getCurrentCategory() {
+        const selected = document.querySelector('.morphology .label-list .label-btn.current-label[ng-click]');
+        const match = selected?.getAttribute('ng-click')?.match(/setLabel\(['"]([VSNA])['"]\)/);
+        return match?.[1] || '';
+    }
+
     function update() {
         ensureControl();
         const thumbnails = document.querySelectorAll('#right-list .ecg-trend');
@@ -162,13 +168,14 @@
         if (!enabled) return;
 
         // 每張縮圖各自讀取 ECG 心搏點並計算相鄰 RR 間距變動率。
+        const currentCategory = getCurrentCategory();
         const hits = findRateHits();
         hits.forEach(thumb => {
             thumb.classList.add(CONFIG.hitClass);
 
-            // 先記錄分類，避免選取狀態的淡綠色分支跳過分類更新。
+            // 與目前上方選取的分類比較；同分類維持淡藍，跨分類才淡黃。
             const classification = getClassification(thumb);
-            if (classification && classification !== 'V') {
+            if (currentCategory && classification && classification !== currentCategory) {
                 thumb.classList.add(CONFIG.reclassifiedClass);
             }
 
