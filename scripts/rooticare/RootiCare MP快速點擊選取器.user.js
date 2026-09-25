@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP快速點擊選取器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.1
+// @version      1.2
 // @description  在 .right-content 內按住滑鼠左鍵滑過，可快速選中或取消選中 ECG 圖片，並停用原本的拖拽效果
 // @author       Alex
 // @match        https://editor.rooticare.com/rooti-care/*
@@ -26,6 +26,9 @@
     // 紀錄滑鼠按下的起點座標，用來計算位移
     let startX = 0;
     let startY = 0;
+    let startItem = null;
+    let pendingClickContainer = null;
+    let pendingClickTimer = null;
     const DRAG_THRESHOLD = 3; // 滑動超過 3 像素才判定為拖曳多選，否則視為單擊
 
     function init() {
@@ -42,6 +45,7 @@
 
         // 2. 滑鼠按下
         document.addEventListener('mousedown', (e) => {
+            clearPendingClick();
             if (e.altKey) return;
             if (e.button !== 0) return; // 只處理左鍵
 
@@ -58,12 +62,12 @@
                 // 紀錄起點
                 startX = e.clientX;
                 startY = e.clientY;
+                startItem = ecgItem;
 
                 // 先行判定如果等一下真的觸發滑動，應該是「全選」還是「全消」
-                const hasSelectedClass = ecgItem.querySelector('.selectedBackground');
-                isSelectingMode = !hasSelectedClass;
+                isSelectingMode = !isItemSelected(ecgItem);
             }
-        });
+        }, true);
 
         // 3. 滑鼠移動
         document.addEventListener('mousemove', (e) => {
@@ -84,9 +88,12 @@
                     isDraggingMode = true;
 
                     // 既然進入了滑動模式，就要把起點的那張圖先納入計算
-                    const startItem = document.elementFromPoint(startX, startY)?.closest('.ecg-trend');
                     if (startItem) {
-                        triggerClick(startItem, e.ctrlKey);
+                        // 原生 mousedown/click 可能已先改變起點狀態；只在尚未達到拖曳目標時補點擊。
+                        const selected = isItemSelected(startItem);
+                        if (selected !== isSelectingMode) {
+                            triggerClick(startItem, e.ctrlKey);
+                        }
                         visitedElements.add(startItem);
                     }
                 }
@@ -103,7 +110,7 @@
             const ecgItem = e.target.closest('.ecg-trend');
 
             if (ecgItem && !visitedElements.has(ecgItem)) {
-                const hasSelectedClass = ecgItem.querySelector('.selectedBackground');
+                const hasSelectedClass = isItemSelected(ecgItem);
 
                 // 依據進入滑動時的模式，決定是否對新滑入的圖進行點擊
                 if ((isSelectingMode && !hasSelectedClass) || (!isSelectingMode && hasSelectedClass)) {
@@ -118,11 +125,47 @@
         function resetState() {
             isMouseDown = false;
             isDraggingMode = false;
+            startItem = null;
             visitedElements.clear();
         }
 
-        // 5. 滑鼠放開 (全域監聽)
-        window.addEventListener('mouseup', resetState);
+        function clearPendingClick() {
+            clearTimeout(pendingClickTimer);
+            pendingClickTimer = null;
+            pendingClickContainer = null;
+        }
+
+        // 5. mouseup 之後仍會產生原生 click。拖曳已經模擬點擊過，
+        // 必須攔住這次 click，否則 Ctrl 在同一格內滑動會把狀態切回去。
+        window.addEventListener('mouseup', (e) => {
+            if (e.button !== 0) return;
+            if (isDraggingMode) {
+                pendingClickContainer = startItem?.closest('.right-content');
+                // 沒有產生 click 時自動清除；下一次按下也會立即清除。
+                pendingClickTimer = setTimeout(clearPendingClick, 500);
+            }
+            resetState();
+        }, true);
+
+        window.addEventListener('click', (e) => {
+            // 腳本合成的 click 必須正常交給網站處理。
+            if (!e.isTrusted || e.button !== 0 || !pendingClickContainer) return;
+            const shouldSuppress = pendingClickContainer.contains(e.target);
+            clearPendingClick();
+            if (shouldSuppress) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+            }
+        }, true);
+
+        window.addEventListener('blur', () => {
+            resetState();
+            clearPendingClick();
+        });
+    }
+
+    function isItemSelected(element) {
+        return Boolean(element?.querySelector('.selectedBackground'));
     }
 
     // 模擬點擊，並將當前的 ctrlKey 狀態帶入
