@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.4.2
-// @description  依 ECG 縮圖心搏點間距計算變動率，以可自訂淡藍色標記達 12% 的縮圖；每次載入預設關閉。
+// @version      1.5.3
+// @description  依 ECG 縮圖心搏點間距標記變動率或心律大於等於指定值的縮圖；每次載入預設關閉。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -23,18 +23,21 @@
     const TARGET_COLOR_OPACITY = 0.22; // 標記透明度，讓 ECG 波形清楚透出
     const RECLASSIFIED_COLOR = "#ffe3ad"; // 已改為其他屬性但仍達標的提示色
     const RECLASSIFIED_COLOR_OPACITY = 0.4; // 屬性變更提示色透明度
+    const DEFAULT_HEART_RATE_THRESHOLD = 100; // 心律模式預設門檻 (BPM)
     const HIGHLIGHT_COLOR = hexToRGBA(TARGET_COLOR, TARGET_COLOR_OPACITY);
     const RECLASSIFIED_HIGHLIGHT_COLOR = hexToRGBA(RECLASSIFIED_COLOR, RECLASSIFIED_COLOR_OPACITY);
 
     const CONFIG = {
         threshold: 0.12,
         controlId: 'rooticare-ecg-rate-thumbnail-highlighter-control',
+        heartRateInputId: 'rooticare-ecg-rate-thumbnail-heart-rate-threshold',
         hitClass: 'rooticare-ecg-rate-thumbnail-hit',
         reclassifiedClass: 'rooticare-ecg-rate-thumbnail-reclassified',
         debounceMs: 180,
     };
 
     let enabled = false;
+    let heartRateEnabled = false;
     let observer;
     let scheduled = false;
 
@@ -67,7 +70,7 @@
                 z-index: 20;
                 display: inline-flex;
                 align-items: center;
-                gap: 5px;
+                gap: 10px;
                 margin: 0;
                 padding: 5px 9px;
                 border: 1px solid #b8c8b2;
@@ -78,7 +81,9 @@
                 white-space: nowrap;
                 cursor: pointer;
             }
-            #${CONFIG.controlId} input { margin: 0; cursor: pointer; }
+            #${CONFIG.controlId} label { display: inline-flex; align-items: center; gap: 5px; margin: 0; cursor: pointer; }
+            #${CONFIG.controlId} input[type="checkbox"] { margin: 0; cursor: pointer; }
+            #${CONFIG.heartRateInputId} { width: 54px; box-sizing: border-box; padding: 2px 4px; }
         `;
         (document.head || document.documentElement).appendChild(style);
     }
@@ -86,26 +91,71 @@
     function ensureControl() {
         const container = document.querySelector('.morphology > .container');
         if (!container) return;
-        let label = document.getElementById(CONFIG.controlId);
-        if (!label) {
-            label = document.createElement('label');
-            label.id = CONFIG.controlId;
-            label.title = '開啟後，按心搏點間距計算變動率並淡藍標記達 12% 的縮圖';
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.checked = enabled;
-            checkbox.addEventListener('change', () => {
-                enabled = checkbox.checked;
+        let control = document.getElementById(CONFIG.controlId);
+        if (!control || control.tagName !== 'DIV') {
+            control?.remove();
+            control = document.createElement('div');
+            control.id = CONFIG.controlId;
+
+            const variabilityLabel = document.createElement('label');
+            const variabilityCheckbox = document.createElement('input');
+            variabilityCheckbox.type = 'checkbox';
+            variabilityCheckbox.dataset.mode = 'variability';
+            const variabilityText = document.createElement('span');
+            variabilityText.textContent = 'ECG 變動率標記';
+            variabilityLabel.append(variabilityCheckbox, variabilityText);
+
+            const heartRateGroup = document.createElement('span');
+            heartRateGroup.style.cssText = 'display:inline-flex;align-items:center;gap:5px';
+            const heartRateLabel = document.createElement('label');
+            const heartRateCheckbox = document.createElement('input');
+            heartRateCheckbox.type = 'checkbox';
+            heartRateCheckbox.dataset.mode = 'heart-rate';
+            const heartRateText = document.createElement('span');
+            heartRateText.textContent = '心律大於等於';
+            const thresholdInput = document.createElement('input');
+            thresholdInput.type = 'number';
+            thresholdInput.id = CONFIG.heartRateInputId;
+            thresholdInput.min = '1';
+            thresholdInput.max = '300';
+            thresholdInput.step = '1';
+            thresholdInput.value = String(DEFAULT_HEART_RATE_THRESHOLD);
+            thresholdInput.title = '紅色點的心律門檻 (BPM)';
+            thresholdInput.setAttribute('aria-label', '紅點心律門檻 (BPM)');
+            const bpmText = document.createElement('span');
+            bpmText.textContent = 'BPM';
+            heartRateLabel.append(heartRateCheckbox, heartRateText);
+            heartRateGroup.append(heartRateLabel, thresholdInput, bpmText);
+            // 防止拖曳反白輸入值時，事件傳到網站的選取／拖曳處理器。
+            for (const eventName of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'mousemove', 'click', 'dblclick', 'keydown', 'keyup']) {
+                thresholdInput.addEventListener(eventName, event => event.stopPropagation());
+            }
+
+            variabilityCheckbox.addEventListener('change', () => {
+                enabled = variabilityCheckbox.checked;
+                if (enabled) {
+                    heartRateEnabled = false;
+                    heartRateCheckbox.checked = false;
+                }
                 scheduleUpdate();
             });
-            const text = document.createElement('span');
-            text.textContent = 'ECG 變動率標記';
-            label.append(checkbox, text);
-        } else {
-            const checkbox = label.querySelector('input');
-            if (checkbox) checkbox.checked = enabled;
+            heartRateCheckbox.addEventListener('change', () => {
+                heartRateEnabled = heartRateCheckbox.checked;
+                if (heartRateEnabled) {
+                    enabled = false;
+                    variabilityCheckbox.checked = false;
+                }
+                scheduleUpdate();
+            });
+            thresholdInput.addEventListener('input', scheduleUpdate);
+
+            control.append(variabilityLabel, heartRateGroup);
         }
-        if (label.parentElement !== container) container.appendChild(label);
+        const variabilityCheckbox = control.querySelector('[data-mode="variability"]');
+        const heartRateCheckbox = control.querySelector('[data-mode="heart-rate"]');
+        if (variabilityCheckbox) variabilityCheckbox.checked = enabled;
+        if (heartRateCheckbox) heartRateCheckbox.checked = heartRateEnabled;
+        if (control.parentElement !== container) container.appendChild(control);
     }
 
     function numericX(dot) {
@@ -149,6 +199,50 @@
         return hits;
     }
 
+    function getRedBeatBpm(thumbnail, currentBeat, previousBeat) {
+        // D3 的圓點綁定原始取樣索引；使用原始時間資料，不受 CSS、DPR 或網頁縮放影響。
+        const wave = thumbnail.querySelector('.ecgWave');
+        const angularElement = window.angular?.element(wave);
+        const scope = angularElement?.isolateScope?.();
+        const sampleRate = Number(scope?.posInfo?.sampleRate || scope?.sampleRate);
+        const currentIndex = Number(currentBeat.dot.__data__);
+        const previousIndex = Number(previousBeat.dot.__data__);
+        if (currentBeat.dot.__data__ != null && previousBeat.dot.__data__ != null
+            && Number.isFinite(currentIndex) && Number.isFinite(previousIndex)
+            && Number.isFinite(sampleRate) && sampleRate > 0 && currentIndex > previousIndex) {
+            return Math.round(60 * sampleRate / (currentIndex - previousIndex));
+        }
+
+        // 不能取得原始索引時，只用同一繪圖群組的座標及實際時間窗。
+        // 不以 SVG 外框或螢幕像素代替繪圖寬度，也不猜測固定秒數。
+        const group = currentBeat.dot.closest('.centerGroup');
+        const width = Number(group?.getAttribute('width'));
+        const duration = Number(scope?.segSec || wave?.getAttribute('seg-sec'));
+        const interval = currentBeat.x - previousBeat.x;
+        if (Number.isFinite(width) && width > 0 && Number.isFinite(duration)
+            && duration > 0 && interval > 0) {
+            return Math.round(60 * width / (interval * duration));
+        }
+        return null;
+    }
+
+    function findHeartRateHits(thresholdBpm) {
+        const hits = new Set();
+        const thumbnails = [...document.querySelectorAll('#right-list .ecg-trend')];
+        for (const thumbnail of thumbnails) {
+            const dots = [...thumbnail.querySelectorAll('circle.anno-dot')]
+                .map(dot => ({ dot, x: numericX(dot) }))
+                .filter(item => item.x !== null)
+                .sort((a, b) => a.x - b.x);
+            const redIndex = dots.findIndex(({ dot }) => /rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)/i.test(getComputedStyle(dot).fill));
+            if (redIndex < 1 || !isBlackDot(dots[redIndex - 1].dot)) continue;
+
+            const heartRateBpm = getRedBeatBpm(thumbnail, dots[redIndex], dots[redIndex - 1]);
+            if (heartRateBpm !== null && heartRateBpm >= thresholdBpm) hits.add(thumbnail);
+        }
+        return hits;
+    }
+
     function getClassification(thumbnail) {
         const label = thumbnail.querySelector('.ecgWave svg text');
         return label?.textContent.trim().toUpperCase() || '';
@@ -167,11 +261,15 @@
             CONFIG.hitClass,
             CONFIG.reclassifiedClass
         ));
-        if (!enabled) return;
+        if (!enabled && !heartRateEnabled) return;
 
-        // 每張縮圖各自讀取 ECG 心搏點並計算相鄰 RR 間距變動率。
+        const thresholdInput = document.getElementById(CONFIG.heartRateInputId);
+        const thresholdBpm = Number(thresholdInput?.value);
+        if (heartRateEnabled && (!Number.isFinite(thresholdBpm) || thresholdBpm <= 0)) return;
+
+        // 變動率與紅點 BPM 模式互斥，各自按其門檻找出需標記的縮圖。
         const currentCategory = getCurrentCategory();
-        const hits = findRateHits();
+        const hits = enabled ? findRateHits() : findHeartRateHits(thresholdBpm);
         hits.forEach(thumb => {
             thumb.classList.add(CONFIG.hitClass);
 
@@ -223,8 +321,10 @@
             characterData: true,
             attributes: true,
             attributeOldValue: true,
-            attributeFilter: ['class', 'fill', 'style']
+            attributeFilter: ['class', 'fill', 'style', 'cx', 'width', 'viewBox', 'transform', 'seg-sec', 'sample-rate']
         });
+        window.addEventListener('resize', scheduleUpdate);
+        window.visualViewport?.addEventListener('resize', scheduleUpdate);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
