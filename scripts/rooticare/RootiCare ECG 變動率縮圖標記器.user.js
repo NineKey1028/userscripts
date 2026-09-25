@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.4
+// @version      1.4.2
 // @description  依 ECG 縮圖心搏點間距計算變動率，以可自訂淡藍色標記達 12% 的縮圖；每次載入預設關閉。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -51,11 +51,13 @@
         const style = document.createElement('style');
         style.id = `${CONFIG.controlId}-style`;
         style.textContent = `
-            #right-list .ecg-trend.${CONFIG.hitClass}:not(:has(.idBackground.selectedBackground)) .idBackground {
+            /* 移出 type 或跨分類的達標格子提示淡黃；選取色交由網站處理。 */
+            #right-list .ecg-trend.${CONFIG.hitClass}:not(:has(.idBackground.selectedBackground)) .idBackground:not(.move-out-color) {
                 background-color: ${HIGHLIGHT_COLOR} !important;
                 border-radius: 2px;
             }
-            #right-list .ecg-trend.${CONFIG.hitClass}.${CONFIG.reclassifiedClass}:not(:has(.idBackground.selectedBackground)) .idBackground {
+            #right-list .ecg-trend.${CONFIG.hitClass}.${CONFIG.reclassifiedClass}:not(:has(.idBackground.selectedBackground)) .idBackground,
+            #right-list .ecg-trend.${CONFIG.hitClass}:not(:has(.idBackground.selectedBackground)) .idBackground.move-out-color {
                 background-color: ${RECLASSIFIED_HIGHLIGHT_COLOR} !important;
             }
             #${CONFIG.controlId} {
