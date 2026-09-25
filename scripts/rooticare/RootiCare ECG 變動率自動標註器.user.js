@@ -8,8 +8,10 @@
 // @match        https://editoreu.rooticare.com/rooti-care/*
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
-// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare ECG 變動率自動標註器-1.0.user.js
-// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare ECG 變動率自動標註器-1.0.user.js
+// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20ECG%20變動率自動標註器.user.js
+// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20ECG%20變動率自動標註器.user.js
+// 
+// 
 // @grant        none
 // ==/UserScript==
 

@@ -8,8 +8,10 @@
 // @match        https://editoreu.rooticare.com/rooti-care/*
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
-// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare MP 快速切頁-1.0.user.js
-// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare MP 快速切頁-1.0.user.js
+// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20MP%20快速切頁.user.js
+// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20MP%20快速切頁.user.js
+// 
+// 
 // @grant        none
 // ==/UserScript==
 

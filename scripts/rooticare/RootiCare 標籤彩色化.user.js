@@ -8,13 +8,20 @@
 // @match        https://editoreu.rooticare.com/rooti-care/*
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
-// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare 標籤彩色化-1.0.user.js
-// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare 標籤彩色化-1.0.user.js
+// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20標籤彩色化.user.js
+// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20標籤彩色化.user.js
+// 
+// 
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
+
+    // 個人化顏色設定：修改對應常數即可快速更換標籤顏色。
+    const COLOR_V = "#DC3545"; // V 標籤目標顏色
+    const COLOR_S = "#007BFF"; // S 標籤目標顏色
+    const COLOR_N = "#28A745"; // N 標籤目標顏色
 
     // ======= 功能與程度設定 =======
     const config = {
@@ -25,9 +32,9 @@
 
     // 定義顏色映射表
     const colorMap = {
-        'V': '#dc3545', // 紅色
-        'S': '#007bff', // 藍色
-        'N': '#28a745', // 綠色
+        'V': COLOR_V,
+        'S': COLOR_S,
+        'N': COLOR_N,
     };
 
     function removeFooter() {
