@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Shorts Blocker
 // @namespace    https://www.youtube.com/
-// @version      1.0.0
-// @description  隱藏 YouTube 上的 Shorts 入口、影片區塊與搜尋結果，並阻止開啟 Shorts 頁面。
+// @version      1.0.1
+// @description  隱藏 YouTube 一般頁面上的 Shorts 入口與影片區塊，直接開啟 Shorts 網址仍可觀看。
 // @author       NineKey1028
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/youtube
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -17,8 +17,6 @@
 
   const HIDE_STYLE = 'yt-shorts-blocker-style';
   const HIDDEN_ATTR = 'data-yt-shorts-blocked';
-  const SHORTS_PATH = /^\/shorts(?:\/|$)/;
-  let redirecting = false;
 
   // CSS immediately hides navigation links and Shorts shelf/renderer elements.
   const css = `
@@ -63,17 +61,6 @@
   function scan(root = document) {
     installStyle();
     if (location.hostname !== 'www.youtube.com') return;
-    if (SHORTS_PATH.test(location.pathname)) {
-      // Route back to the previous page when possible; otherwise use the home page.
-      if (!redirecting) {
-        redirecting = true;
-        const previous = document.referrer;
-        const target = previous && new URL(previous).origin === location.origin && !SHORTS_PATH.test(new URL(previous).pathname)
-          ? previous : '/';
-        location.replace(target);
-      }
-      return;
-    }
 
     const anchors = root.querySelectorAll?.('a[href^="/shorts/"]') || [];
     for (const anchor of anchors) hideShortsContainer(anchor);
@@ -85,15 +72,6 @@
     root.querySelectorAll?.('ytd-reel-shelf-renderer, ytd-reel-item-renderer, ytd-shorts')
       .forEach(node => node.setAttribute(HIDDEN_ATTR, ''));
   }
-
-  // Catch click navigation before YouTube's SPA router handles it.
-  document.addEventListener('click', event => {
-    const anchor = event.target?.closest?.('a[href*="/shorts/"]');
-    if (!anchor) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    hideShortsContainer(anchor);
-  }, true);
 
   // Observe YouTube's continuously replaced SPA content.
   const observer = new MutationObserver(records => {
