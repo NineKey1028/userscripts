@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.10
-// @description  檢查 RootiCare Report 的 R-R、Max. sinus 標籤與 VT 平均心率。
+// @version      2.11
+// @description  檢查 RootiCare Report 的 R-R、Max. sinus 標籤與所有 VT（含最長 VT）的 V 標籤心率。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -56,48 +56,41 @@
         return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     }
 
-    function parseAverageHeartRate(text) {
-        const normalized = normalizeLabel(text).replace(/\u00a0/g, ' ');
-        const label = /(?:avg\.?\s*hr|average\s*hr|mean\s*hr|hr\s*avg|fc\s*(?:moy(?:enne)?\.?|media|medio)|(?:frequence cardiaque|frecuencia cardiaca|frequenza cardiaca)\s*(?:moyenne|media|medio)|(?:gem\.?\s*hr|gemiddelde\s*(?:hartfrequentie|hartslag))|(?:durchschnitt(?:liche)?\s*(?:hf|herzfrequenz)|mittlere\s*herzfrequenz)|(?:平均\s*(?:心率|hr)))/i;
-        const match = normalized.match(new RegExp(`${label.source}\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)\\s*(?:bpm|beats?\\s*per\\s*minute)?`, 'i'));
-        if (!match) return NaN;
-
-        // A repeated report title/time can place a date right after the label, e.g.
-        // "VT with Fastest Avg. HR 18/09/2026 ... Avg HR: 130bpm".
-        // Prefer an explicitly bpm-qualified value so the date is never read as HR.
-        const values = [...normalized.matchAll(new RegExp(`${label.source}\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)\\s*(bpm|beats?\\s*per\\s*minute)`, 'ig'))];
-        const selected = values.at(-1)?.[1] || match[1];
-        return Number(selected.replace(',', '.'));
-    }
-
     function isVTHeader(text) {
         const normalized = normalizeLabel(text);
         return /\bvt\b|\btv\b|ventricular\s+tachycardia|tachycardie\s+ventriculaire|tachicardia\s+ventricolare|taquicardia\s+ventricular|ventrikulare\s+tachykardie|心室頻(?:拍|脈)|室性心動過速/.test(normalized);
     }
 
-    function isLongestVTHeader(text) {
-        const normalized = normalizeLabel(text);
-        return /\blongest\s+(?:vt|tv)\b|\b(?:vt|tv)\s+(?:(?:le\s+)?plus\s+long\w*|piu\s+lung\w*|langst\w*|mas\s+largo\w*|mais\s+long\w*)\b|(?:最長|最长|最久|最大)\s*(?:vt|tv)/.test(normalized);
-    }
-
-    function getLowAverageVTFinding(report) {
+    function getLowVHeartRateFinding(report) {
         const findings = [...report.querySelectorAll('.print-page-content-blk')]
             .filter(card => card.querySelector('.event-ecg-blk'))
             .map(card => {
                 const header = card.querySelector('.event-ecg-header-blk');
-                const headerText = header?.innerText?.trim().replace(/\s+/g, ' ') || '';
-                const cardText = card.innerText?.trim().replace(/\s+/g, ' ') || card.textContent || '';
-                return {
-                    ecg: card.querySelector('.event-ecg-blk'),
-                    avgHr: isVTHeader(headerText) && !isLongestVTHeader(headerText)
-                        ? parseAverageHeartRate(cardText)
-                        : NaN,
-                };
+                const headerText = header?.textContent?.trim().replace(/\s+/g, ' ') || '';
+                if (!isVTHeader(headerText)) return null;
+
+                const ecgs = [...card.querySelectorAll('.event-ecg-blk')];
+                const vLabels = ecgs.flatMap(ecg => [...ecg.querySelectorAll('text')])
+                    .filter(label => label.textContent.trim() === 'V');
+                if (!vLabels.length) return null;
+
+                // Read BPM from the same beat marker as each V label. Missing or
+                // ambiguous readings must not turn a partial scan into "all <100".
+                const heartRates = vLabels.map(label => {
+                    const marker = label.closest('.ecgRMarker');
+                    const values = marker?.querySelectorAll('.annoDuration tspan');
+                    if (values?.length !== 1) return NaN;
+                    const match = values[0].textContent.trim().match(/^(\d+(?:[.,]\d+)?)\s*(?:bpm)?$/i);
+                    return match ? Number(match[1].replace(',', '.')) : NaN;
+                });
+                if (!heartRates.every(bpm => Number.isFinite(bpm) && bpm > 0 && bpm < 100)) return null;
+
+                return { ecg: vLabels[0].closest('.event-ecg-blk'), maxHr: Math.max(...heartRates) };
             })
-            .filter(item => Number.isFinite(item.avgHr) && item.avgHr < 100);
+            .filter(Boolean);
         if (!findings.length) return null;
         return {
-            ...findings.reduce((lowest, item) => item.avgHr < lowest.avgHr ? item : lowest),
+            ...findings.reduce((lowest, item) => item.maxHr < lowest.maxHr ? item : lowest),
             count: findings.length,
         };
     }
@@ -402,12 +395,12 @@
             maxSinusIndicator = null;
         }
 
-        const vtFinding = getLowAverageVTFinding(report);
+        const vtFinding = getLowVHeartRateFinding(report);
         vtTarget = vtFinding?.ecg || null;
         if (vtFinding) {
             vtIndicator = ensureIndicator(CONFIG.vtIndicatorId, false);
             vtIndicator.querySelector('.message').textContent =
-                `VT Avg HR ${vtFinding.avgHr.toFixed(0)} bpm <100${vtFinding.count > 1 ? `（${vtFinding.count} 條）` : ''}`;
+                `VT 全部 V 心率 <100 bpm（最高 ${vtFinding.maxHr} bpm）${vtFinding.count > 1 ? `（${vtFinding.count} 條）` : ''}`;
             vtIndicator.style.display = 'flex';
         } else {
             vtIndicator?.remove();
