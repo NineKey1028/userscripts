@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.11
-// @description  檢查 RootiCare Report 的 R-R、Max. sinus 標籤與所有 VT（含最長 VT）的 V 標籤心率。
+// @version      2.19
+// @description  檢查 RootiCare Report 的 R-R、Max. sinus 標籤與 VT（含最長 VT）的 HR 範圍是否全部低於 100 bpm，以及 Specifics Note 是否存在於 Summary。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -23,6 +23,14 @@
         vtIndicatorId: 'rooticare-report-checker-vt-indicator',
         reportSelector: '#af-print-dialog',
         detailSelector: '.event-ecg-blk .ecgRMarker .annoDuration',
+        longestRRSelector: '[ng-repeat="arrData in af.printDialog.longestRRTms track by $index"]',
+        vtSelector: [
+            '[ng-repeat="arrData in af.printDialog.longestVTTms track by $index"]',
+            '[ng-repeat="arrData in af.printDialog.fastestAvgVTTms track by $index"]',
+            '[ng-repeat="arrData in af.printDialog.firstVT track by $index"]',
+        ].join(', '),
+        vtStatSelector: `[ng-show="checkEventStat('vt', arrData.tms)"]`,
+        maxSinusSelector: '[ng-show="af.record.maxSinusHR.time > 0"]',
         maxIntervalMs: 10000,
         debounceMs: 250,
         visibleMargin: 48,
@@ -30,12 +38,12 @@
 
     let indicator;
     let maxSinusIndicator;
-    let vtIndicator;
+    let vtIndicators = [];
+    let specificsIndicators = [];
     let observer;
     let scanTimer;
     let target = null;
     let maxSinusTarget = null;
-    let vtTarget = null;
     let targetInterval = 0;
     let reportInterval = 0;
     let targetTimestamp = '';
@@ -52,103 +60,62 @@
         return Number(value);
     }
 
-    function normalizeLabel(text) {
-        return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    }
-
-    function isVTHeader(text) {
-        const normalized = normalizeLabel(text);
-        return /\bvt\b|\btv\b|ventricular\s+tachycardia|tachycardie\s+ventriculaire|tachicardia\s+ventricolare|taquicardia\s+ventricular|ventrikulare\s+tachykardie|心室頻(?:拍|脈)|室性心動過速/.test(normalized);
-    }
-
-    function getLowVHeartRateFinding(report) {
-        const findings = [...report.querySelectorAll('.print-page-content-blk')]
-            .filter(card => card.querySelector('.event-ecg-blk'))
+    function getLowVTHeartRateFindings(report) {
+        const findings = [...report.querySelectorAll(CONFIG.vtSelector)]
             .map(card => {
-                const header = card.querySelector('.event-ecg-header-blk');
-                const headerText = header?.textContent?.trim().replace(/\s+/g, ' ') || '';
-                if (!isVTHeader(headerText)) return null;
+                const ecg = card.querySelector('.event-ecg-blk');
+                const stat = card.querySelector(CONFIG.vtStatSelector);
+                if (!ecg || !stat || stat.classList.contains('ng-hide')) return null;
 
-                const ecgs = [...card.querySelectorAll('.event-ecg-blk')];
-                const vLabels = ecgs.flatMap(ecg => [...ecg.querySelectorAll('text')])
-                    .filter(label => label.textContent.trim() === 'V');
-                if (!vLabels.length) return null;
-
-                // Read BPM from the same beat marker as each V label. Missing or
-                // ambiguous readings must not turn a partial scan into "all <100".
-                const heartRates = vLabels.map(label => {
-                    const marker = label.closest('.ecgRMarker');
-                    const values = marker?.querySelectorAll('.annoDuration tspan');
-                    if (values?.length !== 1) return NaN;
-                    const match = values[0].textContent.trim().match(/^(\d+(?:[.,]\d+)?)\s*(?:bpm)?$/i);
-                    return match ? Number(match[1].replace(',', '.')) : NaN;
-                });
-                if (!heartRates.every(bpm => Number.isFinite(bpm) && bpm > 0 && bpm < 100)) return null;
-
-                return { ecg: vLabels[0].closest('.event-ecg-blk'), maxHr: Math.max(...heartRates) };
+                // Read the HR range independently of translated labels and average HR.
+                // Separate value elements prevent textContent joining bpm with the next label.
+                const match = [...stat.querySelectorAll('b')]
+                    .map(value => (value.textContent || '').trim().match(/^(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*bpm$/i))
+                    .find(Boolean);
+                if (!match) return null;
+                const minHr = Number(match[1].replace(',', '.'));
+                const maxHr = Number(match[2].replace(',', '.'));
+                if (!Number.isFinite(minHr) || !Number.isFinite(maxHr) ||
+                    minHr < 0 || minHr > maxHr || maxHr >= 100) return null;
+                return { ecg, minHr, maxHr };
             })
             .filter(Boolean);
-        if (!findings.length) return null;
-        return {
-            ...findings.reduce((lowest, item) => item.maxHr < lowest.maxHr ? item : lowest),
-            count: findings.length,
-        };
+        return findings;
     }
 
-    function isLongestRRLabel(text) {
-        const normalized = text.normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase();
-        // IRRmax/IRmax already includes the maximum qualifier. There is no
-        // word boundary before "max" in these localized report labels.
-        if (/\bir{1,2}\s*max\b/.test(normalized)) return true;
-        const hasRR = /\br\s*[-–]?\s*r\b|\bir\s*max\b|\birr\s*max\b/.test(normalized);
-        const hasLongestTerm = /\blongest\b|\b(?:le\s+)?plus\s+long\w*\b|\bpiu\s+lung\w*\b|\blangst\w*\b|\bmas\s+largo\w*\b|\bmais\s+long\w*\b|\blengest\w*\b|\blangsta\w*\b|\bnajdluzs\w*\b|\bmax(?:imum|im\w*)?\b|\bmassim\w*\b/.test(normalized) || /最長|最长|最久|最大/.test(text);
-        return hasRR && hasLongestTerm;
+    function getMissingSpecificsFindings(report) {
+        const summaries = [...report.querySelectorAll('.diagnosis-textarea-blk textarea')];
+        const summary = summaries[summaries.length - 1];
+        if (!summary) return [];
+        const normalize = text => text.replace(/\s+/g, ' ').trim();
+        const summaryText = normalize(summary.value || summary.textContent || '');
+        // Both firstSpecific and paginated specificData cards expose this action.
+        return [...report.querySelectorAll('.print-page-content-blk')]
+            .filter(card => card.querySelector(`[ng-click^="editSelectGain('specific',"]`))
+            .flatMap(card => {
+                const note = normalize(card.querySelector('.event-ecg-header-blk p.print-hr-text b')?.textContent || '');
+                if (!note || summaryText.includes(note)) return [];
+                return [{ target: card.querySelector('.event-ecg-blk') || card, note }];
+            });
     }
 
     function getReportIntervalInfo(report, intervals) {
-        // Compare the actual millisecond annotations in Longest R-R strips.
-        // The header can truncate 4579 ms to 4.57 s, causing duplicate warnings.
-        const rrEcgs = [...report.querySelectorAll('.print-page-content-blk')]
-            .filter(card => isLongestRRLabel(card.querySelector('.event-ecg-header-blk')?.textContent || ''))
-            .flatMap(card => [...card.querySelectorAll('.event-ecg-blk')]);
+        // Angular template attributes identify the strips independently of report language.
+        // Prefer actual milliseconds to avoid truncated ECG-header values.
+        const rrCards = [...report.querySelectorAll(CONFIG.longestRRSelector)];
+        const rrEcgs = rrCards.flatMap(card => [...card.querySelectorAll('.event-ecg-blk')]);
         const rrIntervals = intervals.filter(item => rrEcgs.includes(item.ecg));
         if (rrIntervals.length) {
             const milliseconds = Math.max(...rrIntervals.map(item => item.milliseconds));
             return { seconds: milliseconds / 1000, milliseconds, sourceEcgs: rrEcgs };
         }
 
-        const headerMetrics = [...report.querySelectorAll('.event-ecg-header-blk p')]
-            .filter(item => isLongestRRLabel(item.textContent || ''))
-            .map(item => ({
-                seconds: parseReportSeconds(item.textContent || ''),
-                ecg: item.closest('.print-page-content-blk')?.querySelector('.event-ecg-blk') || null,
-            }))
-            .filter(item => Number.isFinite(item.seconds));
-
-        const summaryRows = [...report.querySelectorAll('.side-blk-2 .info-row')];
-        const summaryRow = summaryRows.find(item =>
-            isLongestRRLabel(item.querySelector('.info-cell')?.textContent || ''));
-        if (summaryRow) {
-            const value = summaryRow.querySelectorAll('.info-cell')[1]?.textContent || '';
-            const seconds = parseReportSeconds(value);
-            if (Number.isFinite(seconds)) {
-                // Rounded summary and ECG-header values may differ slightly; retain the matching source ECG.
-                const sourceEcgs = headerMetrics
-                    .filter(item => item.ecg && Math.abs(item.seconds - seconds) <= 0.05)
-                    .map(item => item.ecg);
-                return { seconds, sourceEcgs };
-            }
-        }
-
-        // Some report languages/layouts show this metric only in the ECG header.
-        if (!headerMetrics.length) return { seconds: NaN, sourceEcgs: [] };
-        const seconds = Math.max(...headerMetrics.map(item => item.seconds));
-        const sourceEcgs = headerMetrics
-            .filter(item => item.ecg && Math.abs(item.seconds - seconds) <= 0.05)
-            .map(item => item.ecg);
-        return { seconds, sourceEcgs };
+        // If annotations are unavailable, read only the metric paragraphs in the identified strips.
+        const seconds = Math.max(...rrCards.flatMap(card =>
+            [...card.querySelectorAll('.event-ecg-header-blk p')]
+                .map(item => parseReportSeconds(item.textContent || '')))
+            .filter(Number.isFinite));
+        return { seconds: Number.isFinite(seconds) ? seconds : NaN, sourceEcgs: rrEcgs };
     }
 
     function getDisplayedIntervals(report) {
@@ -178,16 +145,10 @@
         return intervals;
     }
 
-    function isMaxSinusHeader(text) {
-        const normalized = normalizeLabel(text);
-        const hasSinusTerm = /sinus\w*/.test(normalized) || /竇|窦|洞調律/.test(normalized);
-        const hasMaximumTerm = /\bmax(?:imum|im\w*)?\b|\bmassim\w*/.test(normalized) || /最大|最高/.test(normalized);
-        return hasSinusTerm && hasMaximumTerm;
-    }
-
     function getMaxSinusTagFinding(report) {
-        const card = [...report.querySelectorAll('.print-page-content-blk')].find(item =>
-            isMaxSinusHeader(item.querySelector('.event-ecg-header-blk')?.textContent || ''));
+        // The same ng-show also occurs on the summary row; require an ECG container.
+        const card = [...report.querySelectorAll(CONFIG.maxSinusSelector)]
+            .find(item => item.querySelector('.event-ecg-blk'));
         const ecg = card?.querySelector('.event-ecg-blk');
         if (!ecg) return null;
 
@@ -205,17 +166,35 @@
             element.className = 'rooticare-report-checker-indicator';
             element.setAttribute('role', 'status');
             element.setAttribute('aria-live', 'polite');
+            // Buttons remain clickable; wheel input over them scrolls the report dialog.
+            element.addEventListener('wheel', event => {
+                if (event.ctrlKey) return;
+                let scroller = document.querySelector(CONFIG.reportSelector);
+                while (scroller) {
+                    const overflow = getComputedStyle(scroller).overflowY;
+                    if (/(auto|scroll)/.test(overflow) && scroller.scrollHeight > scroller.clientHeight) break;
+                    scroller = scroller.parentElement;
+                }
+                scroller ||= document.scrollingElement;
+                if (!scroller) return;
+                event.preventDefault();
+                const scale = event.deltaMode === 1 ? 16
+                    : event.deltaMode === 2 ? scroller.clientHeight : 1;
+                scroller.scrollBy({ top: event.deltaY * scale, left: event.deltaX * scale, behavior: 'instant' });
+            }, { passive: false });
             document.body.appendChild(element);
         }
 
         if (element.querySelector('.arrow')?.tagName !== 'BUTTON' ||
+            !element.querySelector('.arrow svg') ||
             element.lastElementChild !== element.querySelector('.arrow') ||
             element.querySelector('.jump') ||
             Boolean(element.querySelector('.timestamp')) !== withTimestamp) {
-            element.innerHTML = `<span class="message"></span>${withTimestamp ? '<button class="timestamp" type="button" title="點擊複製目標時間"></button>' : ''}<button class="arrow" type="button" title="跳至對應 ECG" aria-label="跳至對應 ECG"></button>`;
+            element.innerHTML = `<span class="message"></span>${withTimestamp ? '<button class="timestamp" type="button" title="點擊複製目標時間"></button>' : ''}<button class="arrow" type="button" title="跳至對應 ECG" aria-label="跳至對應 ECG"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3 8H13M8 3L13 8L8 13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
             element.querySelector('.arrow').addEventListener('click', () => {
                 const resolvedTarget = id === CONFIG.indicatorId ? target
-                    : id === CONFIG.maxSinusIndicatorId ? maxSinusTarget : vtTarget;
+                    : id === CONFIG.maxSinusIndicatorId ? maxSinusTarget
+                        : [...vtIndicators, ...specificsIndicators].find(item => item.element.id === id)?.target;
                 if (!resolvedTarget?.isConnected) return;
                 const behavior = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
                 resolvedTarget.scrollIntoView({ behavior, block: 'center', inline: 'nearest' });
@@ -246,11 +225,12 @@
                 box-shadow: 0 2px 10px rgba(0, 0, 0, .24);
                 color: #603b16;
                 font: 600 11px/1.2 Arial, sans-serif;
-                pointer-events: auto;
+                pointer-events: none;
             }
             .rooticare-report-checker-indicator .message { order: 1; }
             .rooticare-report-checker-indicator .timestamp { order: 2; }
             .rooticare-report-checker-indicator .arrow {
+                pointer-events: auto;
                 order: 3;
                 display: grid;
                 place-items: center;
@@ -270,6 +250,11 @@
                 line-height: 1;
                 cursor: pointer;
             }
+            .rooticare-report-checker-indicator .arrow svg {
+                display: block;
+                transform: rotate(var(--arrow-angle, 0deg));
+                transform-origin: center;
+            }
             .rooticare-report-checker-indicator .arrow:hover { background: rgba(211, 84, 0, .2); }
             .rooticare-report-checker-indicator .arrow:focus-visible { outline: 2px solid #d35400; outline-offset: 1px; }
             .rooticare-report-checker-indicator .message {
@@ -278,6 +263,7 @@
                 white-space: nowrap;
             }
             .rooticare-report-checker-indicator .timestamp {
+                pointer-events: auto;
                 flex: 0 0 auto;
                 padding: 3px 5px;
                 border: 1px solid #c58a4f;
@@ -298,7 +284,8 @@
         const items = [
             { target: target, element: indicator },
             { target: maxSinusTarget, element: maxSinusIndicator },
-            { target: vtTarget, element: vtIndicator },
+            ...vtIndicators,
+            ...specificsIndicators,
         ].filter(item => item.target?.isConnected && item.element?.isConnected && item.element.style.display !== 'none');
         if (!items.length) return;
 
@@ -310,7 +297,7 @@
             const centerY = rect.top + rect.height / 2;
             item.anchorY = rect.bottom < 0 ? margin : rect.top > viewportHeight ? viewportHeight - margin : centerY;
             item.orderY = centerY;
-            item.arrow = rect.bottom < 0 ? '↗' : rect.top > viewportHeight ? '↘' : '→';
+            item.arrowAngle = rect.bottom < 0 ? '-45deg' : rect.top > viewportHeight ? '45deg' : '0deg';
             item.height = item.element.getBoundingClientRect().height;
         }
 
@@ -341,7 +328,7 @@
         for (const item of items) {
             item.element.style.top = `${item.positionY}px`;
             item.element.style.transform = 'translateY(-50%)';
-            item.element.querySelector('.arrow').textContent = item.arrow;
+            item.element.querySelector('.arrow').style.setProperty('--arrow-angle', item.arrowAngle);
         }
     }
 
@@ -372,14 +359,15 @@
         if (!report || !report.getClientRects().length) {
             target = null;
             maxSinusTarget = null;
-            vtTarget = null;
             targetTimestamp = '';
             indicator?.remove();
             maxSinusIndicator?.remove();
-            vtIndicator?.remove();
+            vtIndicators.forEach(item => item.element.remove());
             indicator = null;
             maxSinusIndicator = null;
-            vtIndicator = null;
+            vtIndicators = [];
+            specificsIndicators.forEach(item => item.element.remove());
+            specificsIndicators = [];
             return;
         }
 
@@ -395,17 +383,29 @@
             maxSinusIndicator = null;
         }
 
-        const vtFinding = getLowVHeartRateFinding(report);
-        vtTarget = vtFinding?.ecg || null;
-        if (vtFinding) {
-            vtIndicator = ensureIndicator(CONFIG.vtIndicatorId, false);
-            vtIndicator.querySelector('.message').textContent =
-                `VT 全部 V 心率 <100 bpm（最高 ${vtFinding.maxHr} bpm）${vtFinding.count > 1 ? `（${vtFinding.count} 條）` : ''}`;
-            vtIndicator.style.display = 'flex';
-        } else {
-            vtIndicator?.remove();
-            vtIndicator = null;
-        }
+        const vtFindings = getLowVTHeartRateFindings(report);
+        const previousVTIndicators = vtIndicators;
+        vtIndicators = vtFindings.map((finding, index) => {
+            const element = ensureIndicator(`${CONFIG.vtIndicatorId}-${index}`, false);
+            element.querySelector('.message').textContent =
+                `VT HR 範圍 <100 bpm（${finding.minHr} - ${finding.maxHr} bpm）`;
+            element.style.display = 'flex';
+            return { target: finding.ecg, element };
+        });
+        previousVTIndicators.forEach(item => {
+            if (!vtIndicators.some(current => current.element === item.element)) item.element.remove();
+        });
+
+        const previousSpecificsIndicators = specificsIndicators;
+        specificsIndicators = getMissingSpecificsFindings(report).map((finding, index) => {
+            const element = ensureIndicator(`rooticare-report-checker-specifics-indicator-${index}`, false);
+            element.querySelector('.message').textContent = `Specifics 未列入 Summary：${finding.note}`;
+            element.style.display = 'flex';
+            return { target: finding.target, element };
+        });
+        previousSpecificsIndicators.forEach(item => {
+            if (!specificsIndicators.some(current => current.element === item.element)) item.element.remove();
+        });
 
         const intervals = getDisplayedIntervals(report);
         const reportIntervalInfo = getReportIntervalInfo(report, intervals);
@@ -431,7 +431,7 @@
         targetTimestamp = timestampMatch?.[1] || '';
         indicator = ensureIndicator(CONFIG.indicatorId, true);
         indicator.querySelector('.message').textContent =
-            `R-R ${targetInterval.toFixed(2)}s / 報告 ${reportInterval.toFixed(2)}s`;
+            `R-R ${targetInterval.toFixed(2)}s > 報告最長 ${reportInterval.toFixed(2)}s`;
         const timestampButton = indicator.querySelector('.timestamp');
         timestampButton.textContent = targetTimestamp || '無時間';
         timestampButton.disabled = !targetTimestamp;
@@ -448,11 +448,14 @@
         installStyle();
         scheduleScan();
         observer = new MutationObserver(records => {
-            const indicatorIds = [CONFIG.indicatorId, CONFIG.maxSinusIndicatorId, CONFIG.vtIndicatorId];
+            const indicatorIds = [CONFIG.indicatorId, CONFIG.maxSinusIndicatorId,
+                ...vtIndicators.map(item => item.element.id)];
             const isIndicatorNode = node => {
                 const element = node instanceof Element ? node : node?.parentElement;
                 return Boolean(element && (
-                    indicatorIds.includes(element.id) || indicatorIds.some(id => element.closest(`#${id}`))
+                    element.classList.contains('rooticare-report-checker-indicator') ||
+                    element.closest('.rooticare-report-checker-indicator') ||
+                    indicatorIds.includes(element.id)
                 ));
             };
             const hasReportChanges = records.some(record =>
@@ -467,6 +470,9 @@
             characterData: true,
             attributes: true,
             attributeFilter: ['class', 'style', 'x', 'y', 'width', 'height'],
+        });
+        document.addEventListener('input', event => {
+            if (event.target.matches?.('#af-print-dialog .diagnosis-textarea-blk textarea')) scheduleScan();
         });
         window.addEventListener('scroll', positionIndicator, true);
         window.addEventListener('resize', scheduleScan);
