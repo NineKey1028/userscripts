@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.19
-// @description  檢查 RootiCare Report 的 R-R、Max. sinus 標籤與 VT（含最長 VT）的 HR 範圍是否全部低於 100 bpm，以及 Specifics Note 是否存在於 Summary。
+// @version      2.21
+// @description  檢查 RootiCare Report 的 R-R、Max. sinus 標籤與 VT（含最長 VT）的 HR 範圍是否全部低於 100 bpm，以及 Specifics Note 與 Summary 的雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -88,15 +88,57 @@
         const summary = summaries[summaries.length - 1];
         if (!summary) return [];
         const normalize = text => text.replace(/\s+/g, ' ').trim();
-        const summaryText = normalize(summary.value || summary.textContent || '');
+        const normalizeForComparison = text => normalize(text)
+            .normalize('NFKC')
+            .toLocaleLowerCase()
+            .replace(/[.,;:!?()\[\]{}]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        // Summary joins separate notes with commas and may remove each note's final period.
+        const summaryText = normalizeForComparison(summary.value || summary.textContent || '');
         // Both firstSpecific and paginated specificData cards expose this action.
-        return [...report.querySelectorAll('.print-page-content-blk')]
-            .filter(card => card.querySelector(`[ng-click^="editSelectGain('specific',"]`))
+        const cards = [...report.querySelectorAll('.print-page-content-blk')]
+            .filter(card => card.querySelector(`[ng-click^="editSelectGain('specific',"]`));
+        const findings = cards
             .flatMap(card => {
                 const note = normalize(card.querySelector('.event-ecg-header-blk p.print-hr-text b')?.textContent || '');
-                if (!note || summaryText.includes(note)) return [];
+                if (!note || summaryText.includes(normalizeForComparison(note))) return [];
                 return [{ target: card.querySelector('.event-ecg-blk') || card, note }];
             });
+
+        // Inspect only explicitly labelled Specifics sections, not other clinical summary text.
+        const sections = [];
+        let section = null;
+        for (const line of (summary.value || summary.textContent || '').split(/\r?\n/)) {
+            const heading = line.match(/^\s*(?:[-•]\s*)?Specifics\s*[:：]\s*(.*)$/i);
+            if (heading) {
+                section = heading[1];
+                sections.push(section);
+            } else if (section !== null) {
+                if (!line.trim() || /^\s*(?:[-•]|Reported by\s*:)/i.test(line)) {
+                    section = null;
+                } else {
+                    section += ' ' + line.trim();
+                    sections[sections.length - 1] = section;
+                }
+            }
+        }
+        const notes = cards.map(card => normalizeForComparison(
+            card.querySelector('.event-ecg-header-blk p.print-hr-text b')?.textContent || ''));
+        const seen = new Set();
+        // Commas separate joined notes and clauses. Preserve decimal punctuation in numbers.
+        for (const sectionText of sections) {
+            const items = sectionText.split(/(?<!\d)[,;，；]|[,;，；](?!\d)|[.。](?=\s|$)/);
+            for (const item of items) {
+                const note = normalize(item);
+                const key = normalizeForComparison(note);
+                if (!key || /^(?:none|none found|n\/a|無|无)$/.test(key) || seen.has(key)) continue;
+                seen.add(key);
+                if (notes.some(text => ` ${text} `.includes(` ${key} `))) continue;
+                findings.push({ target: summary, note, reverse: true });
+            }
+        }
+        return findings;
     }
 
     function getReportIntervalInfo(report, intervals) {
@@ -399,7 +441,9 @@
         const previousSpecificsIndicators = specificsIndicators;
         specificsIndicators = getMissingSpecificsFindings(report).map((finding, index) => {
             const element = ensureIndicator(`rooticare-report-checker-specifics-indicator-${index}`, false);
-            element.querySelector('.message').textContent = `Specifics 未列入 Summary：${finding.note}`;
+            element.querySelector('.message').textContent = finding.reverse
+                ? `Summary 未見對應 Specifics：${finding.note}`
+                : `Specifics 未列入 Summary：${finding.note}`;
             element.style.display = 'flex';
             return { target: finding.target, element };
         });
