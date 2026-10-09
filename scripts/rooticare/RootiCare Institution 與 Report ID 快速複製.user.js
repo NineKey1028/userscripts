@@ -5,6 +5,7 @@
 // @description  在 Todo 詳細資料彈窗加入按鈕，複製 Institution / Report ID。
 // @author       Alex
 // @match        https://dashboard.rooticare.com/todo.page*
+// @match        https://dashboardeu.rooticare.com/todo.page*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==

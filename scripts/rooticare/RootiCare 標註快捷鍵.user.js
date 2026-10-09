@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.6
+// @version      1.10.4
 // @description  針對 V, S, N 元件，點擊中鍵直接模擬多次左鍵點擊以達到刪除效果
 // @author       Alex
 // @match        https://editor.rooticare.com/rooti-care/*
@@ -20,7 +20,7 @@
 // 按住 Alt + 1 ~ 3 滑動鼠標：僅對現有標籤進行快速修改
 // 按住 4 滑動鼠標：快速刪除碰到的所有標籤
 // 滑鼠中鍵：將點擊的標籤快速刪除
-// Ctrl + 1 / 2 / 3：在滑鼠位置直接記錄端點，第二次按鍵套用 V / S / N；以第二次數字為準，支援跨視窗；Esc 取消
+// Ctrl + 1 / 2 / 3：記錄第一點後可在面板篩選 BPM 與原標籤，第二次按鍵套用 V / S / N；支援跨視窗；Esc 取消
 // W / S 對應方向鍵 ↑ / ↓ 拉縮心電圖
 
 (function() {
@@ -31,6 +31,9 @@
     const sequence = ['', 'N', 'S', 'V']; // 點擊循環順序
 
     const TARGET_BLOCK_SELECTOR = '.ecg-individual-blk, .event-tag-blk.ng-scope'; // 追蹤的容器名稱
+    function isDisabledPage() {
+        return /^\/rooti-care\/morphology(?:\/|$)/.test(window.location?.pathname || '');
+    }
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     let currentMousePos = { x: 0, y: 0 };
 
@@ -51,6 +54,7 @@
 
     // 檢查滑鼠位置下是否有 ECG 區塊
     function getActiveBlockUnderMouse() {
+        if (isDisabledPage()) return null;
         const elements = document.elementsFromPoint(currentMousePos.x, currentMousePos.y);
         for (let el of elements) {
             const block = el.closest(TARGET_BLOCK_SELECTOR);
@@ -83,6 +87,7 @@
 
     // 當滑鼠移入時自動聚焦，避免快捷鍵失效
     document.addEventListener('mouseover', (e) => {
+        if (isDisabledPage()) return;
         const block = e.target.closest(TARGET_BLOCK_SELECTOR);
         if (block && document.activeElement !== block) {
             if (block.tabIndex < 0) block.tabIndex = 0;
@@ -90,9 +95,27 @@
         }
     }, { passive: true });
 
+    // 區間修改更新顯示文字後，原生 D3 點擊狀態 typeIdx 可能仍保留舊值。
+    // 原生循環為 N / A（顯示 S）/ V / X（刪除），點擊前以顯示標籤同步。
+    function syncLabelClickState(el) {
+        if (isDisabledPage()) return;
+        if (!el?.classList?.contains('annoText') || !el.closest(TARGET_BLOCK_SELECTOR)) return;
+        const indices = { N: 0, S: 1, A: 1, V: 2, X: 3, '': 3 };
+        const text = el.textContent.trim();
+        if (Object.prototype.hasOwnProperty.call(indices, text)) {
+            el.setAttribute('typeIdx', String(indices[text]));
+        }
+    }
+
+    // 也處理使用者直接左鍵點擊；capture 階段早於原生標籤 click handler。
+    document.addEventListener('click', (e) => {
+        syncLabelClickState(e.target.closest?.('.annoText'));
+    }, true);
+
     // 執行模擬點擊
     function doLockedClick(el, x, y) {
         if (!el) return;
+        syncLabelClickState(el);
         const opts = {
             bubbles: true,
             cancelable: true,
@@ -128,6 +151,7 @@
 
     // 核心處理函式：將標籤切換至指定的 targetText
     async function processCommand(targetText, point = currentMousePos, rangeBlock = null) {
+        if (isDisabledPage()) return;
         const lockedX = point.x;
         const lockedY = point.y;
 
@@ -182,10 +206,103 @@
     let rangeMode = null;
     let rangeBusy = false;
     const rangeHint = document.createElement('div');
-    rangeHint.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483000;background:#fff7e1;color:#603b16;padding:8px 12px;border:1px solid #d7873e;border-radius:6px;font:13px Arial;pointer-events:none;display:none';
+    rangeHint.id = 'rooticare-range-hotkeys';
+    rangeHint.style.display = 'none';
+    const rangeStyle = document.createElement('style');
+    rangeStyle.textContent = `
+        #rooticare-range-hotkeys { position:fixed;left:12px;bottom:12px;z-index:2147483000;
+            width:370px;max-width:calc(100vw - 24px);padding:9px 11px;box-sizing:border-box;
+            border:1px solid #dce3d6;border-radius:8px;background:#fff;color:#374333;
+            box-shadow:0 3px 14px #24332118;font:12px/1.45 Arial,"Microsoft JhengHei",sans-serif; }
+        #rooticare-range-hotkeys * { box-sizing:border-box; }
+        #rooticare-range-hotkeys .rh-head { display:flex;align-items:center;gap:8px; }
+        #rooticare-range-hotkeys [data-role=message] { flex:1;min-width:0;font-weight:600;overflow-wrap:anywhere; }
+        #rooticare-range-hotkeys [data-role=filters] { margin-top:7px;display:flex;align-items:center;gap:8px;flex-wrap:wrap; }
+        #rooticare-range-hotkeys .rh-group { display:inline-flex;align-items:center;gap:4px;white-space:nowrap; }
+        #rooticare-range-hotkeys .rh-source { width:100%;gap:6px; }
+        #rooticare-range-hotkeys label { display:inline-flex;align-items:center;gap:3px;margin:0;padding:0;font:inherit;color:inherit;cursor:pointer; }
+        #rooticare-range-hotkeys input[type=checkbox] { appearance:auto;position:static;float:none;width:12px;height:12px;min-height:0;margin:0;accent-color:#779b3a; }
+        #rooticare-range-hotkeys select,#rooticare-range-hotkeys input[type=number] {
+            appearance:auto;position:static;float:none;display:inline-block;width:39px;height:23px;min-height:0;
+            margin:0;padding:1px 3px;border:1px solid #dce3d6;border-radius:4px;background:#fff;color:#374333;font:inherit; }
+        #rooticare-range-hotkeys input[type=number] { width:51px; }
+        #rooticare-range-hotkeys :disabled { opacity:.45;cursor:default; }
+        #rooticare-range-hotkeys button { position:static;float:none;width:20px;height:20px;min-height:0;margin:0;padding:0;
+            border:0;border-radius:4px;background:transparent;color:#889180;font:18px/20px Arial;cursor:pointer; }
+        #rooticare-range-hotkeys button:hover { background:#f0f3ec;color:#374333; }
+        #rooticare-range-hotkeys :is(button,input,select):focus-visible { outline:2px solid #91ad68;outline-offset:1px; }
+        #rooticare-range-hotkeys [data-role=help] { margin-top:6px;color:#7b8574;font-size:11px; }
+    `;
+    document.head.appendChild(rangeStyle);
     document.body.appendChild(rangeHint);
+    let rangeMessage;
+    let rangeControls;
+    function ensureRangeControls() {
+        if (rangeControls) return;
+        rangeHint.innerHTML = `<div class="rh-head"><div data-role="message" role="status" aria-live="polite"></div>
+                <button type="button" data-role="cancel" aria-label="取消區間選取" title="取消 · Esc">×</button></div>
+            <div data-role="filters">
+                <span class="rh-group" title="依此心搏與前一心搏的間隔計算 BPM，四捨五入後比較；勾選才啟用">
+                <span>BPM</span>
+                <label title="啟用下限"><input type="checkbox" data-role="bpm-min-enabled" aria-label="啟用 BPM 下限"> ≥</label>
+                <input type="number" data-role="bpm-min" aria-label="BPM 下限" min="1" step="1" value="60">
+                <label title="啟用上限"><input type="checkbox" data-role="bpm-max-enabled" aria-label="啟用 BPM 上限"> ≤</label>
+                <input type="number" data-role="bpm-max" aria-label="BPM 上限" min="1" step="1" value="100"></span>
+                <span class="rh-group" title="（前一 RR − 目前 RR）÷目前 RR；前兩個心搏不限標籤。所有啟用條件需同時符合。">
+                <span>變動率</span>
+                <label title="啟用下限"><input type="checkbox" data-role="variability-min-enabled" aria-label="啟用變動率下限"> ≥</label>
+                <input type="number" data-role="variability-min" aria-label="變動率下限百分比" step="0.1" value="12"><span>%</span>
+                <label title="啟用上限"><input type="checkbox" data-role="variability-max-enabled" aria-label="啟用變動率上限"> ≤</label>
+                <input type="number" data-role="variability-max" aria-label="變動率上限百分比" step="0.1" value="12"><span>%</span></span>
+                <span class="rh-group rh-source" title="只修改勾選的原標籤；所有啟用條件需同時符合"><span>原標籤</span>
+                <label><input type="checkbox" data-source="N" checked> N</label>
+                <label><input type="checkbox" data-source="S" checked> S</label>
+                <label><input type="checkbox" data-source="V" checked> V</label></span>
+            </div><div data-role="help">在另一端按 Ctrl + 1→V／2→S／3→N，即套用篩選修改</div>`;
+        rangeMessage = rangeHint.querySelector('[data-role="message"]');
+        rangeControls = rangeHint.querySelector('[data-role="filters"]');
+        rangeHint.querySelector('[data-role="cancel"]').addEventListener('click', cancelRange);
+        for (const kind of ['bpm', 'variability']) for (const bound of ['min', 'max']) {
+            const toggle = rangeHint.querySelector(`[data-role="${kind}-${bound}-enabled"]`);
+            const update = () => { rangeHint.querySelector(`[data-role="${kind}-${bound}"]`).disabled = !toggle.checked; };
+            toggle.addEventListener('change', update);
+            update();
+        }
+        for (const name of ['mousedown', 'mouseup', 'click', 'keydown', 'keyup']) {
+            rangeHint.addEventListener(name, e => e.stopPropagation());
+        }
+    }
+    function readRangeFilters() {
+        const bounds = {};
+        for (const bound of ['min', 'max']) {
+            bounds[bound] = rangeHint.querySelector(`[data-role="bpm-${bound}-enabled"]`).checked
+                ? Number(rangeHint.querySelector(`[data-role="bpm-${bound}"]`).value) : null;
+            if (bounds[bound] !== null && (!Number.isFinite(bounds[bound]) || bounds[bound] <= 0))
+                throw new Error(`請輸入大於 0 的 BPM ${bound === 'min' ? '下限' : '上限'}`);
+        }
+        if (bounds.min !== null && bounds.max !== null && bounds.min > bounds.max)
+            throw new Error('BPM 下限不可大於上限');
+        const variability = {};
+        for (const bound of ['min', 'max']) {
+            const input = rangeHint.querySelector(`[data-role="variability-${bound}"]`);
+            variability[bound] = rangeHint.querySelector(`[data-role="variability-${bound}-enabled"]`).checked
+                ? Number(input.value) / 100 : null;
+            if (variability[bound] !== null && (!input.value.trim() || !Number.isFinite(variability[bound])))
+                throw new Error('請輸入有效的變動率百分比');
+        }
+        if (variability.min !== null && variability.max !== null && variability.min > variability.max)
+            throw new Error('變動率下限不可大於上限');
+        variability.enabled = variability.min !== null || variability.max !== null;
+        const sources = [...rangeHint.querySelectorAll('[data-source]:checked')].map(el => el.dataset.source);
+        if (!sources.length) throw new Error('請至少勾選一種要修改的原標籤');
+        return { enabled: bounds.min !== null || bounds.max !== null, ...bounds, variability, sources };
+    }
     function showRangeHint(text) {
-        rangeHint.textContent = text;
+        if (isDisabledPage()) { rangeHint.style.display = 'none'; return; }
+        ensureRangeControls();
+        rangeMessage.textContent = text;
+        rangeControls.style.display = rangeMode?.first && !rangeBusy ? 'flex' : 'none';
+        rangeHint.querySelector('[data-role="help"]').style.display = rangeMode?.first && !rangeBusy ? 'block' : 'none';
         rangeHint.style.display = 'block';
     }
     function getRangeContext(svg, clientX) {
@@ -212,7 +329,39 @@
             modifiedData: scope.modifiedData,
             record: [parent.af._vendorId, parent.af._idNumber, parent.af._measureId].join('|') };
     }
-    async function applyIndexRange(first, last, tag) {
+    function getRangeUpdates(effective, pending, data, first, start, end, tag, filters) {
+        const normalize = type => type === 'A' ? 'S' : type;
+        const beats = [...effective].filter(([index, type]) => Number.isFinite(index) && ['N', 'S', 'A', 'V'].includes(type))
+            .sort((a, b) => a[0] - b[0]);
+        const updates = [];
+        for (let i = 0; i < beats.length; i++) {
+            const [index, type] = beats[i];
+            if (index < start || index > end || normalize(type) === tag || !filters.sources.includes(normalize(type))) continue;
+            if (filters.enabled) {
+                if (!i) continue; // 無前一心搏時，不猜測 BPM。
+                const interval = index - beats[i - 1][0];
+                const bpm = Math.round(60 * first.rate / interval);
+                if (!(interval > 0) || (filters.min !== null && bpm < filters.min) ||
+                    (filters.max !== null && bpm > filters.max)) continue;
+            }
+            if (filters.variability?.enabled) {
+                // 前兩搏不限標籤；變動率保留正負號、不取絕對值。
+                if (i < 2) continue;
+                const previousInterval = beats[i - 1][0] - beats[i - 2][0];
+                const currentInterval = index - beats[i - 1][0];
+                if (!(previousInterval > 0) || !(currentInterval > 0)) continue;
+                const rate = (previousInterval - currentInterval) / currentInterval;
+                if ((filters.variability.min !== null && rate < filters.variability.min) ||
+                    (filters.variability.max !== null && rate > filters.variability.max)) continue;
+            }
+            const existing = pending.find(item => item[4] && item[1] === index);
+            const original = existing ? existing[3] : data.anno[index] || type;
+            const time = first.startTime + Math.floor((index - first.viewStart) / first.rate);
+            updates.push([time, index, tag, original, 1]);
+        }
+        return updates;
+    }
+    async function applyIndexRange(first, last, tag, filters) {
         if (first.af !== last.af || first.record !== last.record || first.modifiedData !== last.modifiedData)
             throw new Error('兩點必須屬於同一份報告');
         if (first.rate !== last.rate) throw new Error('兩個視窗取樣率不同，請重新選取');
@@ -226,23 +375,43 @@
         const data = response?.plain ? response.plain() : response;
         if (!data?.anno || typeof data.anno !== 'object') throw new Error('區間標籤讀取失敗');
         if (data.sampleRate && Number(data.sampleRate) !== first.rate) throw new Error('區間取樣率不一致');
-        if (rangeMode?.cancelled || !first.parent || first.parent.$$destroyed ||
-            first.parent.af !== af || first.modifiedData !== af.ecgAnno.modifiedData)
-            throw new Error('報告已切換，取消區間修改');
         const pending = first.modifiedData;
         const effective = new Map(Object.entries(data.anno).map(([index, type]) => [Number(index), type]));
+        const needsIntervals = filters.enabled || filters.variability?.enabled;
+        if (needsIntervals) {
+            // 使用網站原生的相鄰心搏 API；不擴張 ECG 波形讀取範圍或改變 src 對應。
+            const firstIndex = [...effective.keys()].reduce((min, index) =>
+                Number.isFinite(index) && index >= start ? Math.min(min, index) : min, Infinity);
+            if (Number.isFinite(firstIndex)) {
+                let cursor = firstIndex;
+                let precedingBeats = 0;
+                const requiredBeats = filters.variability?.enabled ? 2 : 1;
+                for (let attempts = 0; attempts < 64; attempts++) {
+                    const adjacentResponse = await manager.Af.getAdjacentFilteredECGLabel(
+                        af._vendorId, af._idNumber, af._measureId, cursor, 1);
+                    const adjacent = adjacentResponse?.plain ? adjacentResponse.plain() : adjacentResponse;
+                    if (!adjacent || typeof adjacent !== 'object') throw new Error('無法讀取前一心搏以計算 BPM');
+                    const entries = Object.entries(adjacent).map(([index, type]) => [Number(index), type])
+                        .filter(([index]) => Number.isFinite(index) && index < cursor).sort((a, b) => b[0] - a[0]);
+                    if (!entries.length) break;
+                    const [index, type] = entries[0];
+                    const edit = pending.find(item => item[4] && item[1] === index);
+                    effective.set(index, edit ? edit[2] : type);
+                    if (['N', 'S', 'A', 'V'].includes(edit ? edit[2] : type)) precedingBeats++;
+                    if (precedingBeats >= requiredBeats) break;
+                    cursor = index;
+                    if (attempts === 63) throw new Error('前一心搏連續刪除過多，無法確認 BPM');
+                }
+            }
+        }
+        // 所有非同步讀取完成後，再確認報告與未儲存資料仍一致。
+        if (isDisabledPage() || rangeMode?.cancelled || !first.parent || first.parent.$$destroyed ||
+            first.parent.af !== af || first.modifiedData !== af.ecgAnno.modifiedData)
+            throw new Error('報告已切換，取消區間修改');
         for (const item of pending) {
-            if (item[4] && item[1] >= start && item[1] <= end) effective.set(item[1], item[2]);
+            if (item[4] && item[1] <= end && (needsIntervals || item[1] >= start)) effective.set(item[1], item[2]);
         }
-        const updates = [];
-        for (const [index, type] of effective) {
-            if (!Number.isFinite(index) || index < start || index > end ||
-                !['N', 'S', 'A', 'V'].includes(type) || type === tag) continue;
-            const existing = pending.find(item => item[4] && item[1] === index);
-            const original = existing ? existing[3] : data.anno[index] || type;
-            const time = first.startTime + Math.floor((index - first.viewStart) / first.rate);
-            updates.push([time, index, tag, original, 1]);
-        }
+        const updates = getRangeUpdates(effective, pending, data, first, start, end, tag, filters);
         first.parent.$apply(() => {
             const indices = new Set(updates.map(item => item[1]));
             for (let i = pending.length - 1; i >= 0; i--) {
@@ -257,35 +426,57 @@
         if (!rangeBusy) rangeMode = null;
         if (!rangeBusy) rangeHint.style.display = 'none';
     }
+    // RootiCare 站內切頁不一定重載腳本；每次操作仍檢查目前路徑。
+    // 路由畫面更新時也收起尚未完成的區間面板。
+    let lastPagePath = window.location?.pathname;
+    function updatePageAvailability() {
+        const path = window.location?.pathname;
+        if (style.sheet) style.sheet.disabled = isDisabledPage();
+        if (path === lastPagePath) return;
+        lastPagePath = path;
+        if (isDisabledPage()) { cancelRange(); rangeHint.style.display = 'none'; }
+    }
+    updatePageAvailability();
+    window.addEventListener('popstate', updatePageAvailability);
+    window.addEventListener('hashchange', updatePageAvailability);
+    if (typeof MutationObserver !== 'undefined') {
+        new MutationObserver(updatePageAvailability).observe(document.body, { childList: true, subtree: true });
+    }
     window.addEventListener('blur', cancelRange);
     async function selectRangePoint(tag) {
+        let failed = false;
         const block = getActiveBlockUnderMouse();
         const svg = block?.querySelector('.annoGroup')?.closest('svg');
         if (!svg) {
-            showRangeHint('請將滑鼠移至 ECG 再按 Ctrl + 1／2／3，Esc 取消');
+            showRangeHint('請在 ECG 上按 Ctrl + 1／2／3 選取端點');
             return;
         }
         try {
             const context = getRangeContext(svg, currentMousePos.x);
             if (!rangeMode?.first) {
                 rangeMode = { tag, first: context };
-                showRangeHint(`已記錄第一點（${tag}）；移至第二點按 Ctrl + 1／2／3，以第二次數字為準；Esc 取消`);
+                showRangeHint('區間修改 · 已選第一端點');
                 return;
             }
             const mode = rangeMode;
+            let filters;
+            try { filters = readRangeFilters(); }
+            catch (error) { showRangeHint(error.message); return; }
             mode.tag = tag;
             rangeBusy = true;
-            showRangeHint(`正在將跨視窗區間標籤改為 ${tag}…`);
-            const count = await applyIndexRange(mode.first, context, tag);
+            showRangeHint(`正在篩選區間標籤 → ${tag}…`);
+            const count = await applyIndexRange(mode.first, context, tag, filters);
             rangeMode = null;
-            showRangeHint(`範圍標註完成：修改 ${count} 個標籤 → ${tag}，請確認後儲存`);
+            showRangeHint(count ? `已修改 ${count} 個標籤 → ${tag} · 尚未儲存` : '沒有符合條件且需要變更的標籤');
         } catch (error) {
-            showRangeHint(error.message || '區間修改失敗，請重新選取');
+            failed = true;
+            const detail = error?.message || (error?.status ? `資料讀取失敗（HTTP ${error.status}）` : '區間修改失敗，請重新選取');
+            showRangeHint(detail);
             rangeMode = null;
         } finally {
             if (rangeBusy) {
                 rangeBusy = false;
-                setTimeout(() => { if (!rangeMode && !rangeBusy) rangeHint.style.display = 'none'; }, 3500);
+                setTimeout(() => { if (!rangeMode && !rangeBusy) rangeHint.style.display = 'none'; }, failed ? 15000 : 3500);
             }
         }
     }
@@ -293,7 +484,23 @@
     /**
      * 監聽鍵盤事件
      */
+    // 所有匹配的 RootiCare 頁面皆攔截 Alt，包括輸入欄、面板與 Morphology。
+    document.addEventListener('keyup', (e) => {
+        if (e.key !== 'Alt') return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+    }, true);
     document.addEventListener('keydown', async function(e) {
+        if (e.key === 'Alt') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return;
+        }
+        if (isDisabledPage()) { cancelRange(); rangeHint.style.display = 'none'; return; }
+        if (rangeHint.contains(e.target)) {
+            if (e.key === 'Escape') { e.preventDefault(); cancelRange(); }
+            return;
+        }
         if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
 
         const key = e.key.toLowerCase();
@@ -364,6 +571,7 @@
     // 滑鼠中鍵：刪除標籤
     window.addEventListener('mousedown', async function(e) {
         if (e.button === 1) {
+            if (rangeMode || rangeBusy || rangeHint.contains(e.target)) return;
             const activeBlock = getActiveBlockUnderMouse();
             if (activeBlock) {
                 e.preventDefault();

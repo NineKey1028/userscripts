@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.10.1
-// @description  依 ECG 縮圖心搏點間距標記變動率或以可選比較方式標記指定心律的縮圖；支援 AND／OR 組合篩選與 Morphology Player 快速修改；每次載入預設關閉。
+// @version      1.12.7
+// @description  依 ECG 縮圖心搏點間距標記變動率或以可選比較方式標記指定心律的縮圖；所有篩選條件需同時符合與 Morphology Player 快速修改；支援縮圖逐頁批次選取與分類修改；每次載入預設關閉。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -33,7 +33,6 @@
         heartRateInputId: 'rooticare-ecg-rate-thumbnail-heart-rate-threshold',
         heartRateOperatorId: 'rooticare-ecg-rate-thumbnail-heart-rate-operator',
         variabilityOperatorId: 'rooticare-ecg-rate-thumbnail-variability-operator',
-        combinationOperatorId: 'rooticare-ecg-rate-thumbnail-combination-operator',
         hitClass: 'rooticare-ecg-rate-thumbnail-hit',
         reclassifiedClass: 'rooticare-ecg-rate-thumbnail-reclassified',
         debounceMs: 180,
@@ -58,6 +57,16 @@
         const style = document.createElement('style');
         style.id = `${CONFIG.controlId}-style`;
         style.textContent = `
+            .rc-condition-editor, .rc-condition-editor [data-role=conditions] { display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap; }
+            .rc-condition-editor .rc-condition { display:inline-flex;align-items:center;gap:4px;white-space:nowrap;padding:3px 5px;border:1px solid #e1e8d9;border-radius:5px;background:#f7f9f4; }
+            .rc-condition-editor [hidden] { display:none !important; }
+            .rc-condition-editor .rc-unit { color:#7b8574;font-size:11px; }
+            #${CONFIG.controlId} .rc-condition-editor button, #rooticare-morphology-quick-editor .rc-condition-editor button { min-width:0;width:25px;height:25px;padding:0;border:1px solid #dce3d6;border-radius:5px;background:#f0f5e9;color:#526a36;font-size:17px; }
+            #${CONFIG.controlId} .rc-condition-editor [data-role=condition-remove], #rooticare-morphology-quick-editor .rc-condition-editor [data-role=condition-remove] { width:18px;height:20px;background:transparent;border:0;color:#889180;font-size:16px; }
+            #rooticare-morphology-quick-editor .qe-toolbar { flex-wrap:wrap; }
+            #rooticare-morphology-quick-editor .qe-footer { grid-template-columns:auto minmax(0,1fr); }
+            #rooticare-morphology-quick-editor [data-role=status] { white-space:normal;overflow:visible; }
+
             /* 移出 type 或跨分類的達標格子提示淡黃；選取色交由網站處理。 */
             #right-list .ecg-trend.${CONFIG.hitClass}:not(:has(.idBackground.selectedBackground)) .idBackground:not(.move-out-color) {
                 background-color: ${HIGHLIGHT_COLOR} !important;
@@ -68,26 +77,37 @@
                 background-color: ${RECLASSIFIED_HIGHLIGHT_COLOR} !important;
             }
             #${CONFIG.controlId} {
-                position: absolute;
-                left: 14px;
-                bottom: 16px;
-                z-index: 20;
-                display: inline-flex;
-                align-items: center;
-                gap: 10px;
-                margin: 0;
-                padding: 5px 9px;
-                border: 1px solid #b8c8b2;
-                border-radius: 4px;
-                background: #f6faf4;
-                color: #3d563b;
-                font: 13px/1.3 Arial, sans-serif;
-                white-space: nowrap;
-                cursor: pointer;
+                position: relative; left: auto; bottom: auto; z-index: 1; clear: both;
+                display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px 9px;
+                width: max-content; max-width: calc(100% - 28px); margin: 12px 14px 16px; padding: 6px 9px;
+                box-sizing: border-box; border: 1px solid #dce3d6; border-radius: 8px;
+                background: #fff; color: #374333; box-shadow: 0 3px 14px #24332118;
+                font: 12px/1.45 Arial, "Microsoft JhengHei", sans-serif; cursor: default;
             }
-            #${CONFIG.controlId} label { display: inline-flex; align-items: center; gap: 5px; margin: 0; cursor: pointer; }
-            #${CONFIG.controlId} input[type="checkbox"] { margin: 0; cursor: pointer; }
-            #${CONFIG.heartRateInputId} { width: 54px; box-sizing: border-box; padding: 2px 4px; }
+            #${CONFIG.controlId} * { box-sizing: border-box; }
+            #${CONFIG.controlId} label { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 0; font: inherit; color: inherit; white-space: nowrap; cursor: pointer; }
+            #${CONFIG.controlId} input[type=checkbox] { appearance: auto; position: static; float: none; width: 12px; height: 12px; min-height: 0; margin: 0; accent-color: #779b3a; cursor: pointer; }
+            #${CONFIG.controlId} select, #${CONFIG.controlId} input[type=number] {
+                appearance: auto; position: static; float: none; display: inline-block;
+                width: auto; height: 23px; min-height: 0; margin: 0; padding: 1px 4px;
+                border: 1px solid #dce3d6; border-radius: 4px; background: #fff; color: #374333; font: inherit;
+            }
+            #${CONFIG.controlId} select { cursor: pointer; }
+            #${CONFIG.controlId} input[type=number] { width: 51px; }
+            #${CONFIG.controlId} .thumbnail-batch-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-left: 9px; border-left: 1px solid #e7ece2; }
+            #${CONFIG.controlId} [data-role=batch-label] { min-width: 43px; font-weight: 600; }
+            #${CONFIG.controlId} button {
+                appearance: none; position: static; float: none; display: inline-flex; align-items: center; justify-content: center;
+                width: auto; min-width: 92px; height: 27px; min-height: 0; margin: 0; padding: 0 10px;
+                border: 1px solid #c9d8b7; border-radius: 5px; background: #f0f5e9;
+                color: #526a36; box-shadow: none; font: 600 12px/1 Arial, "Microsoft JhengHei", sans-serif;
+                white-space: nowrap; cursor: pointer; transition: background .12s, border-color .12s;
+            }
+            #${CONFIG.controlId} button:hover { background: #e5eed9; border-color: #a7bd8b; }
+            #${CONFIG.controlId} button:active { background: #dbe7cb; }
+            #${CONFIG.controlId} :is(button,input,select):focus-visible { outline: 2px solid #91ad68; outline-offset: 1px; }
+            #${CONFIG.controlId} :disabled { opacity: .45; cursor: default; }
+            #${CONFIG.controlId} [data-role=batch-status] { color: #7b8574; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
             #rooticare-morphology-quick-editor {
                 box-sizing: border-box; margin: 0 0 7px; padding: 6px 8px 5px;
@@ -111,7 +131,6 @@
             }
             #rooticare-morphology-quick-editor select { cursor: pointer; width: auto; }
             #rooticare-morphology-quick-editor input[type=number] { width: 51px; }
-            #rooticare-morphology-quick-editor [data-role=combination] { font-size: 11px; font-weight: 700; color: #6e7c5a; border-color: transparent; background-color: #f0f3eb; }
             #rooticare-morphology-quick-editor .qe-unit { color: #7f8978; font-size: 11px; }
             #rooticare-morphology-quick-editor [data-role=label] { min-width: 46px; font-weight: 700; }
             #rooticare-morphology-quick-editor .qe-speed { margin-left: 5px; }
@@ -128,113 +147,170 @@
             #rooticare-morphology-quick-editor [data-role=status] { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             #rooticare-morphology-quick-editor [data-role=status] { color: #6c785f; }
         `;
+        style.textContent += '\n#rooticare-morphology-quick-editor .qe-toolbar { flex-wrap:wrap; }\n#rooticare-morphology-quick-editor [data-role=status] { white-space:normal;overflow:visible; }';
         (document.head || document.documentElement).appendChild(style);
     }
+
+    const conditionEditors = new Set();
+    let sharedConditions = [];
+    let syncingConditions = false;
+
+    function synchronizeConditions(source) {
+        if (syncingConditions) return;
+        const settings = readConditions(source.parentElement);
+        sharedConditions = settings.conditions.filter(condition => condition.kind !== 'previous')
+            .map(condition => ({ ...condition }));
+        syncingConditions = true;
+        try {
+            for (const editor of conditionEditors) {
+                if (!editor.isConnected) { conditionEditors.delete(editor); continue; }
+                if (editor === source) continue;
+                const previous = readConditions(editor.parentElement).conditions.filter(condition => condition.kind === 'previous');
+                editor.replaceConditions([...sharedConditions, ...previous]);
+                // 通知另一處的既有處理器暫停並重算；同步鎖避免互相回傳。
+                editor.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        } finally { syncingConditions = false; }
+    }
+
+    function createConditionEditor(parent, allowPrevious, initial = []) {
+        const editor = document.createElement('span');
+        editor.className = 'rc-condition-editor';
+        editor.innerHTML = `<span data-role="conditions"></span><button type="button" data-role="condition-add" aria-label="新增條件" title="新增條件">＋</button><select data-role="condition-menu" aria-label="選擇新增條件" hidden><option value="rate:>=">ECG 變動率 ≥</option><option value="rate:<=">ECG 變動率 ≤</option><option value="bpm:>=">紅點心律 ≥</option><option value="bpm:<=">紅點心律 ≤</option>${allowPrevious ? '<option value="previous:=">前一個點 =</option><option value="previous:!=">前一個點 ≠</option>' : ''}</select>`;
+        const rows = editor.querySelector('[data-role="conditions"]');
+        const menu = editor.querySelector('[data-role="condition-menu"]');
+        const notify = () => editor.dispatchEvent(new Event('change', { bubbles: true }));
+        const addButton = editor.querySelector('[data-role="condition-add"]');
+        const used = (kind, operator, except = null) => [...rows.children].some(row => row !== except
+            && row.dataset.kind === kind && row.querySelector('[data-role="condition-operator"]').value === operator);
+        function refreshAvailability() {
+            for (const option of menu.options) {
+                if (!option.value) continue;
+                const [kind, operator] = option.value.split(':');
+                option.disabled = used(kind, operator);
+            }
+            for (const row of rows.children) {
+                const select = row.querySelector('[data-role="condition-operator"]');
+                for (const option of select.options) option.disabled = used(row.dataset.kind, option.value, row);
+            }
+            addButton.disabled = [...menu.options].filter(option => option.value).every(option => option.disabled);
+            if (addButton.disabled) menu.hidden = true;
+        }
+        function add(condition, announce = true) {
+            if (used(condition.kind, condition.operator) || rows.children.length >= (allowPrevious ? 6 : 4)) return;
+            const row = document.createElement('span');
+            row.className = 'rc-condition';
+            row.dataset.kind = condition.kind;
+            row.innerHTML = `<button type="button" data-role="condition-remove" aria-label="移除此條件" title="移除此條件">×</button><span>${condition.kind === 'rate' ? 'ECG 變動率' : condition.kind === 'bpm' ? '紅點心律' : '前一個點'}</span><select data-role="condition-operator" aria-label="比較方式">${condition.kind === 'previous' ? '<option value="=">=</option><option value="!=">≠</option>' : '<option value=">=">≥</option><option value="<=">≤</option>'}</select>${condition.kind === 'previous' ? '<select data-role="condition-value" aria-label="前一搏分類"><option>V</option><option>S</option><option>N</option></select>' : `<input type="number" data-role="condition-value" aria-label="${condition.kind === 'rate' ? '變動率百分比' : 'BPM 門檻'}" step="${condition.kind === 'rate' ? '0.1' : '1'}" ${condition.kind === 'bpm' ? 'min="1"' : ''}><span class="rc-unit">${condition.kind === 'rate' ? '%' : 'BPM'}</span>`}`;
+            row.querySelector('[data-role="condition-operator"]').value = condition.operator;
+            row.querySelector('[data-role="condition-value"]').value = String(condition.value);
+            row.querySelector('[data-role="condition-remove"]').addEventListener('click', () => {
+                row.remove(); refreshAvailability(); notify();
+            });
+            const operatorSelect = row.querySelector('[data-role="condition-operator"]');
+            let previousOperator = condition.operator;
+            operatorSelect.addEventListener('change', () => {
+                if (used(condition.kind, operatorSelect.value, row)) operatorSelect.value = previousOperator;
+                else previousOperator = operatorSelect.value;
+                refreshAvailability();
+            });
+            rows.appendChild(row);
+            refreshAvailability();
+            if (announce) notify();
+        }
+        function collapseConditionMenu() {
+            menu.hidden = true;
+            addButton.hidden = false;
+            menu.selectedIndex = -1;
+        }
+        addButton.addEventListener('click', () => {
+            refreshAvailability();
+            if (addButton.disabled) return;
+            addButton.hidden = true;
+            menu.hidden = false;
+            menu.selectedIndex = -1;
+            menu.focus();
+            // 在使用者點擊的同一事件中直接開啟原生下拉選單。
+            try { menu.showPicker?.(); } catch (_) { /* 不支援時仍可用鍵盤或點擊選單。 */ }
+        });
+        menu.addEventListener('blur', collapseConditionMenu);
+        menu.addEventListener('change', () => {
+            if (!menu.value) return;
+            const [kind, operator] = menu.value.split(':');
+            add({kind, operator, value: kind === 'rate' ? 12 : kind === 'bpm' ? 100 : 'N'});
+            collapseConditionMenu();
+        });
+        editor.replaceConditions = conditions => {
+            rows.replaceChildren();
+            conditions.forEach(condition => add({ ...condition }, false));
+            refreshAvailability();
+            collapseConditionMenu();
+        };
+        [...sharedConditions, ...initial.filter(condition => condition.kind === 'previous')]
+            .forEach(condition => add({ ...condition }, false));
+        refreshAvailability();
+        menu.selectedIndex = -1;
+        editor.appendChild(rows);
+        parent.appendChild(editor);
+        conditionEditors.add(editor);
+        editor.addEventListener('input', () => synchronizeConditions(editor));
+        editor.addEventListener('change', () => synchronizeConditions(editor));
+        return editor;
+    }
+
+    function readConditions(parent) {
+        const editor = parent?.querySelector('.rc-condition-editor');
+        return {
+            conditions: [...(editor?.querySelectorAll('.rc-condition') || [])].map(row => ({
+                kind: row.dataset.kind,
+                operator: row.querySelector('[data-role="condition-operator"]').value,
+                value: row.dataset.kind === 'previous' ? row.querySelector('[data-role="condition-value"]').value
+                    : Number(row.querySelector('[data-role="condition-value"]').value || NaN),
+            })),
+        };
+    }
+
+    function validConditions(settings) {
+        return settings?.conditions?.length > 0 && settings.conditions.every(condition =>
+            condition.kind === 'previous' ? ['V', 'S', 'N'].includes(condition.value) && ['=', '!='].includes(condition.operator)
+                : ['rate', 'bpm'].includes(condition.kind) && ['>=', '<='].includes(condition.operator)
+                    && Number.isFinite(condition.value) && (condition.kind !== 'bpm' || condition.value > 0));
+    }
+
+    function conditionMatches(metrics, condition) {
+        if (condition.kind === 'previous') {
+            // 不存在前一搏時，不讓 ≠ 誤判成命中。
+            if (!metrics.previousClassification || metrics.previousClassification === '—') return false;
+            return condition.operator === '!=' ? metrics.previousClassification !== condition.value
+                : metrics.previousClassification === condition.value;
+        }
+        const value = condition.kind === 'rate' ? metrics.rate : metrics.bpm;
+        if (value == null || !Number.isFinite(value)) return false;
+        const threshold = condition.kind === 'rate' ? condition.value / 100 : condition.value;
+        return condition.operator === '<=' ? value <= threshold : value >= threshold;
+    }
+
+    function playerMetricText(metrics) {
+        const rr = value => value == null ? '—' : `${Math.round(value)} ms`;
+        return `前一搏 ${metrics.previousClassification || '—'} · RR ${rr(metrics.previousRrMs)} → ${rr(metrics.rrMs)}`;
+    }
+
 
     function ensureControl() {
         const container = document.querySelector('.morphology > .container');
         if (!container) return;
         let control = document.getElementById(CONFIG.controlId);
-        if (!control || control.tagName !== 'DIV') {
-            control?.remove();
-            control = document.createElement('div');
-            control.id = CONFIG.controlId;
-
-            const variabilityGroup = document.createElement('span');
-            variabilityGroup.style.cssText = 'display:inline-flex;align-items:center;gap:5px';
-            const variabilityLabel = document.createElement('label');
-            const variabilityCheckbox = document.createElement('input');
-            variabilityCheckbox.type = 'checkbox';
-            variabilityCheckbox.dataset.mode = 'variability';
-            const variabilityText = document.createElement('span');
-            variabilityText.textContent = 'ECG 變動率';
-            variabilityLabel.append(variabilityCheckbox, variabilityText);
-            const variabilityOperator = document.createElement('select');
-            variabilityOperator.id = CONFIG.variabilityOperatorId;
-            variabilityOperator.setAttribute('aria-label', '變動率比較方式');
-            variabilityOperator.title = '選擇變動率的比較方式';
-            for (const [value, text] of [['>=', '≥'], ['<=', '≤']]) {
-                const option = document.createElement('option');
-                option.value = value;
-                option.textContent = text;
-                variabilityOperator.appendChild(option);
-            }
-            variabilityOperator.value = '>=';
-            variabilityOperator.addEventListener('change', scheduleUpdate);
-            variabilityGroup.append(variabilityLabel, variabilityOperator);
-
-            const heartRateGroup = document.createElement('span');
-            heartRateGroup.style.cssText = 'display:inline-flex;align-items:center;gap:5px';
-            const heartRateLabel = document.createElement('label');
-            const heartRateCheckbox = document.createElement('input');
-            heartRateCheckbox.type = 'checkbox';
-            heartRateCheckbox.dataset.mode = 'heart-rate';
-            const heartRateText = document.createElement('span');
-            heartRateText.textContent = '紅點心律';
-            const operatorSelect = document.createElement('select');
-            operatorSelect.id = CONFIG.heartRateOperatorId;
-            operatorSelect.setAttribute('aria-label', '心律比較方式');
-            operatorSelect.title = '選擇紅點心律的比較方式';
-            for (const [value, text] of [['>=', '≥'], ['<=', '≤']]) {
-                const option = document.createElement('option');
-                option.value = value;
-                option.textContent = text;
-                operatorSelect.appendChild(option);
-            }
-            operatorSelect.value = '>=';
-            const thresholdInput = document.createElement('input');
-            thresholdInput.type = 'number';
-            thresholdInput.id = CONFIG.heartRateInputId;
-            thresholdInput.min = '1';
-            thresholdInput.max = '300';
-            thresholdInput.step = '1';
-            thresholdInput.value = String(DEFAULT_HEART_RATE_THRESHOLD);
-            thresholdInput.title = '紅色點的心律門檻 (BPM)';
-            thresholdInput.setAttribute('aria-label', '紅點心律門檻 (BPM)');
-            const bpmText = document.createElement('span');
-            bpmText.textContent = 'BPM';
-            heartRateLabel.append(heartRateCheckbox, heartRateText);
-            heartRateGroup.append(heartRateLabel, operatorSelect, thresholdInput, bpmText);
-            // 防止拖曳反白輸入值時，事件傳到網站的選取／拖曳處理器。
-            for (const eventName of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'mousemove', 'click', 'dblclick', 'keydown', 'keyup']) {
-                thresholdInput.addEventListener(eventName, event => event.stopPropagation());
-            }
-
-            variabilityCheckbox.addEventListener('change', () => {
-                enabled = variabilityCheckbox.checked;
-                scheduleUpdate();
-            });
-            heartRateCheckbox.addEventListener('change', () => {
-                heartRateEnabled = heartRateCheckbox.checked;
-                scheduleUpdate();
-            });
-            thresholdInput.addEventListener('input', scheduleUpdate);
-            operatorSelect.addEventListener('change', scheduleUpdate);
-
-            const combinationOperator = document.createElement('select');
-            combinationOperator.id = CONFIG.combinationOperatorId;
-            combinationOperator.setAttribute('aria-label', '兩項條件的組合方式');
-            combinationOperator.title = '兩項同時啟用時：AND 需同時符合，OR 符合任一項';
-            for (const value of ['AND', 'OR']) {
-                const option = document.createElement('option');
-                option.value = value;
-                option.textContent = value;
-                combinationOperator.appendChild(option);
-            }
-            combinationOperator.value = 'AND';
-            combinationOperator.addEventListener('change', scheduleUpdate);
-
-            control.append(variabilityGroup, combinationOperator, heartRateGroup);
-        }
-        const variabilityCheckbox = control.querySelector('[data-mode="variability"]');
-        const heartRateCheckbox = control.querySelector('[data-mode="heart-rate"]');
         if (controlContainer && controlContainer !== container) {
-            enabled = false;
-            heartRateEnabled = false;
+            pauseThumbnails('頁面已變更'); control?.remove(); control = null;
+        }
+        if (!control) {
+            control = document.createElement('div'); control.id = CONFIG.controlId;
+            createConditionEditor(control, false);
+            installThumbnailBatchControl(control);
+            control.addEventListener('change', scheduleUpdate);
+            control.addEventListener('input', scheduleUpdate);
         }
         controlContainer = container;
-        if (variabilityCheckbox) variabilityCheckbox.checked = enabled;
-        if (heartRateCheckbox) heartRateCheckbox.checked = heartRateEnabled;
         if (control.parentElement !== container) container.appendChild(control);
     }
 
@@ -249,7 +325,7 @@
             || fill === 'black';
     }
 
-    function findRateHits(operator) {
+    function findRateHits(operator, threshold = CONFIG.threshold) {
         const hits = new Set();
         const thumbnails = [...document.querySelectorAll('#right-list .ecg-trend')];
         for (const thumbnail of thumbnails) {
@@ -274,7 +350,7 @@
 
             // 同一 SVG 的水平座標以固定比例代表時間；換算成毫秒後，比例在變動率中相消。
             const rate = (previousInterval - currentInterval) / currentInterval;
-            if (operator === '<=' ? rate <= CONFIG.threshold : rate >= CONFIG.threshold) hits.add(thumbnail);
+            if (operator === '<=' ? rate <= threshold : rate >= threshold) hits.add(thumbnail);
         }
         return hits;
     }
@@ -338,6 +414,8 @@
 
     const PLAYER_CONTROL_ID = 'rooticare-morphology-quick-editor';
     let playerDialog = null;
+    // 僅保留於目前頁面的腳本執行期；關閉播放器不重設，重新載入網頁才回到 V。
+    let playerTargetLabel = 'V';
     let playerTimer = null;
     let playerRunning = false;
     let playerPending = null;
@@ -394,27 +472,12 @@
         const panel = document.getElementById(PLAYER_CONTROL_ID);
         if (!panel) return null;
         const field = role => panel.querySelector(`[data-role="${role}"]`);
-        return {
-            variability: field('variability').checked,
-            variabilityOperator: field('variability-operator').value,
-            heartRate: field('heart-rate').checked,
-            heartRateOperator: field('heart-rate-operator').value,
-            bpm: Number(field('bpm').value),
-            combination: field('combination').value,
-            label: field('label').value,
-            interval: [10, 20, 40, 100].includes(Number(field('speed')?.value)) ? Number(field('speed').value) : 10,
-        };
+        return { ...readConditions(panel), label: field('label').value,
+            interval: [10, 20, 40, 100].includes(Number(field('speed')?.value)) ? Number(field('speed').value) : 10 };
     }
 
     function validPlayerSettings(settings) {
-        if (!settings || (!settings.variability && !settings.heartRate)) {
-            playerStatus('請至少勾選一項篩選條件');
-            return false;
-        }
-        if (settings.heartRate && (!Number.isFinite(settings.bpm) || settings.bpm <= 0)) {
-            playerStatus('請輸入大於 0 的 BPM 門檻');
-            return false;
-        }
+        if (!validConditions(settings)) { playerStatus('請新增至少一項條件並輸入有效數值'); return false; }
         return ['V', 'S', 'N', 'A'].includes(settings.label);
     }
 
@@ -453,6 +516,9 @@
         const previousInterval = beforePrevious ? previous.x - beforePrevious.x : 0;
         return {
             classification: current.classification,
+            previousClassification: previous?.classification || null,
+            rrMs: interval > 0 ? interval * duration / width * 1000 : null,
+            previousRrMs: previousInterval > 0 ? previousInterval * duration / width * 1000 : null,
             // 縮圖非目前心搏的黑點不等於 N；相鄰 V/S/A 也應以實際間距計算。
             displayBpm: interval > 0 ? Math.round(60 * width / (interval * duration)) : null,
             displayRate: interval > 0 && previousInterval > 0 ? (previousInterval - interval) / interval : null,
@@ -490,6 +556,9 @@
         const rate = interval > 0 && precedingInterval > 0 ? (precedingInterval - interval) / interval : null;
         return { player, item, progress, target, metrics: {
             classification: ({ N: 'N', A: 'S', V: 'V', X: 'A' })[beats[index].type],
+            previousClassification: previous ? ({ N: 'N', A: 'S', V: 'V', X: 'A' })[previous.type] : null,
+            rrMs: interval > 0 ? interval / sampleRate * 1000 : null,
+            previousRrMs: precedingInterval > 0 ? precedingInterval / sampleRate * 1000 : null,
             displayBpm: bpm, displayRate: rate,
             // 黑點表示非目前目標，不代表 N；不能因前一搏為 V/S/A 而排除。
             bpm, rate,
@@ -497,12 +566,8 @@
     }
 
     function playerMatches(metrics, settings) {
-        const compare = (value, threshold, operator) => value !== null
-            && (operator === '<=' ? value <= threshold : value >= threshold);
-        const rateHit = settings.variability && compare(metrics.rate, CONFIG.threshold, settings.variabilityOperator);
-        const bpmHit = settings.heartRate && compare(metrics.bpm, settings.bpm, settings.heartRateOperator);
-        if (settings.variability && settings.heartRate) return settings.combination === 'OR' ? rateHit || bpmHit : rateHit && bpmHit;
-        return settings.variability ? rateHit : bpmHit;
+        if (!validConditions(settings)) return false;
+        return settings.conditions.every(condition => conditionMatches(metrics, condition));
     }
 
     function pauseNativePlayer(dialog) {
@@ -603,7 +668,7 @@
         const bpmText = metrics.displayBpm === null ? '—' : String(metrics.displayBpm);
         const rateText = metrics.displayRate === null ? '—' : `${(metrics.displayRate * 100).toFixed(1)}%`;
         playerViewedSignature = position.signature;
-        playerLiveText = `${position.index}/${position.total} · ${metrics.classification}${hit ? `→${settings.label}` : ''} · BPM ${bpmText} · 變動率 ${rateText}`;
+        playerLiveText = `${position.index}/${position.total} · ${metrics.classification}${hit ? `→${settings.label}` : ''} · BPM ${bpmText} · 變動率 ${rateText} · ${playerMetricText(metrics)}`;
         playerStatus(hit ? '修改' : '跳過', true);
         if (position.index === position.total) {
             pausePlayer('完成 · 請檢查後 Save');
@@ -627,7 +692,7 @@
             playerViewedSignature = position?.signature || '';
             const bpm = metrics?.displayBpm == null ? '—' : String(metrics.displayBpm);
             const rate = metrics?.displayRate == null ? '—' : `${(metrics.displayRate * 100).toFixed(1)}%`;
-            playerLiveText = `${position ? `${position.index}/${position.total}` : '—'} · ${metrics?.classification || '—'} · BPM ${bpm} · 變動率 ${rate}`;
+            playerLiveText = `${position ? `${position.index}/${position.total}` : '—'} · ${metrics?.classification || '—'} · BPM ${bpm} · 變動率 ${rate} · ${metrics ? playerMetricText(metrics) : '前一搏 — · RR —'}`;
             playerStatus(metrics ? playerStatusMessage : '等待 ECG 載入…');
         } catch (error) {
             playerLiveText = 'BPM — · 變動率 —';
@@ -687,17 +752,7 @@
         panel.id = PLAYER_CONTROL_ID;
         panel.innerHTML = `
             <div class="qe-toolbar"><div class="qe-row">
-                <span class="qe-caption">篩選</span>
-                <div class="qe-condition">
-                    <label><input type="checkbox" data-role="variability"> ECG 變動率</label>
-                    <select data-role="variability-operator" aria-label="播放器變動率比較方式"><option value=">=">≥</option><option value="<=">≤</option></select><span class="qe-unit">12%</span>
-                </div>
-                <select data-role="combination" aria-label="播放器條件組合"><option>AND</option><option>OR</option></select>
-                <div class="qe-condition">
-                    <label><input type="checkbox" data-role="heart-rate"> 紅點心律</label>
-                    <select data-role="heart-rate-operator" aria-label="播放器心律比較方式"><option value=">=">≥</option><option value="<=">≤</option></select>
-                    <input type="number" data-role="bpm" aria-label="播放器 BPM 門檻" min="1" max="300" step="1" value="100"><span class="qe-unit">BPM</span>
-                </div>
+                <span data-role="player-conditions"></span>
             </div>
             <div class="qe-row qe-actions">
                 <label><span class="qe-caption">改為</span><select data-role="label" aria-label="目標分類"><option value="V">V</option><option value="S">S</option><option value="N">N</option><option value="A">A</option></select></label>
@@ -705,25 +760,23 @@
                 <div class="qe-buttons"><button type="button" data-role="play" data-running="false">▶ 播放</button></div>
             </div>
             </div><div class="qe-footer"><span class="qe-counts"><span>修改 <b data-role="changed-count">0</b></span><span>跳過 <b data-role="skipped-count">0</b></span></span><span data-role="status">待命 · BPM — · 變動率 — · Esc 暫停</span></div>`;
-        const source = document.getElementById(CONFIG.controlId);
-        if (source) {
-            panel.querySelector('[data-role="variability"]').checked = enabled;
-            panel.querySelector('[data-role="heart-rate"]').checked = heartRateEnabled;
-            for (const [role, id] of [['variability-operator', CONFIG.variabilityOperatorId], ['heart-rate-operator', CONFIG.heartRateOperatorId], ['combination', CONFIG.combinationOperatorId], ['bpm', CONFIG.heartRateInputId]]) {
-                const original = document.getElementById(id);
-                if (original) panel.querySelector(`[data-role="${role}"]`).value = original.value;
-            }
-        }
-        panel.querySelector('[data-role="heart-rate"]').parentElement.title = '播放器以中央目標心搏計算，對應縮圖紅點';
+        const sourceSettings = readConditions(document.getElementById(CONFIG.controlId));
+        const editor = createConditionEditor(panel.querySelector('[data-role="player-conditions"]'), true, sourceSettings.conditions);
         // 原站 keydown 在 document；表單操作不得傳入分類/導覽快捷鍵處理器。
         for (const name of ['keydown', 'keyup', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick']) {
             panel.addEventListener(name, event => event.stopPropagation());
         }
+        const targetLabel = panel.querySelector('[data-role="label"]');
+        targetLabel.value = playerTargetLabel;
+        targetLabel.addEventListener('change', () => {
+            if (['V', 'S', 'N', 'A'].includes(targetLabel.value)) playerTargetLabel = targetLabel.value;
+        });
         panel.addEventListener('change', () => pausePlayer('設定已變更，請重新播放'));
         panel.addEventListener('input', () => pausePlayer('設定已變更，請重新播放'));
         panel.querySelector('[data-role="play"]').addEventListener('click', () => {
             if (playerRunning) { pausePlayer(); refreshPlayerView(); return; }
             if (!validPlayerSettings(readPlayerSettings())) return;
+            if (thumbnailRun) pauseThumbnails('播放器已啟動，縮圖批次已暫停');
             playerRunning = true;
             playerPending = null;
             playerLoadingSince = 0;
@@ -736,47 +789,241 @@
         watchPlayerView(dialog);
     }
 
-    function update() {
-        ensureControl();
-        ensurePlayerControl();
-        const thumbnails = document.querySelectorAll('#right-list .ecg-trend');
-        thumbnails.forEach(thumb => thumb.classList.remove(
-            CONFIG.hitClass,
-            CONFIG.reclassifiedClass
-        ));
-        if (!enabled && !heartRateEnabled) return;
+    // 縮圖批次修改：每次只操作已核對原始資料的目前頁，沿用網站選取與分類流程。
+    let thumbnailRun = null;
+    let thumbnailTimer = null;
+    let thumbnailEpoch = 0;
+    let thumbnailChanged = 0;
+    let thumbnailPages = 0;
 
-        const thresholdInput = document.getElementById(CONFIG.heartRateInputId);
-        const operatorSelect = document.getElementById(CONFIG.heartRateOperatorId);
-        const variabilityOperator = document.getElementById(CONFIG.variabilityOperatorId);
-        const thresholdBpm = Number(thresholdInput?.value);
-        const validHeartRateThreshold = Number.isFinite(thresholdBpm) && thresholdBpm > 0;
-        const combinationOperator = document.getElementById(CONFIG.combinationOperatorId);
+    function thumbnailStatus(message) {
+        const status = document.querySelector(`#${CONFIG.controlId} [data-role="batch-status"]`);
+        if (status) status.textContent = `修改 ${thumbnailChanged} · 頁 ${thumbnailPages} · ${message}`;
+    }
 
-        // 單項啟用使用該項結果；兩項啟用按 AND 取交集或 OR 取聯集。
-        // 無效 BPM 門檻視為該項無命中，OR 仍可顯示變動率命中。
-        const currentCategory = getCurrentCategory();
-        const variabilityHits = enabled ? findRateHits(variabilityOperator?.value) : new Set();
-        const heartRateHits = heartRateEnabled && validHeartRateThreshold
-            ? findHeartRateHits(thresholdBpm, operatorSelect?.value)
-            : new Set();
-        let hits;
-        if (enabled && heartRateEnabled) {
-            hits = combinationOperator?.value === 'OR'
-                ? new Set([...variabilityHits, ...heartRateHits])
-                : new Set([...variabilityHits].filter(thumb => heartRateHits.has(thumb)));
-        } else {
-            hits = enabled ? variabilityHits : heartRateHits;
+    function pauseThumbnails(message = '已暫停') {
+        thumbnailRun = null;
+        thumbnailEpoch++;
+        clearTimeout(thumbnailTimer);
+        thumbnailTimer = null;
+        const button = document.querySelector(`#${CONFIG.controlId} [data-role="batch-play"]`);
+        if (button) button.textContent = '▶ 批次修改';
+        thumbnailStatus(message);
+    }
+
+    function readThumbnailSettings() {
+        return { ...readConditions(document.getElementById(CONFIG.controlId)),
+            label: document.querySelector(`#${CONFIG.controlId} [data-role="batch-label"]`)?.value,
+            interval: [10, 20, 40, 100].includes(Number(document.querySelector(`#${CONFIG.controlId} [data-role="batch-speed"]`)?.value))
+                ? Number(document.querySelector(`#${CONFIG.controlId} [data-role="batch-speed"]`)?.value) : 10 };
+    }
+
+    function thumbnailScope() {
+        return window.angular?.element(document.querySelector('.morphology > .container')).scope?.();
+    }
+
+    function readThumbnailPage(scope) {
+        const model = scope?.morphology;
+        const page = Number(model?.pagination?.currentPage);
+        const total = Number(model?.pagination?.pageCount);
+        const size = Number(model?.pagination?.itemsPerPage);
+        if (!Number.isInteger(page) || page < 1 || !Number.isInteger(total) || total < page
+            || !Number.isInteger(size) || size < 1) return null;
+        const segments = model.state.currentSegments;
+        const thumbs = [...document.querySelectorAll('#right-list .ecg-trend')];
+        if (!Array.isArray(segments) || !segments.length || thumbs.length !== segments.length
+            || Object.values(model.loading || {}).some(Boolean)) return null;
+        const chart = model.ecgEnlargedChart;
+        const offset = (page - 1) * size;
+        const entries = [];
+        for (let i = 0; i < thumbs.length; i++) {
+            const wave = thumbs[i].querySelector('.ecgWave');
+            const bound = window.angular.element(wave).isolateScope?.();
+            const segmentScope = window.angular.element(thumbs[i]).scope?.();
+            const segment = segments[i];
+            const data = chart.ecgData[offset + i];
+            const info = chart.information?.posInfo?.[offset + i];
+            // 翻頁先更換 segment、稍後才重畫；所有繫結一致後才允許判斷。
+            if (!data || !info || !Number.isFinite(Number(segment.absoluteIndex))
+                || Number(info.absoluteIndex) !== Number(segment.absoluteIndex)
+                || segmentScope?.segment !== segment
+                || !chart.waveformData[i]?.length
+                // Morphology 縮圖的 labels 是以絕對取樣索引為鍵的物件；播放器才使用陣列。
+                || !chart.annoData[i] || typeof chart.annoData[i] !== 'object'
+                || (!Array.isArray(chart.annoData[i])
+                    && !Object.prototype.hasOwnProperty.call(chart.annoData[i], segment.absoluteIndex))
+                || bound?.ecgData !== chart.waveformData[i] || bound?.annoData !== chart.annoData[i]
+                || bound?.posInfo !== info || !wave.querySelector('circle.anno-dot.current')) return null;
+            entries.push({ thumb: thumbs[i], segment, data, index: offset + i });
         }
-        hits.forEach(thumb => {
-            thumb.classList.add(CONFIG.hitClass);
+        return { page, total, entries, signature: `${page}:${segments.map(s => s.absoluteIndex).join(',')}` };
+    }
 
-            // 與目前上方選取的分類比較；同分類維持淡藍，跨分類才淡黃。
-            const classification = getClassification(thumb);
-            if (currentCategory && classification && classification !== currentCategory) {
-                thumb.classList.add(CONFIG.reclassifiedClass);
+    function thumbnailHits(settings) {
+        if (!validConditions(settings)) return new Set();
+        const sets = settings.conditions.map(condition => condition.kind === 'rate'
+            ? findRateHits(condition.operator, condition.value / 100)
+            : findHeartRateHits(condition.value, condition.operator));
+        return new Set([...sets[0]].filter(thumb => sets.every(set => set.has(thumb))));
+    }
+
+    function selectThumbnailBatch(scope, page, targets) {
+        const desired = new Set(targets.map(entry => entry.segment));
+        // 原站以 document 的按鍵狀態決定是否多選，單純 click.ctrlKey 不足以累加選取。
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Control', code: 'ControlLeft', keyCode: 17, which: 17, ctrlKey: true, bubbles: true,
+        }));
+        try {
+            scope.$apply(() => {
+                scope.focusRight();
+                // 包含其他頁的既有選取，避免分類按鈕順帶修改非命中項目。
+                for (const segment of scope.morphology.state.selectedSegments.slice()) {
+                    const index = scope.morphology.ecgEnlargedChart.information.posInfo
+                        .findIndex(info => Number(info.absoluteIndex) === Number(segment.absoluteIndex));
+                    if (index < 0) throw new Error('無法定位既有選取');
+                    scope.selectEcg(segment, index);
+                }
+                for (const entry of targets) scope.selectEcg(entry.segment, entry.index);
+            });
+        } finally {
+            document.dispatchEvent(new KeyboardEvent('keyup', {
+                key: 'Control', code: 'ControlLeft', keyCode: 17, which: 17, bubbles: true,
+            }));
+        }
+        const selected = scope.morphology.state.selectedSegments;
+        if (scope.morphology.state.focus !== 'right' || selected.length !== desired.size
+            || selected.some(segment => !desired.has(segment))
+            || page.entries.some(entry => Boolean(entry.data.selected) !== desired.has(entry.segment))) {
+            throw new Error('網站未確認正確選取');
+        }
+    }
+
+    function scheduleThumbnailStep(epoch) {
+        thumbnailTimer = setTimeout(() => thumbnailStep(epoch), thumbnailRun?.settings.interval || 10);
+    }
+
+    function thumbnailStep(epoch) {
+        if (!thumbnailRun || epoch !== thumbnailEpoch) return;
+        try {
+            const run = thumbnailRun;
+            if (document.hidden || document.querySelector('.ngdialog')
+                || !document.getElementById(CONFIG.controlId)?.isConnected) {
+                pauseThumbnails('視窗開啟、頁面隱藏或離開 Morphology，已暫停'); return;
             }
+            const scope = thumbnailScope();
+            const model = scope?.morphology;
+            if (!model || model !== run.model || model.state.label !== run.category
+                || model.state.type !== run.type || model.state.multipleTypesSelected
+                || model.state.classificationMode || model.compareMode?.selectMode) {
+                pauseThumbnails('分類、type 或選取模式變更，已暫停'); return;
+            }
+            if (Number(model.pagination.currentPage) !== run.expectedPage) {
+                pauseThumbnails('頁碼被改變，已暫停'); return;
+            }
+            const page = readThumbnailPage(scope);
+            if (!page) {
+                if (Date.now() - run.waitSince > 15000) { pauseThumbnails('資料未同步，未修改本頁'); return; }
+                thumbnailStatus('等待縮圖資料同步…'); scheduleThumbnailStep(epoch); return;
+            }
+            // 至少兩次讀取相同頁面，讓 Angular/D3 完成本次重畫。
+            if (run.stableSignature !== page.signature) {
+                run.stableSignature = page.signature; scheduleThumbnailStep(epoch); return;
+            }
+            if (!run.applied) {
+                const hits = thumbnailHits(run.settings);
+                const targets = page.entries.filter(entry => hits.has(entry.thumb)
+                    && (entry.segment.modifiedLabel || entry.segment.label) !== run.settings.label);
+                selectThumbnailBatch(scope, page, targets);
+                if (targets.length) {
+                    const button = document.querySelector(`.right-content [ng-click="changeLabel('right-${run.settings.label}')"]`);
+                    if (!button || button.classList.contains('disabled')) throw new Error('找不到可用分類按鈕');
+                    button.click();
+                    if (targets.some(entry => (entry.segment.modifiedLabel || entry.segment.label) !== run.settings.label)
+                        || model.state.selectedSegments.length) throw new Error('網站未確認分類，請檢查目前頁');
+                    thumbnailChanged += targets.length;
+                }
+                thumbnailPages++;
+                run.applied = true;
+                run.appliedSignature = page.signature;
+                thumbnailStatus(`${page.page}/${page.total} · 本頁完成`);
+                // 分類造成頁面縮減時停下，避免位移後跳過未處理心搏。
+                if (model.state.type !== run.type || model.state.label !== run.category) {
+                    pauseThumbnails('目前 type 已結束 · 請檢查後 Save'); return;
+                }
+                const after = readThumbnailPage(scope);
+                if (after && after.signature !== page.signature) {
+                    pauseThumbnails('分類後清單位置改變，請檢查後重新播放'); return;
+                }
+                scheduleThumbnailStep(epoch); return;
+            }
+            if (page.signature !== run.appliedSignature) {
+                pauseThumbnails('分類後清單位置改變，請檢查後重新播放'); return;
+            }
+            if (page.page >= page.total) { pauseThumbnails('已到最後一頁 · 請檢查後 Save'); return; }
+            const next = document.querySelector('.pagination-container [ng-click="selectPage(page + 1, $event)"], .pagination [ng-click="selectPage(page + 1, $event)"]');
+            if (!next || next.closest('.disabled') || next.hasAttribute('disabled')) throw new Error('無法翻到下一頁');
+            run.expectedPage = page.page + 1;
+            run.stableSignature = '';
+            run.applied = false;
+            run.waitSince = Date.now();
+            next.click();
+            if (Number(model.pagination.currentPage) !== run.expectedPage) throw new Error('網站未確認翻頁');
+            scheduleThumbnailStep(epoch);
+        } catch (error) {
+            console.warn('[RootiCare 縮圖批次修改]', error);
+            pauseThumbnails(`已暫停：${error.message}`);
+        }
+    }
 
+    function startThumbnails() {
+        const settings = readThumbnailSettings();
+        const scope = thumbnailScope();
+        const model = scope?.morphology;
+        if (!validConditions(settings)) { thumbnailStatus('請新增至少一項條件並輸入有效數值'); return; }
+        if (!['V', 'S', 'N', 'A'].includes(settings.label) || !model?.state?.type
+            || typeof scope.selectEcg !== 'function' || typeof scope.focusRight !== 'function'
+            || model.state.multipleTypesSelected || model.state.classificationMode || model.compareMode?.selectMode
+            || document.querySelector('.ngdialog')) { thumbnailStatus('請選取單一 type 並關閉其他模式／視窗'); return; }
+        if (settings.label === 'N' && model.content?.disableN) { thumbnailStatus('網站目前禁止改為 N'); return; }
+        pausePlayer('縮圖批次修改中');
+        thumbnailEpoch++;
+        thumbnailRun = { model, settings, category: model.state.label, type: model.state.type,
+            expectedPage: Number(model.pagination.currentPage), waitSince: Date.now(), stableSignature: '', applied: false };
+        document.querySelector(`#${CONFIG.controlId} [data-role="batch-play"]`).textContent = 'Ⅱ 暫停';
+        thumbnailStep(thumbnailEpoch);
+    }
+
+    function installThumbnailBatchControl(control) {
+        const group = document.createElement('span');
+        group.className = 'thumbnail-batch-actions';
+        group.innerHTML = `<label>改為 <select data-role="batch-label" aria-label="縮圖批次目標分類"><option>V</option><option>S</option><option>N</option><option>A</option></select></label><label>速度 <select data-role="batch-speed" aria-label="縮圖批次修改速度" title="每次檢查／處理的排程間隔，資料未同步時會等待"><option value="10" selected>10 ms</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="100">100 ms</option></select></label><button type="button" data-role="batch-play">▶ 批次修改</button>`;
+        control.appendChild(group);
+        const status = document.createElement('span');
+        status.dataset.role = 'batch-status';
+        status.textContent = '待命 · Esc 暫停';
+        group.appendChild(status);
+        for (const name of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'keydown', 'keyup']) {
+            control.addEventListener(name, event => event.stopPropagation());
+        }
+        for (const name of ['change', 'input']) control.addEventListener(name, () => {
+            if (thumbnailRun) pauseThumbnails('設定已變更，請重新播放');
+        });
+        group.querySelector('[data-role="batch-play"]').addEventListener('click', () => {
+            if (thumbnailRun) pauseThumbnails(); else startThumbnails();
+        });
+    }
+
+
+    function update() {
+        ensureControl(); ensurePlayerControl();
+        document.querySelectorAll('#right-list .ecg-trend').forEach(thumb => thumb.classList.remove(CONFIG.hitClass, CONFIG.reclassifiedClass));
+        const settings = readThumbnailSettings();
+        if (!validConditions(settings)) return;
+        const category = getCurrentCategory();
+        thumbnailHits(settings).forEach(thumb => {
+            thumb.classList.add(CONFIG.hitClass);
+            const classification = getClassification(thumb);
+            if (category && classification && classification !== category) thumb.classList.add(CONFIG.reclassifiedClass);
         });
     }
 
@@ -849,6 +1096,24 @@
         }, true);
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) pausePlayer('頁面隱藏，已暫停');
+        });
+        document.addEventListener('keydown', event => {
+            if (!thumbnailRun || !event.isTrusted) return;
+            if (event.key === 'Escape') {
+                pauseThumbnails();
+                event.preventDefault();
+                event.stopImmediatePropagation();
+            } else if (!event.target.closest?.(`#${CONFIG.controlId}`)) {
+                pauseThumbnails('手動操作，已暫停');
+            }
+        }, true);
+        document.addEventListener('pointerdown', event => {
+            if (thumbnailRun && event.isTrusted && !event.target.closest?.(`#${CONFIG.controlId}`)) {
+                pauseThumbnails('手動操作，已暫停');
+            }
+        }, true);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden && thumbnailRun) pauseThumbnails('頁面隱藏，已暫停');
         });
         window.addEventListener('resize', scheduleUpdate);
         window.visualViewport?.addEventListener('resize', scheduleUpdate);

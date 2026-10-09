@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.21
+// @version      2.22
 // @description  檢查 RootiCare Report 的 R-R、Max. sinus 標籤與 VT（含最長 VT）的 HR 範圍是否全部低於 100 bpm，以及 Specifics Note 與 Summary 的雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -28,6 +28,7 @@
             '[ng-repeat="arrData in af.printDialog.longestVTTms track by $index"]',
             '[ng-repeat="arrData in af.printDialog.fastestAvgVTTms track by $index"]',
             '[ng-repeat="arrData in af.printDialog.firstVT track by $index"]',
+            '[ng-repeat="pageData in af.printPartitionData.vtData track by $index"] [ng-repeat="arrData in pageData track by $index"]',
         ].join(', '),
         vtStatSelector: `[ng-show="checkEventStat('vt', arrData.tms)"]`,
         maxSinusSelector: '[ng-show="af.record.maxSinusHR.time > 0"]',
