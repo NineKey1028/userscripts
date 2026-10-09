@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NovelAI Prompt Weight Hotkeys
 // @namespace    https://novelai.net/
-// @version      2.2.4
-// @description  Ctrl+Up/Down: weight; Ctrl+Alt+C: toggle the entire editor's weight format.
+// @version      2.3.3
+// @description  Weight hotkeys, whole-editor format conversion, and merged positive-prompt copy without style chunks.
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/novelai
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/novelai/NovelAI-Prompt-Weight-Hotkeys.user.js
@@ -176,4 +176,216 @@
   window.addEventListener('keydown',handler,true);
   window.addEventListener('pointerdown',()=>revision++,true);
   window.addEventListener('keydown',()=>revision++,true);
+
+  // Copy reads only the named positive editors, never the hidden UC editors.
+  let siteRequire;
+  const copyChunks = new Map();
+  function getChunkRecords() {
+    // Read the same loaded Jotai atom used by the image page. No network,
+    // account credentials, decryption, or Prompt Chunks panel is needed.
+    if (!siteRequire) {
+      const chunks = window.webpackChunk_N_E;
+      if (!chunks?.push) throw new Error('NovelAI 的 Chunk 資料尚未就緒，請稍後再試。');
+      const marker = `nai-prompt-copy-${Date.now()}-${Math.random()}`;
+      chunks.push([[marker], {}, require => { siteRequire = require; }]);
+      // Remove only our registration record; keep the site's chunk queue intact.
+      const index = chunks.findIndex(entry => entry?.[0]?.[0] === marker);
+      if (index >= 0) chunks.splice(index, 1);
+    }
+    if (!siteRequire) throw new Error('無法讀取 NovelAI 的 Chunk 資料。');
+    // These module exports were checked against NovelAI's current image build.
+    // Discover matching factories if a later build renumbers the modules.
+    const factories = siteRequire.m || {};
+    let stateId = '68898', storeId = '24554';
+    if (!factories[stateId]?.toString().includes('lA:')) {
+      stateId = Object.keys(factories).find(id => {
+        const code = factories[id].toString();
+        return code.includes('lA:') && code.includes('Nn:') && code.includes('.eU)');
+      });
+    }
+    if (!factories[storeId]?.toString().includes('.y$)()')) {
+      storeId = Object.keys(factories).find(id => {
+        const code = factories[id].toString();
+        return code.length < 300 && code.includes('A:') && code.includes('.y$)()');
+      });
+    }
+    if (!stateId || !storeId) throw new Error('NovelAI 的 Chunk 資料介面已變更，請更新腳本。');
+    const atom = siteRequire(stateId).lA;
+    const store = siteRequire(storeId).A;
+    const records = atom && store?.get?.(atom);
+    if (!Array.isArray(records)) throw new Error('NovelAI 正在載入 Chunk 資料，請稍後再試。');
+    if (!records.every(item => item && typeof item.id === 'string' && typeof item.label === 'string' && (item.isCategory === undefined || typeof item.isCategory === 'boolean'))) {
+      throw new Error('NovelAI 的 Chunk 資料格式已變更，請更新腳本。');
+    }
+    return records;
+  }
+  function refreshChunkCategories() {
+    const records = getChunkRecords();
+    copyChunks.clear();
+    for (const chunk of records.filter(item => !item.isCategory)) {
+      const category = records.find(item => item.isCategory && item.id !== 'default' && item.childOrder?.includes(chunk.id));
+      copyChunks.set(chunk.id, {chunk, category:category?.label || ''});
+    }
+  }
+  function expandCopyChunk(id, active = new Set()) {
+    const entry = copyChunks.get(id);
+    if (!entry) throw new Error('有插入的 Chunk 不在目前資料清單中，請重新插入該 Chunk 後再試。');
+    if (entry.category.trim().toLowerCase() === 'style') return ',';
+    if (active.has(id)) throw new Error(`Chunk「${entry.chunk.label}」有循環引用，請先修正。`);
+    const next = new Set(active); next.add(id);
+    const expansion = entry.chunk.expansion;
+    if (typeof expansion !== 'string') throw new Error('Chunk 的 prompt 內容格式無法辨識。');
+    return `, ${expansion.replace(/⌜macro:([^⌟]+)⌟|!macro:([^!]+)!/g, (_, referenceId, label) => {
+      const targetId = referenceId || Array.from(copyChunks.values()).find(item => item.chunk.label === label.trim())?.chunk.id;
+      return expandCopyChunk(targetId, next);
+    })}, `;
+  }
+  function readCopyEditor(editor) {
+    function read(node) {
+      if (node.nodeType === 3) return node.data;
+      if (node.nodeType !== 1) return '';
+      if (node.hasAttribute('data-macro-expansion')) {
+        return expandCopyChunk(node.getAttribute('data-macro-id'));
+      }
+      if (node.tagName === 'BR') return '\n';
+      const text = Array.from(node.childNodes, read).join('');
+      return /^(P|DIV|LI)$/.test(node.tagName) ? text + '\n' : text;
+    }
+    return read(editor);
+  }
+  function mergeCopyPrompts(prompts) {
+    const seen = new Set();
+    function merge(text) {
+      // Keep surviving tags inside their original weight group. First occurrence wins.
+      const candidates = [...groups(text, 'comfy')];
+      const weights = [];
+      for (let i = 0; i < text.length; i++) {
+        if (escaped(text, i)) continue;
+        const opening = (!i || !/[\w.:+-]/.test(text[i-1])) && new RegExp('^' + number + '::').exec(text.slice(i));
+        if (opening) {
+          weights.push({start:i, bodyStart:i+opening[0].length});
+          i += opening[0].length-1;
+        } else if (text.slice(i,i+2) === '::') {
+          const group = weights.pop();
+          if (!group) throw new Error('提示詞有未配對的 ::，請先修正權重格式再複製。');
+          candidates.push({...group, bodyEnd:i, end:i+2});
+          i++;
+        }
+      }
+      if (weights.length) throw new Error('提示詞有未結束的權重群組，請先補上 :: 再複製。');
+      const stack = [];
+      for (let i = 0; i < text.length; i++) {
+        if (escaped(text, i)) continue;
+        if (text[i] === '{' || text[i] === '[') stack.push(i);
+        else if (stack.length && (text[i] === '}' || text[i] === ']')) {
+          const start = stack[stack.length - 1];
+          if ((text[start] === '{' ? '}' : ']') === text[i]) {
+            stack.pop(); candidates.push({start, end:i+1, bodyStart:start+1, bodyEnd:i});
+          }
+        }
+      }
+      const outer = candidates.filter(g => !candidates.some(h => h !== g && h.start <= g.start && h.end >= g.end && (h.start < g.start || h.end > g.end)))
+        .sort((a,b) => a.start-b.start);
+      const output = [];
+      function plain(value, offset) {
+        // Commas inside literal parentheses are part of that tag.
+        let depth = 0, start = 0;
+        for (let i = 0; i <= value.length; i++) {
+          if (!escaped(value, i)) {
+            if (value[i] === '(') depth++;
+            if (value[i] === ')') depth = Math.max(0, depth-1);
+          }
+          if (i !== value.length && ((![',', '\n'].includes(value[i])) || depth)) continue;
+          const raw = value.slice(start, i);
+          const tagStart = offset + start + (raw.match(/^\s*/)?.[0].length || 0);
+          const tagEnd = offset + i - (raw.match(/\s*$/)?.[0].length || 0);
+          const tag = raw.trim().replace(/[^\S\n]+/g, ' ');
+          start = i+1;
+          const key = tag.replace(/\\([()])/g, '$1').replace(/\s+/g, ' ').toLowerCase();
+          if (!tag || /^(girl|boy)$/.test(key) || seen.has(key)) continue;
+          seen.add(key); output.push({start:tagStart, end:tagEnd, text:tag});
+        }
+      }
+      let cursor = 0;
+      for (const g of outer) {
+        if (g.start < cursor) continue;
+        plain(text.slice(cursor, g.start), cursor);
+        const body = merge(text.slice(g.bodyStart, g.bodyEnd));
+        if (body) output.push({start:g.start, end:g.end, text:text.slice(g.start, g.bodyStart) + body + text.slice(g.bodyEnd, g.end)});
+        cursor = g.end;
+      }
+      plain(text.slice(cursor), cursor);
+      // Keep line boundaries (including blank lines) between surviving tags.
+      return output.map((item, index) => {
+        if (!index) return item.text;
+        const breaks = text.slice(output[index-1].end, item.start).match(/\n/g)?.length || 0;
+        return ',' + (breaks ? '\n'.repeat(breaks) : ' ') + item.text;
+      }).join('');
+    }
+    return prompts.map(text => merge(text.replace(/\r\n?/g, '\n'))).filter(Boolean).join(',\n');
+  }
+  function positiveCopyEditors(base) {
+    // Desktop/mobile mirrors share classes. Use the smallest common prompt area.
+    let scope = base.parentElement;
+    while (scope.parentElement && !scope.querySelector('[class*="prompt-input-box-character-prompts-"]')) scope = scope.parentElement;
+    const characters = Array.from(scope.querySelectorAll('[data-prompt-input]')).map(box => {
+      const match = Array.from(box.classList).map(c => /^prompt-input-box-character-prompts-(\d+)$/.exec(c)).find(Boolean);
+      if (!match) return null;
+      const card = box.closest('.character-prompt-input');
+      // NovelAI sets this card's own opacity to 1 (enabled) or 0.5 (disabled).
+      // Collapsing an enabled card hides its editor, so visibility is not a toggle.
+      if (!card || !['1', '0.5'].includes(card.style.opacity)) {
+        throw new Error(`無法確認 Character ${match[1]} 是否啟用，請重新整理頁面後再試。`);
+      }
+      return {index:Number(match[1]), editor:box.querySelector('.ProseMirror'), enabled:card.style.opacity === '1'};
+    }).filter(item => item?.editor).sort((a,b) => a.index-b.index);
+    const unique = new Map();
+    for (const item of characters) if (!unique.has(item.index)) unique.set(item.index, item);
+    return [base.querySelector('.ProseMirror'), ...Array.from(unique.values()).filter(item => item.enabled).map(item => item.editor)].filter(Boolean);
+  }
+  async function copyPositivePrompts(base, button) {
+    try {
+      const editors = positiveCopyEditors(base);
+      if (editors.some(editor => editor.querySelector('[data-macro-id]'))) refreshChunkCategories();
+      let text = mergeCopyPrompts(editors.map(readCopyEditor));
+      if (!text) throw new Error('統整後沒有可複製的 tag。');
+      if (!/[,.]$/.test(text)) text += ',';
+      await navigator.clipboard.writeText(text);
+      button.textContent = '已複製';
+      button.title = text;
+    } catch (error) {
+      button.textContent = '複製未完成';
+      button.title = error.message;
+      window.alert(error.message);
+    }
+    setTimeout(() => { if (button.isConnected) button.textContent = '統整並複製'; }, 2200);
+  }
+  function mountCopyButtons() {
+    for (const base of document.querySelectorAll('.prompt-input-box-base-prompt')) {
+      if (base.querySelector('[data-nai-merge-copy]')) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.naiMergeCopy = 'true';
+      button.textContent = '統整並複製';
+      button.title = '複製 Base Prompt 與 Character 1～N；去重、移除 girl/boy、略過 style 分類的 Chunk';
+      button.style.cssText = 'align-self:flex-end;flex:none;margin:4px 0;padding:5px 10px;border:1px solid currentColor;border-radius:5px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px;';
+      button.addEventListener('click', () => copyPositivePrompts(base, button));
+      base.appendChild(button);
+    }
+  }
+  let copyRefreshQueued = false;
+  function queueCopyRefresh() {
+    if (copyRefreshQueued) return;
+    copyRefreshQueued = true;
+    requestAnimationFrame(() => { copyRefreshQueued = false; mountCopyButtons(); });
+  }
+  function initializeCopy() {
+    mountCopyButtons();
+    new MutationObserver(queueCopyRefresh).observe(document.body, {
+      childList:true, subtree:true, characterData:true, attributes:true,
+      attributeFilter:['data-macro-expansion', 'data-macro-label', 'title']
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initializeCopy, {once:true});
+  else initializeCopy();
 })();
