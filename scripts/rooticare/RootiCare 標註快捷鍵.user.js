@@ -2,35 +2,35 @@
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
 // @version      1.10.4
-// @description  針對 V, S, N 元件，點擊中鍵直接模擬多次左鍵點擊以達到刪除效果
+// @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
-// @match        https://editor.rooticare.com/rooti-care/*
-// @match        https://editoreu.rooticare.com/rooti-care/*
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20標註快捷鍵.user.js
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20標註快捷鍵.user.js
-// 
-// 
+// @match        https://editor.rooticare.com/rooti-care/*
+// @match        https://editoreu.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
 
-// 將鼠標移至需修改或需標註的位置使用數字鍵 1 ~ 4 快速補上對應的標籤或刪除
-// 1：V、2：S、3：N、4以及滑鼠中鍵：刪除
-// 按住 Alt + 1 ~ 3 滑動鼠標：僅對現有標籤進行快速修改
-// 按住 4 滑動鼠標：快速刪除碰到的所有標籤
-// 滑鼠中鍵：將點擊的標籤快速刪除
-// Ctrl + 1 / 2 / 3：記錄第一點後可在面板篩選 BPM 與原標籤，第二次按鍵套用 V / S / N；支援跨視窗；Esc 取消
-// W / S 對應方向鍵 ↑ / ↓ 拉縮心電圖
+// 使用教學：在 ECG 或事件心電圖中，將滑鼠移到要處理的位置再按快捷鍵。
+// 1 / 2 / 3：新增或切換為 V / S / N；4：刪除該位置的標籤。
+// 按住 Alt + 1 / 2 / 3 並移動滑鼠：僅修改碰到的既有標籤。
+// 按住 4 並移動滑鼠：連續刪除碰到的標籤；滑鼠中鍵：刪除點擊的標籤。
+// Ctrl + 1 / 2 / 3：記錄區間起點，在面板設定篩選條件，再於終點按快捷鍵套用 V / S / N。
+// 區間可跨心電圖視窗；Esc：取消尚未完成的區間操作。
+// W / S：模擬方向鍵 ↑ / ↓，調整心電圖縮放。
+// Morphology 頁面停用標註操作；Alt 按鍵事件仍會被攔截。
 
 (function() {
     'use strict';
 
-    // ================= 配置與變數 =================
-    const USE_FIXED_POS = true; // V、S 輪轉會經過空白時， true：新標籤位置按原始位置生成； false：新標籤位置按鼠標位置生成
+    // 設定與操作狀態
+    const USE_FIXED_POS = true; // V、S 輪轉會經過空白時， true：新標籤位置按原始位置生成； false：新標籤位置按滑鼠位置生成
     const sequence = ['', 'N', 'S', 'V']; // 點擊循環順序
 
     const TARGET_BLOCK_SELECTOR = '.ecg-individual-blk, .event-tag-blk.ng-scope'; // 追蹤的容器名稱
+    // 依目前網址辨識 Morphology 路由；站內切頁不一定重新載入，因此操作前也要檢查。
     function isDisabledPage() {
         return /^\/rooti-care\/morphology(?:\/|$)/.test(window.location?.pathname || '');
     }
@@ -46,7 +46,7 @@
     `;
     document.head.appendChild(style);
 
-    // 紀錄滑鼠位置
+    // 記錄滑鼠位置
     window.addEventListener('mousemove', (e) => {
         currentMousePos.x = e.clientX;
         currentMousePos.y = e.clientY;
@@ -63,14 +63,14 @@
         return null;
     }
 
-    // 取得當前位置的元素（優先抓取標籤文本，次之為背景矩形）
+    // 取得當前位置的元素（優先抓取標籤文字，次之為背景矩形）
     function getElementAtPoint(x, y) {
         const elements = document.elementsFromPoint(x, y);
         return elements.find(el => el.classList.contains('annoText')) ||
                elements.find(el => el.tagName.toLowerCase() === 'rect');
     }
 
-    // 新增：在指定的 X 軸切線上，尋找屬於當前區塊的標籤
+    // 依原始 X 座標尋找目前 ECG 區塊內的標籤。
     function findLabelAtX(activeBlock, targetX) {
         if (!activeBlock) return null;
         // 找出該區塊內所有的標籤
@@ -112,7 +112,7 @@
         syncLabelClickState(e.target.closest?.('.annoText'));
     }, true);
 
-    // 執行模擬點擊
+    // 依序發送左鍵按下、放開與點擊事件。
     function doLockedClick(el, x, y) {
         if (!el) return;
         syncLabelClickState(el);
@@ -129,7 +129,7 @@
         el.dispatchEvent(new MouseEvent('click', opts));
     }
 
-    // 模擬鍵盤事件（用於縮放）
+    // 發送原生方向鍵事件，沿用網站的縮放處理。
     function triggerOriginalKey(keyCode, keyName) {
         const eventProps = {
             bubbles: true, cancelable: true,
@@ -149,7 +149,7 @@
         return steps < 0 ? steps + sequence.length : steps;
     }
 
-    // 核心處理函式：將標籤切換至指定的 targetText
+    // 以模擬點擊將指定位置的標籤切換至目標分類。
     async function processCommand(targetText, point = currentMousePos, rangeBlock = null) {
         if (isDisabledPage()) return;
         const lockedX = point.x;
@@ -181,13 +181,13 @@
         for (let i = 0; i < stepsNeeded; i++) {
             let targetEl = getElementAtPoint(clickX, clickY) || currentEl;
 
-            // 【安全修正】不再盲目搜尋區塊內第一個標籤
-            // 而是利用 findLabelAtX，只抓取「X 軸範圍符合最初點擊位置」的那個標籤
+            // 重新定位時只搜尋原始 X 座標涵蓋的標籤，
+            // 避免畫面更新後誤點同區塊中的其他標籤。
             if (!targetEl || !targetEl.classList.contains('annoText')) {
                 const localAnno = findLabelAtX(activeBlock, lockedX);
                 if (localAnno) {
                     targetEl = localAnno;
-                    // 精準將點擊位置修正到該特定標籤的中心點
+                    // 將後續點擊座標移到找到的標籤中心。
                     const rect = targetEl.getBoundingClientRect();
                     clickX = rect.left + rect.width / 2;
                     clickY = rect.top + rect.height / 2;
@@ -198,7 +198,7 @@
 
             doLockedClick(targetEl, clickX, clickY);
 
-            // 若網頁畫面更新有延遲導致斷鍵，可取消下行註解
+            // 若網站重畫尚未完成，可啟用下一行等待後再點擊。
             // await sleep(30);
         }
     }
@@ -237,6 +237,8 @@
     document.body.appendChild(rangeHint);
     let rangeMessage;
     let rangeControls;
+    // 首次需要時才建立區間設定面板，保存節點供後續選取重用。
+    // 上下限分別勾選才啟用；面板事件不向外傳遞，避免輸入數字時觸發網站分類快捷鍵。
     function ensureRangeControls() {
         if (rangeControls) return;
         rangeHint.innerHTML = `<div class="rh-head"><div data-role="message" role="status" aria-live="polite"></div>
@@ -272,6 +274,8 @@
             rangeHint.addEventListener(name, e => e.stopPropagation());
         }
     }
+    // 將面板轉為 BPM、變動率與來源標籤條件；未勾選的上下限以 null 表示。
+    // 變動率百分比除以 100 後參與計算；空白、無效數字、倒置上下限或未選來源皆拋出提示錯誤。
     function readRangeFilters() {
         const bounds = {};
         for (const bound of ['min', 'max']) {
@@ -297,6 +301,7 @@
         if (!sources.length) throw new Error('請至少勾選一種要修改的原標籤');
         return { enabled: bounds.min !== null || bounds.max !== null, ...bounds, variability, sources };
     }
+    // 更新區間狀態文字；只有已選第一端點且未執行修改時，才顯示可操作的篩選欄位。
     function showRangeHint(text) {
         if (isDisabledPage()) { rangeHint.style.display = 'none'; return; }
         ensureRangeControls();
@@ -305,6 +310,8 @@
         rangeHint.querySelector('[data-role="help"]').style.display = rangeMode?.first && !rangeBusy ? 'block' : 'none';
         rangeHint.style.display = 'block';
     }
+    // 將滑鼠 X 座標換算成整份 ECG 的絕對取樣索引，包含目前時間窗、取樣率及通道位移。
+    // 同時保存報告識別、Angular 控制器與未儲存陣列參照，用於第二端點及非同步完成後的一致性檢查。
     function getRangeContext(svg, clientX) {
         const angularAPI = window.angular;
         const scope = angularAPI?.element(svg).isolateScope();
@@ -329,6 +336,9 @@
             modifiedData: scope.modifiedData,
             record: [parent.af._vendorId, parent.af._idNumber, parent.af._measureId].join('|') };
     }
+    // 以原始標籤加上未儲存修改後的有效分類，計算閉區間內需要變更的心搏。
+    // A 正規化為 S 供篩選使用；BPM 與變動率由相鄰索引計算，缺前置心搏時不猜測。
+    // 輸出沿用網站修改資料格式 [時間, 絕對索引, 目標分類, 原分類, 有效旗標]，保留最初分類供原生流程使用。
     function getRangeUpdates(effective, pending, data, first, start, end, tag, filters) {
         const normalize = type => type === 'A' ? 'S' : type;
         const beats = [...effective].filter(([index, type]) => Number.isFinite(index) && ['N', 'S', 'A', 'V'].includes(type))
@@ -361,6 +371,8 @@
         }
         return updates;
     }
+    // 核對兩端點屬於同一報告、同一修改陣列及相同取樣率，再讀取區間原始標籤。
+    // 有間隔條件時額外取得前一至兩個有效心搏；套用前再次核對報告，最後於 Angular $apply 更新未儲存資料。
     async function applyIndexRange(first, last, tag, filters) {
         if (first.af !== last.af || first.record !== last.record || first.modifiedData !== last.modifiedData)
             throw new Error('兩點必須屬於同一份報告');
@@ -421,6 +433,7 @@
         });
         return updates.length;
     }
+    // 標記目前選取已取消；若資料仍在讀取，保留取消旗標讓非同步流程在寫入前中止。
     function cancelRange() {
         if (rangeMode) rangeMode.cancelled = true;
         if (!rangeBusy) rangeMode = null;
@@ -429,6 +442,7 @@
     // RootiCare 站內切頁不一定重載腳本；每次操作仍檢查目前路徑。
     // 路由畫面更新時也收起尚未完成的區間面板。
     let lastPagePath = window.location?.pathname;
+    // 站內路由改變時更新可用狀態與焦點樣式；進入 Morphology 時收起未完成的區間操作。
     function updatePageAvailability() {
         const path = window.location?.pathname;
         if (style.sheet) style.sheet.disabled = isDisabledPage();
@@ -443,6 +457,8 @@
         new MutationObserver(updatePageAvailability).observe(document.body, { childList: true, subtree: true });
     }
     window.addEventListener('blur', cancelRange);
+    // 第一次快捷鍵記錄端點，第二次讀取篩選條件並套用區間；目標分類以第二次按鍵為準。
+    // 執行中鎖住區間操作；完成或失敗後顯示結果，並延遲收起提示，不自動儲存報告。
     async function selectRangePoint(tag) {
         let failed = false;
         const block = getActiveBlockUnderMouse();
@@ -482,7 +498,7 @@
     }
 
     /**
-     * 監聽鍵盤事件
+     * 分派標註、區間選取與縮放快捷鍵。
      */
     // 所有匹配的 RootiCare 頁面皆攔截 Alt，包括輸入欄、面板與 Morphology。
     document.addEventListener('keyup', (e) => {
@@ -526,8 +542,8 @@
             return;
         }
         if (rangeMode && movesECG) {
-            // Keep absolute indices while the native ECG viewport moves.
-            // Native movement remains available. W/S retain the script's zoom mapping.
+            // 切換 ECG 視窗時保留區間端點的絕對取樣索引。
+            // 保留原生導覽操作；W / S 仍轉換為腳本的縮放快捷鍵。
             if (key === 'w' || key === 's') {
                 e.preventDefault();
                 e.stopImmediatePropagation();

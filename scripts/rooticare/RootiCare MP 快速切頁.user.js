@@ -2,26 +2,27 @@
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
 // @version      1.1
-// @description  使用 Q、E 快速更換 type
+// @description  在 MP 分頁邊界以 Q / E 切換相鄰 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
-// @match        https://editor.rooticare.com/rooti-care/*
-// @match        https://editoreu.rooticare.com/rooti-care/*
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20MP%20快速切頁.user.js
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20MP%20快速切頁.user.js
-// 
-// 
+// @match        https://editor.rooticare.com/rooti-care/*
+// @match        https://editoreu.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
 
-// MP 頁面中在 type 的第一或最後一頁使用 Q、E 切換上下 type
-// Ctrl + E 快速往下選中 type
+// 使用教學：在 MP（Morphology）頁面，以 Q / E 配合網頁原生快捷鍵瀏覽 type。
+// 第一頁按 Q：切換至上一個 type；最後一頁按 E：切換至下一個 type。
+// Ctrl + E：與網頁原生功能協作，快速往下選中 type。
+// 切換 type 後會將目標捲入畫面，聚焦右側清單並點選第一張 ECG 縮圖。
+// 右側同時選取多張縮圖時，腳本不切換 type；在輸入框中打字時不處理快捷鍵。
 
 (function() {
     'use strict';
 
-    // --- 配置與選擇器 ---
+    // MP 分頁、type 與縮圖的定位設定
     const SELECTORS = {
         allPageLinks: '.pagination-container a, .pagination a',
         bItems: '.type-trend',
@@ -33,16 +34,17 @@
     // 防止按鍵重複觸發的旗標（防止長按導致連續跳轉）
     let isKeyDown = false;
 
-    // --- 事件監聽：按下鍵盤 ---
+    // 按下 Q / E 時檢查分頁邊界。
     document.addEventListener('keydown', function(e) {
         // 如果按鍵已處於按下狀態，或使用者正在輸入框打字，則不執行邏輯
         if (isKeyDown) return;
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
+        // 此處只接續 Q / E 在分頁邊界的 type 切換；Ctrl + E 仍與網站原生按鍵流程協作。
         const key = e.key.toUpperCase();
         const links = Array.from(document.querySelectorAll(SELECTORS.allPageLinks));
 
-        // 邏輯：按下 E 鍵 下一頁
+        // E：最後一頁時銜接下一個 type。
         if (key === 'E') {
             // 尋找內容為 ">" 的按鈕
             const nextBtn = links.find(el => el.innerText.trim() === '>');
@@ -60,7 +62,7 @@
                 switchType('next');
             }
         }
-        // 邏輯：按下 Q 鍵 上一頁
+        // Q：第一頁時銜接上一個 type。
         else if (key === 'Q') {
             // 尋找內容為 "<" 的按鈕
             const prevBtn = links.find(el => el.innerText.trim() === '<');
@@ -80,7 +82,7 @@
         }
     }, true); // 使用 Capture 模式確保優先捕獲事件
 
-    // --- 事件監聽：放開鍵盤 ---
+    // 放開 Q / E 後允許下一次切換。
     document.addEventListener('keyup', function(e) {
         const key = e.key.toUpperCase();
         if (key === 'Q' || key === 'E') {
@@ -89,9 +91,11 @@
     });
 
     /**
-     * 核心功能：切換側邊欄項目
+     * 切換相鄰 type，並初始化右側清單的焦點與選取。
      * @param {string} direction - 'next' 代表向下一個項目，'prev' 代表向上一個項目
      */
+    // direction 決定往上或往下切換；只處理仍在側欄範圍內的相鄰 type。
+    // 以網站的選取樣式尋找目前 type，切換後交由原生點擊載入資料，再聚焦右側第一張縮圖。
     function switchType(direction) {
         // 多選時保護目前清單，避免切換 type 造成選取項目狀態意外改變。
         if (document.querySelectorAll(SELECTORS.selectedImages).length > 1) return;

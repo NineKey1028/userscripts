@@ -2,18 +2,25 @@
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
 // @version      1.12.7
-// @description  依 ECG 縮圖心搏點間距標記變動率或以可選比較方式標記指定心律的縮圖；所有篩選條件需同時符合與 Morphology Player 快速修改；支援縮圖逐頁批次選取與分類修改；每次載入預設關閉。
+// @description  依變動率與 BPM 條件標記 ECG 縮圖；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20ECG%20變動率縮圖標記器.user.js
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20ECG%20變動率縮圖標記器.user.js
-// 
-// 
 // @match        https://editor.rooticare.com/rooti-care/*
 // @match        https://editoreu.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
+
+// 使用教學：在 MP（Morphology）頁面，以清單下方的 ＋ 新增變動率或紅點心律篩選條件。
+// 設定 ≥ / ≤ 與門檻值；變動率以百分比輸入，心律以 BPM 輸入，所有條件需同時符合。
+// 符合條件的縮圖會上色；已移出目前 type 或跨分類的項目以淡黃色提示。
+// 縮圖批次修改：選擇「改為」分類與速度，再按「▶ 批次修改」，逐頁處理符合條件的項目。
+// Morphology Player：可另設前一搏分類條件，選擇目標分類後按「▶ 播放」自動修改或跳過。
+// 速度可選 10 / 20 / 40 / 100 ms；網站資料尚未同步時會等待，並非保證的處理耗時。
+// 按暫停按鈕或 Esc 可停止；變更設定、操作面板外的頁面或隱藏頁面時也會暫停。
+// 播放器左側顯示修改與跳過數量，右側顯示目前心搏資訊；重新載入後不會自動開始批次操作。
 
 (() => {
     'use strict';
@@ -44,6 +51,7 @@
     let scheduled = false;
     let controlContainer;
 
+    // 將設定的十六進位顏色換算為 RGBA，供縮圖半透明背景使用。
     function hexToRGBA(hex, alpha) {
         const value = hex.replace('#', '');
         const red = parseInt(value.slice(0, 2), 16);
@@ -52,6 +60,7 @@
         return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
     }
 
+    // 只建立一次縮圖標記與播放器面板樣式；選取中的縮圖交由網站原生樣式顯示。
     function installStyle() {
         if (document.getElementById(`${CONFIG.controlId}-style`)) return;
         const style = document.createElement('style');
@@ -155,6 +164,8 @@
     let sharedConditions = [];
     let syncingConditions = false;
 
+    // 同步縮圖與播放器共用的變動率 / BPM 條件；前一搏分類條件只保留在各自編輯器。
+    // 以同步鎖阻止 change 事件互相回傳，並移除已離開 DOM 的編輯器參照。
     function synchronizeConditions(source) {
         if (syncingConditions) return;
         const settings = readConditions(source.parentElement);
@@ -173,6 +184,8 @@
         } finally { syncingConditions = false; }
     }
 
+    // 建立可新增、移除與調整比較方式的條件列；同種類、同比較方式不重複新增。
+    // allowPrevious 決定是否提供前一搏分類；初值與共用條件以複本保存，避免多處共用同一物件。
     function createConditionEditor(parent, allowPrevious, initial = []) {
         const editor = document.createElement('span');
         editor.className = 'rc-condition-editor';
@@ -183,6 +196,7 @@
         const addButton = editor.querySelector('[data-role="condition-add"]');
         const used = (kind, operator, except = null) => [...rows.children].some(row => row !== except
             && row.dataset.kind === kind && row.querySelector('[data-role="condition-operator"]').value === operator);
+        // 依已使用的條件組合停用重複選項；所有組合用盡時停用新增按鈕並收起選單。
         function refreshAvailability() {
             for (const option of menu.options) {
                 if (!option.value) continue;
@@ -196,6 +210,7 @@
             addButton.disabled = [...menu.options].filter(option => option.value).every(option => option.disabled);
             if (addButton.disabled) menu.hidden = true;
         }
+        // 插入一列條件並設定初值與刪除事件；達列數上限或組合重複時不新增。
         function add(condition, announce = true) {
             if (used(condition.kind, condition.operator) || rows.children.length >= (allowPrevious ? 6 : 4)) return;
             const row = document.createElement('span');
@@ -218,6 +233,7 @@
             refreshAvailability();
             if (announce) notify();
         }
+        // 收起新增選單並恢復 ＋ 按鈕，清空選中項以便再次選取同一選項。
         function collapseConditionMenu() {
             menu.hidden = true;
             addButton.hidden = false;
@@ -258,6 +274,7 @@
         return editor;
     }
 
+    // 把條件列讀成 kind / operator / value；空白數值轉為 NaN 交由驗證函式攔截。
     function readConditions(parent) {
         const editor = parent?.querySelector('.rc-condition-editor');
         return {
@@ -270,6 +287,7 @@
         };
     }
 
+    // 至少需要一項條件；核對種類、運算子及數值，BPM 門檻必須大於零。
     function validConditions(settings) {
         return settings?.conditions?.length > 0 && settings.conditions.every(condition =>
             condition.kind === 'previous' ? ['V', 'S', 'N'].includes(condition.value) && ['=', '!='].includes(condition.operator)
@@ -277,6 +295,7 @@
                     && Number.isFinite(condition.value) && (condition.kind !== 'bpm' || condition.value > 0));
     }
 
+    // 比較單一條件；變動率輸入的百分比先轉比例，缺少可用指標時一律視為不符合。
     function conditionMatches(metrics, condition) {
         if (condition.kind === 'previous') {
             // 不存在前一搏時，不讓 ≠ 誤判成命中。
@@ -290,12 +309,14 @@
         return condition.operator === '<=' ? value <= threshold : value >= threshold;
     }
 
+    // 格式化前一搏分類與前後 R-R，缺值顯示破折號，不影響分類判斷。
     function playerMetricText(metrics) {
         const rr = value => value == null ? '—' : `${Math.round(value)} ms`;
         return `前一搏 ${metrics.previousClassification || '—'} · RR ${rr(metrics.previousRrMs)} → ${rr(metrics.rrMs)}`;
     }
 
 
+    // 將條件與批次控制放到目前 Morphology 容器；容器更換時暫停舊任務再重新掛載。
     function ensureControl() {
         const container = document.querySelector('.morphology > .container');
         if (!container) return;
@@ -314,17 +335,21 @@
         if (control.parentElement !== container) container.appendChild(control);
     }
 
+    // 讀取圓點的 SVG 水平座標；無效數字回傳 null，供排序前排除。
     function numericX(dot) {
         const x = Number(dot.getAttribute('cx'));
         return Number.isFinite(x) ? x : null;
     }
 
+    // 辨識網站用來呈現非目前目標的黑色圓點；此顏色本身不代表 N 分類。
     function isBlackDot(dot) {
         const fill = getComputedStyle(dot).fill;
         return /rgb\(\s*(38|0)\s*,\s*(38|0)\s*,\s*(38|0)\s*\)/i.test(fill)
             || fill === 'black';
     }
 
+    // 依水平位置排序心搏點，定位紅點及其前兩點，計算前後間距的變動率。
+    // 此縮圖路徑要求前兩點為黑點；條件不足或間距非正數時略過，結果以 Set 去重。
     function findRateHits(operator, threshold = CONFIG.threshold) {
         const hits = new Set();
         const thumbnails = [...document.querySelectorAll('#right-list .ecg-trend')];
@@ -355,6 +380,8 @@
         return hits;
     }
 
+    // 優先用 D3 綁定的絕對取樣索引及取樣率計算紅點 BPM。
+    // 索引不可用時才以同組繪圖寬度及實際時間窗換算，兩種來源均不足時回傳 null。
     function getRedBeatBpm(thumbnail, currentBeat, previousBeat) {
         // D3 的圓點綁定原始取樣索引；使用原始時間資料，不受 CSS、DPR 或網頁縮放影響。
         const wave = thumbnail.querySelector('.ecgWave');
@@ -382,6 +409,7 @@
         return null;
     }
 
+    // 掃描有紅點及前一黑點的縮圖，換算 BPM 後依所選 ≥ / ≤ 篩選。
     function findHeartRateHits(thresholdBpm, operator) {
         const hits = new Set();
         const thumbnails = [...document.querySelectorAll('#right-list .ecg-trend')];
@@ -401,11 +429,13 @@
         return hits;
     }
 
+    // 讀取縮圖 SVG 中的顯示分類，用來辨識是否已移出目前分類。
     function getClassification(thumbnail) {
         const label = thumbnail.querySelector('.ecgWave svg text');
         return label?.textContent.trim().toUpperCase() || '';
     }
 
+    // 從目前選中的分類按鈕解析 setLabel 參數，避免依按鈕翻譯文字推測分類。
     function getCurrentCategory() {
         const selected = document.querySelector('.morphology .label-list .label-btn.current-label[ng-click]');
         const match = selected?.getAttribute('ng-click')?.match(/setLabel\(['"]([VSNA])['"]\)/);
@@ -432,6 +462,7 @@
     let playerStatusUpdatedAt = 0;
     let playerCountsUpdatedAt = 0;
 
+    // 分別更新左側累積計數與右側即時資訊；播放期間對顯示節流，避免拖慢分類處理。
     function playerStatus(message, live = false) {
         playerStatusMessage = message;
         const now = Date.now();
@@ -453,6 +484,7 @@
         playerStatusUpdatedAt = now;
     }
 
+    // 停止排程並清除等待前進、起始同步及載入狀態；保留已累積計數及目標分類。
     function pausePlayer(message = '已暫停') {
         playerRunning = false;
         clearTimeout(playerTimer);
@@ -468,6 +500,7 @@
         playerStatus(message);
     }
 
+    // 讀取播放器條件、目標分類與排程間隔；速度只接受 10 / 20 / 40 / 100 ms。
     function readPlayerSettings() {
         const panel = document.getElementById(PLAYER_CONTROL_ID);
         if (!panel) return null;
@@ -476,11 +509,13 @@
             interval: [10, 20, 40, 100].includes(Number(field('speed')?.value)) ? Number(field('speed').value) : 10 };
     }
 
+    // 先驗證條件並顯示原因，再確認目標分類是 V / S / N / A 之一。
     function validPlayerSettings(settings) {
         if (!validConditions(settings)) { playerStatus('請新增至少一項條件並輸入有效數值'); return false; }
         return ['V', 'S', 'N', 'A'].includes(settings.label);
     }
 
+    // 解析顯示進度與第一列時間，以「項目序號:時間」辨識目前畫面是否已換筆。
     function readPlayerPosition(dialog) {
         const text = dialog.querySelector('.state-panel span')?.textContent;
         const match = text?.match(/(\d+)\s*\/\s*(\d+)/);
@@ -492,6 +527,8 @@
         return { wave, index: Number(match[1]), total: Number(match[2]), signature: `${match[1]}:${timestamp}` };
     }
 
+    // 由已繪製的 SVG 還原心搏位置，定位唯一中央心搏並計算相鄰 R-R、BPM 及變動率。
+    // 這條路徑用於停止播放時的畫面資訊；自動修改另以原始資料核對，避免重畫期間認錯項目。
     function readPlayerMetrics(wave) {
         const marker = wave.querySelector('svg.ecgRMarker');
         const width = Number(marker?.getAttribute('width'));
@@ -528,6 +565,8 @@
         };
     }
 
+    // 交叉核對畫面序號、progress、進度條及目前波形所綁定的資料，全部一致才接受本筆。
+    // 由 absoluteIndex 與取樣率計算指標；將網站原始 N / A / V / X 映射為面板的 N / S / V / A。
     function readVerifiedPlayerItem(dialog, position) {
         // 自動修改只接受播放器原始資料，不能將重畫中的 SVG 當成新項目。
         const angular = window.angular;
@@ -565,16 +604,19 @@
         } };
     }
 
+    // 播放器採所有條件的交集；只有每項比較都通過才允許修改本筆。
     function playerMatches(metrics, settings) {
         if (!validConditions(settings)) return false;
         return settings.conditions.every(condition => conditionMatches(metrics, condition));
     }
 
+    // 自動修改前先停下網站原生播放，避免兩套進度控制同時前進。
     function pauseNativePlayer(dialog) {
         const toggle = dialog.querySelector('[ng-click="togglePlay()"]');
         if (toggle?.classList.contains('glyphicon-pause')) toggle.click();
     }
 
+    // 將面板目標轉為原生數字鍵 1～4，讓網站自行記錄修改並推進播放器。
     function sendPlayerClassification(label) {
         // 使用原站 document keydown：其分類流程會更新 modified 集合並自行前進。
         const key = { V: '1', S: '2', N: '3', A: '4' }[label];
@@ -585,6 +627,7 @@
         }));
     }
 
+    // 包住單次播放器處理；資料讀取或網站操作拋錯時顯示原因並暫停，避免排程繼續。
     function playerStep(single = false) {
         try {
             runPlayerStep(single);
@@ -594,6 +637,8 @@
         }
     }
 
+    // 每一步先核對視窗及設定，再同步起始進度、等待上一筆前進、讀取可信資料並判斷條件。
+    // 符合時發送分類，不符合時前進；必須收到原生分類與進度確認才計數，再決定是否排程下一筆。
     function runPlayerStep(single = false) {
         const dialog = playerDialog;
         if (!dialog?.isConnected || document.querySelector('.ngdialog.confirm-dialog') || document.hidden) {
@@ -681,6 +726,8 @@
         }
     }
 
+    // 停止自動播放時仍更新目前心搏資訊，支援使用者手動前進、返回與改分類。
+    // 只刷新資訊，不增加修改 / 跳過計數，也不觸發分類操作。
     function refreshPlayerView() {
         if (playerRunning || !playerDialog?.isConnected) return;
         try {
@@ -700,6 +747,7 @@
         }
     }
 
+    // 合併手動操作造成的重畫通知，延遲 30 ms 後再讀取畫面，避免讀到中間狀態。
     function schedulePlayerView() {
         if (playerRunning || playerViewTimer !== null) return;
         // 等待原站本次 DOM 重畫完成；手動操作不套用播放的 250ms 顯示節流。
@@ -709,6 +757,8 @@
         }, 30);
     }
 
+    // 更換播放器時斷開舊觀察器，再監看新視窗的波形、文字及輸入事件。
+    // 忽略面板本身的更新；播放中的資訊由自動流程提供，避免兩種更新互相覆蓋。
     function watchPlayerView(dialog) {
         playerViewObserver?.disconnect();
         playerViewObserver = new MutationObserver(records => {
@@ -728,6 +778,8 @@
         refreshPlayerView();
     }
 
+    // 在目前播放器建立條件、目標、速度與播放面板；新視窗重設計數並保留頁面內目標分類。
+    // 面板內事件不送到原生快捷鍵；設定變動先暫停，開始播放前則停止縮圖批次任務。
     function ensurePlayerControl() {
         const dialog = document.querySelector('.player-dialog .morphology-player-dialog');
         if (dialog !== playerDialog) {
@@ -796,11 +848,13 @@
     let thumbnailChanged = 0;
     let thumbnailPages = 0;
 
+    // 顯示縮圖批次的累積修改數、已處理頁數與目前等待 / 完成狀態。
     function thumbnailStatus(message) {
         const status = document.querySelector(`#${CONFIG.controlId} [data-role="batch-status"]`);
         if (status) status.textContent = `修改 ${thumbnailChanged} · 頁 ${thumbnailPages} · ${message}`;
     }
 
+    // 清除目前任務及計時器，並遞增 epoch，使已排程的舊回呼即使執行也不再操作頁面。
     function pauseThumbnails(message = '已暫停') {
         thumbnailRun = null;
         thumbnailEpoch++;
@@ -811,6 +865,7 @@
         thumbnailStatus(message);
     }
 
+    // 讀取清單面板條件、目標分類與排程速度；啟動時會保存本次設定快照。
     function readThumbnailSettings() {
         return { ...readConditions(document.getElementById(CONFIG.controlId)),
             label: document.querySelector(`#${CONFIG.controlId} [data-role="batch-label"]`)?.value,
@@ -818,10 +873,13 @@
                 ? Number(document.querySelector(`#${CONFIG.controlId} [data-role="batch-speed"]`)?.value) : 10 };
     }
 
+    // 從目前 Morphology 容器取得 Angular scope，供選取、頁碼與資料繫結核對。
     function thumbnailScope() {
         return window.angular?.element(document.querySelector('.morphology > .container')).scope?.();
     }
 
+    // 核對頁碼、項目數、載入旗標及每張縮圖的 segment / 波形 / 標籤 / 索引繫結。
+    // 任一資料尚未同步時回傳 null；成功時附頁面簽章，供批次流程確認重畫穩定及分類後是否位移。
     function readThumbnailPage(scope) {
         const model = scope?.morphology;
         const page = Number(model?.pagination?.currentPage);
@@ -859,6 +917,7 @@
         return { page, total, entries, signature: `${page}:${segments.map(s => s.absoluteIndex).join(',')}` };
     }
 
+    // 各條件先各自產生命中集合，再取交集，確保同一縮圖符合全部條件。
     function thumbnailHits(settings) {
         if (!validConditions(settings)) return new Set();
         const sets = settings.conditions.map(condition => condition.kind === 'rate'
@@ -867,6 +926,8 @@
         return new Set([...sets[0]].filter(thumb => sets.every(set => set.has(thumb))));
     }
 
+    // 使用網站原生 Ctrl 狀態及 selectEcg 建立精確目標集合，先清掉包含其他頁的舊選取。
+    // finally 保證放開合成 Ctrl；操作後再核對模型與縮圖選取旗標，防止分類連帶修改其他項目。
     function selectThumbnailBatch(scope, page, targets) {
         const desired = new Set(targets.map(entry => entry.segment));
         // 原站以 document 的按鍵狀態決定是否多選，單純 click.ctrlKey 不足以累加選取。
@@ -898,10 +959,14 @@
         }
     }
 
+    // 沿用任務設定的速度排程下一步，並攜帶 epoch 排除已取消的任務。
     function scheduleThumbnailStep(epoch) {
         thumbnailTimer = setTimeout(() => thumbnailStep(epoch), thumbnailRun?.settings.interval || 10);
     }
 
+    // 每輪核對任務身分、分類、type、模式及預期頁碼，再等待頁面資料連續兩次穩定。
+    // 本頁只套用一次分類；網站確認後才累加計數，下一輪再檢查清單有無位移並翻頁。
+    // 分類造成清單縮減、翻頁失敗或資料逾時時暫停，避免略過未處理項目或重複修改。
     function thumbnailStep(epoch) {
         if (!thumbnailRun || epoch !== thumbnailEpoch) return;
         try {
@@ -975,6 +1040,8 @@
         }
     }
 
+    // 驗證單一 type 與可用分類操作，尊重網站禁止改為 N 的設定。
+    // 先停止播放器，再保存模型、分類、type、設定及預期頁碼，從目前頁開始執行。
     function startThumbnails() {
         const settings = readThumbnailSettings();
         const scope = thumbnailScope();
@@ -993,6 +1060,8 @@
         thumbnailStep(thumbnailEpoch);
     }
 
+    // 建立批次分類、速度與播放按鈕；攔截面板操作，避免傳入網站選取快捷鍵。
+    // 條件變動暫停目前任務，重新按播放後才採用新設定。
     function installThumbnailBatchControl(control) {
         const group = document.createElement('span');
         group.className = 'thumbnail-batch-actions';
@@ -1014,6 +1083,8 @@
     }
 
 
+    // 確保兩處控制面板存在，清除舊命中樣式後依目前條件重算縮圖標記。
+    // 符合條件但顯示分類不同於目前分類者另加提示類別，不改變原生選取狀態。
     function update() {
         ensureControl(); ensurePlayerControl();
         document.querySelectorAll('#right-list .ecg-trend').forEach(thumb => thumb.classList.remove(CONFIG.hitClass, CONFIG.reclassifiedClass));
@@ -1027,6 +1098,7 @@
         });
     }
 
+    // 以 scheduled 合併短時間多次 DOM 通知，180 ms 後統一更新縮圖標記。
     function scheduleUpdate() {
         if (scheduled) return;
         scheduled = true;
@@ -1036,6 +1108,8 @@
         }, CONFIG.debounceMs);
     }
 
+    // 初次建立樣式及面板，再監看可能改變縮圖內容或顏色的 DOM 屬性。
+    // 排除面板與純腳本標記更新，並監聽 Esc、手動操作及頁面隱藏，讓自動任務及時暫停。
     function init() {
         installStyle();
         enabled = false;
