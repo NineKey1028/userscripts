@@ -4,6 +4,8 @@
 // @version      1.1
 // @description  在 Dashboard 的 Todo 詳細資料彈窗加入按鈕，一鍵複製 Institution / Report ID。
 // @author       Alex
+// @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20Institution%20與%20Report%20ID%20快速複製.user.js
+// @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20Institution%20與%20Report%20ID%20快速複製.user.js
 // @match        https://dashboard.rooticare.com/todo.page*
 // @match        https://dashboardeu.rooticare.com/todo.page*
 // @run-at       document-idle
