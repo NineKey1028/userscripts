@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.1
+// @version      1.3
 // @description  在 MP 分頁邊界以 Q / E 切換相鄰 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -17,10 +17,21 @@
 // 第一頁按 Q：切換至上一個 type；最後一頁按 E：切換至下一個 type。
 // Ctrl + E：與網頁原生功能協作，快速往下選中 type。
 // 切換 type 後會將目標捲入畫面，聚焦右側清單並點選第一張 ECG 縮圖。
-// 右側同時選取多張縮圖時，腳本不切換 type；在輸入框中打字時不處理快捷鍵。
+// 右側跨頁合計選取多張縮圖時，腳本不切換 type；在輸入框中打字時不處理快捷鍵。
+// 左側多選 type 時，隱藏右側灰色遮罩與虛線提示框的外觀，保留原生操作攔截。
 
 (function() {
     'use strict';
+
+    // 僅隱藏多選提示外觀；不移除遮罩或改動 pointer-events，保留網站的多選操作限制。
+    const multipleSelectionStyle = document.createElement('style');
+    multipleSelectionStyle.textContent = `
+        .morphology .right-content > [ng-if="multipleSelected()"] > .ecg-cover,
+        .morphology .right-content > [ng-if="multipleSelected()"] > .alert-blk {
+            opacity: 0 !important;
+        }
+    `;
+    (document.head || document.documentElement).appendChild(multipleSelectionStyle);
 
     // MP 分頁、type 與縮圖的定位設定
     const SELECTORS = {
@@ -90,6 +101,19 @@
         }
     });
 
+    // 網站模型包含其他頁的選取；保留 DOM 計數作為載入中或無 Angular 時的保護。
+    function selectedThumbnailCount() {
+        const visible = document.querySelectorAll(SELECTORS.selectedImages).length;
+        try {
+            const region = document.querySelector('.morphology > .container');
+            const scope = window.angular?.element(region)?.scope?.();
+            const selected = scope?.morphology?.state?.selectedSegments;
+            return Array.isArray(selected) ? Math.max(visible, selected.length) : visible;
+        } catch (_) {
+            return visible;
+        }
+    }
+
     /**
      * 切換相鄰 type，並初始化右側清單的焦點與選取。
      * @param {string} direction - 'next' 代表向下一個項目，'prev' 代表向上一個項目
@@ -98,7 +122,7 @@
     // 以網站的選取樣式尋找目前 type，切換後交由原生點擊載入資料，再聚焦右側第一張縮圖。
     function switchType(direction) {
         // 多選時保護目前清單，避免切換 type 造成選取項目狀態意外改變。
-        if (document.querySelectorAll(SELECTORS.selectedImages).length > 1) return;
+        if (selectedThumbnailCount() > 1) return;
 
         const items = Array.from(document.querySelectorAll(SELECTORS.bItems));
         let currentIndex = -1;

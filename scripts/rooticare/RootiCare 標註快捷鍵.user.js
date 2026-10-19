@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.10.4
+// @version      1.13.2
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -20,12 +20,16 @@
 // Ctrl + 1 / 2 / 3：記錄區間起點，在面板設定篩選條件，再於終點按快捷鍵套用 V / S / N。
 // 區間可跨心電圖視窗；Esc：取消尚未完成的區間操作。
 // W / S：模擬方向鍵 ↑ / ↓，調整心電圖縮放。
+// Q / E：模擬方向鍵 ← / → 切換時間；滑鼠點選與滾輪切換時間也保留高度縮放。
+// ch1／ch2／ch3 旁的眼睛可切換導程曲線；本次頁面內保留狀態，重新載入恢復全開。
+// 滑鼠移過 BPM／心律標籤列時，以細紅色垂直線對齊下方心電圖。
 // Morphology 頁面停用標註操作；Alt 按鍵事件仍會被攔截。
 
 (function() {
     'use strict';
 
     // 設定與操作狀態
+    const ENABLE_ALIGNMENT_GUIDE = true; // BPM／心律標籤的紅色垂直對齊線；false 關閉
     const USE_FIXED_POS = true; // V、S 輪轉會經過空白時， true：新標籤位置按原始位置生成； false：新標籤位置按滑鼠位置生成
     const sequence = ['', 'N', 'S', 'V']; // 點擊循環順序
 
@@ -37,6 +41,27 @@
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     let currentMousePos = { x: 0, y: 0 };
 
+    const zoomPreservingFunctions = new WeakSet();
+    // 網站 selectedDataRange 的第 4 個參數控制是否重設高度；方向鍵原本即傳 false。
+    // 在原控制器入口沿用此選項，不於非同步載入後覆寫使用者新調整的縮放。
+    function installZoomPersistence() {
+        const host = document.querySelector('[ng-controller="RootiCareDashboardAFCtrl"]');
+        if (!host || !window.angular) return;
+        let scope;
+        try { scope = window.angular.element(host).scope?.(); } catch (_) { return; }
+        while (scope && !Object.prototype.hasOwnProperty.call(scope, 'selectedDataRange')) scope = scope.$parent;
+        const original = scope?.selectedDataRange;
+        if (typeof original !== 'function' || zoomPreservingFunctions.has(original)) return;
+        function preserveZoom(...args) {
+            if (!isDisabledPage() && scope.af?.hrChart) args[3] = false;
+            return original.apply(this, args);
+        }
+        zoomPreservingFunctions.add(preserveZoom);
+        scope.selectedDataRange = preserveZoom;
+    }
+    document.addEventListener('mousedown', installZoomPersistence, true);
+    document.addEventListener('wheel', installZoomPersistence, { capture: true, passive: true });
+
     const style = document.createElement('style');
     style.innerHTML = `
         ${TARGET_BLOCK_SELECTOR}:focus {
@@ -45,6 +70,131 @@
         }
     `;
     document.head.appendChild(style);
+
+    // 僅保存於本次頁面執行期；不寫入瀏覽器儲存或報告資料。
+    const leadVisible = { ch1: true, ch2: true, ch3: true };
+    const leadStyle = document.createElement('style');
+    leadStyle.textContent = `
+        .ecgWave path.ecg-path.rc-lead-hidden { visibility: hidden !important; }
+        .rc-lead-eye { cursor: pointer; outline: none; }
+        .rc-lead-eye:focus > rect { stroke: #779b3a; stroke-width: 2; }
+    `;
+    document.head.appendChild(leadStyle);
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    function svgElement(tag, attributes) {
+        const element = document.createElementNS(SVG_NS, tag);
+        for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+        return element;
+    }
+    function refreshLeadVisibility() {
+        if (isDisabledPage()) return;
+        for (const wave of document.querySelectorAll('div.ecgWave')) {
+            const paths = [...wave.querySelectorAll('path.ecg-path')];
+            if (paths.length !== 3) continue;
+            const labels = [...wave.querySelectorAll('text')].filter(text => /^ch[123]$/.test(text.textContent.trim()));
+            let switched = labels[0]?.textContent.trim() === 'ch2';
+            if (!labels.length) {
+                try { switched = Boolean(window.angular?.element(wave)?.isolateScope?.()?.channelSwitch); }
+                catch (_) { continue; }
+            }
+            const order = switched ? ['ch2', 'ch1', 'ch3'] : ['ch1', 'ch2', 'ch3'];
+            paths.forEach((path, index) => path.classList.toggle('rc-lead-hidden', !leadVisible[order[index]]));
+            for (const label of labels) {
+                const lead = label.textContent.trim();
+                const group = label.parentElement;
+                let button = group.querySelector(`[data-rc-lead="${lead}"]`);
+                if (!button) {
+                    button = svgElement('g', { class: 'rc-lead-eye', 'data-rc-lead': lead,
+                        role: 'button', tabindex: '0' });
+                    button.appendChild(svgElement('title', {}));
+                    button.appendChild(svgElement('rect', { x: 0, y: 0, width: 24, height: 18,
+                        rx: 3, fill: 'transparent' }));
+                    button.appendChild(svgElement('path', { d: 'M3 9 Q12 -1 21 9 Q12 19 3 9 Z M12 6 A3 3 0 1 0 12 12 A3 3 0 1 0 12 6',
+                        fill: 'none', stroke: '#526047', 'stroke-width': '1.5' }));
+                    button.appendChild(svgElement('line', { class: 'rc-eye-slash', x1: 3, y1: 2,
+                        x2: 21, y2: 16, stroke: '#a54141', 'stroke-width': 2 }));
+                    const toggle = event => {
+                        event.preventDefault(); event.stopPropagation();
+                        leadVisible[lead] = !leadVisible[lead];
+                        refreshLeadVisibility();
+                    };
+                    button.addEventListener('click', toggle);
+                    for (const type of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick'])
+                        button.addEventListener(type, event => event.stopPropagation());
+                    button.addEventListener('keydown', event => {
+                        event.stopPropagation();
+                        if (event.key === 'Enter' || event.key === ' ') toggle(event);
+                    });
+                    group.appendChild(button);
+                }
+                const y = Number(label.getAttribute('y')) - 12;
+                button.setAttribute('transform', `translate(44,${y})`);
+                button.setAttribute('aria-pressed', String(leadVisible[lead]));
+                const description = `${leadVisible[lead] ? '隱藏' : '顯示'} ${lead}`;
+                button.setAttribute('aria-label', description);
+                // 避免重寫文字引發 childList observer 的無限重畫。
+                const title = button.querySelector('title');
+                if (title.textContent !== description) title.textContent = description;
+                button.querySelector('.rc-eye-slash').setAttribute('visibility', leadVisible[lead] ? 'hidden' : 'visible');
+            }
+        }
+    }
+    let leadRefreshPending = false;
+    function scheduleLeadRefresh() {
+        if (leadRefreshPending) return;
+        leadRefreshPending = true;
+        requestAnimationFrame(() => { leadRefreshPending = false; refreshLeadVisibility(); });
+    }
+    new MutationObserver(scheduleLeadRefresh).observe(document.body, { childList: true, subtree: true });
+    scheduleLeadRefresh();
+
+    // 使用螢幕座標對齊標籤列與主波形；獨立覆層不接收滑鼠事件，不改動網站 SVG。
+    const alignmentGuide = document.createElement('div');
+    alignmentGuide.setAttribute('aria-hidden', 'true');
+    alignmentGuide.style.cssText = 'display:none;position:fixed;width:1px;background:#e02020;pointer-events:none;z-index:2147482000;';
+    document.body.appendChild(alignmentGuide);
+    let guideMarker = null;
+    let guideMouseX = 0;
+    let guideFrame = null;
+    function hideAlignmentGuide() {
+        guideMarker = null;
+        if (guideFrame !== null) cancelAnimationFrame(guideFrame);
+        guideFrame = null;
+        alignmentGuide.style.display = 'none';
+    }
+    function drawAlignmentGuide() {
+        guideFrame = null;
+        if (!ENABLE_ALIGNMENT_GUIDE || isDisabledPage() || !guideMarker?.isConnected) { hideAlignmentGuide(); return; }
+        const wave = guideMarker.nextElementSibling;
+        if (!wave?.matches('div.ecgWave')) { hideAlignmentGuide(); return; }
+        const markerBounds = guideMarker.getBoundingClientRect();
+        const waveBounds = wave.getBoundingClientRect();
+        if (waveBounds.height <= 0 || guideMouseX < markerBounds.left || guideMouseX > markerBounds.right
+            || guideMouseX < waveBounds.left || guideMouseX > waveBounds.right) {
+            hideAlignmentGuide(); return;
+        }
+        // 對齊實體像素邊界，固定為一個實體像素，避免瀏覽器縮放／DPI 讓紅線跨兩欄像素。
+        const ratio = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+            ? window.devicePixelRatio : 1;
+        const snap = value => Math.round(value * ratio) / ratio;
+        const top = snap(markerBounds.top);
+        alignmentGuide.style.width = `${1 / ratio}px`;
+        alignmentGuide.style.left = `${snap(guideMouseX)}px`;
+        alignmentGuide.style.top = `${top}px`;
+        alignmentGuide.style.height = `${snap(waveBounds.bottom) - top}px`;
+        alignmentGuide.style.display = 'block';
+    }
+    document.addEventListener('mousemove', event => {
+        const marker = event.target.closest?.('svg.ecgRMarker');
+        if (!ENABLE_ALIGNMENT_GUIDE || !marker || isDisabledPage()) { hideAlignmentGuide(); return; }
+        guideMarker = marker;
+        guideMouseX = event.clientX;
+        if (guideFrame === null) guideFrame = requestAnimationFrame(drawAlignmentGuide);
+    }, { passive: true });
+    document.addEventListener('mouseleave', hideAlignmentGuide);
+    document.addEventListener('scroll', hideAlignmentGuide, true);
+    window.addEventListener('resize', hideAlignmentGuide);
+    window.addEventListener('blur', hideAlignmentGuide);
 
     // 記錄滑鼠位置
     window.addEventListener('mousemove', (e) => {
@@ -232,16 +382,33 @@
         #rooticare-range-hotkeys button:hover { background:#f0f3ec;color:#374333; }
         #rooticare-range-hotkeys :is(button,input,select):focus-visible { outline:2px solid #91ad68;outline-offset:1px; }
         #rooticare-range-hotkeys [data-role=help] { margin-top:6px;color:#7b8574;font-size:11px; }
+        #rooticare-range-hotkeys.rh-minimized { padding:5px 9px; }
+        #rooticare-range-hotkeys.rh-minimized [data-role=filters],
+        #rooticare-range-hotkeys.rh-minimized [data-role=help] { display:none !important; }
+        #rooticare-range-hotkeys.rh-minimized [data-role=message] {
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal;
+        }
     `;
     document.head.appendChild(rangeStyle);
     document.body.appendChild(rangeHint);
     let rangeMessage;
     let rangeControls;
+    let rangeMinimized = false;
+    function updateRangeMinimized() {
+        rangeHint.classList.toggle('rh-minimized', rangeMinimized);
+        const button = rangeHint.querySelector('[data-role="minimize"]');
+        if (!button) return;
+        button.textContent = rangeMinimized ? '+' : '−';
+        button.title = rangeMinimized ? '展開' : '最小化';
+        button.setAttribute('aria-label', button.title);
+        button.setAttribute('aria-expanded', String(!rangeMinimized));
+    }
     // 首次需要時才建立區間設定面板，保存節點供後續選取重用。
     // 上下限分別勾選才啟用；面板事件不向外傳遞，避免輸入數字時觸發網站分類快捷鍵。
     function ensureRangeControls() {
         if (rangeControls) return;
         rangeHint.innerHTML = `<div class="rh-head"><div data-role="message" role="status" aria-live="polite"></div>
+                <button type="button" data-role="minimize" aria-label="最小化" title="最小化" aria-expanded="true">−</button>
                 <button type="button" data-role="cancel" aria-label="取消區間選取" title="取消 · Esc">×</button></div>
             <div data-role="filters">
                 <span class="rh-group" title="依此心搏與前一心搏的間隔計算 BPM，四捨五入後比較；勾選才啟用">
@@ -263,6 +430,11 @@
             </div><div data-role="help">在另一端按 Ctrl + 1→V／2→S／3→N，即套用篩選修改</div>`;
         rangeMessage = rangeHint.querySelector('[data-role="message"]');
         rangeControls = rangeHint.querySelector('[data-role="filters"]');
+        rangeHint.querySelector('[data-role="minimize"]').addEventListener('click', () => {
+            rangeMinimized = !rangeMinimized;
+            updateRangeMinimized();
+        });
+        updateRangeMinimized();
         rangeHint.querySelector('[data-role="cancel"]').addEventListener('click', cancelRange);
         for (const kind of ['bpm', 'variability']) for (const bound of ['min', 'max']) {
             const toggle = rangeHint.querySelector(`[data-role="${kind}-${bound}-enabled"]`);
@@ -306,6 +478,7 @@
         if (isDisabledPage()) { rangeHint.style.display = 'none'; return; }
         ensureRangeControls();
         rangeMessage.textContent = text;
+        rangeMessage.title = text;
         rangeControls.style.display = rangeMode?.first && !rangeBusy ? 'flex' : 'none';
         rangeHint.querySelector('[data-role="help"]').style.display = rangeMode?.first && !rangeBusy ? 'block' : 'none';
         rangeHint.style.display = 'block';
@@ -444,6 +617,7 @@
     let lastPagePath = window.location?.pathname;
     // 站內路由改變時更新可用狀態與焦點樣式；進入 Morphology 時收起未完成的區間操作。
     function updatePageAvailability() {
+        installZoomPersistence();
         const path = window.location?.pathname;
         if (style.sheet) style.sheet.disabled = isDisabledPage();
         if (path === lastPagePath) return;
@@ -517,7 +691,7 @@
             if (e.key === 'Escape') { e.preventDefault(); cancelRange(); }
             return;
         }
-        if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
 
         const key = e.key.toLowerCase();
         const isAltPressed = e.altKey;
@@ -539,6 +713,14 @@
         if (rangeBusy && movesECG) {
             e.preventDefault();
             e.stopImmediatePropagation();
+            return;
+        }
+        if ((key === 'q' || key === 'e') && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
+            && !e.isComposing && (rangeMode || document.querySelector('.fixed-board') || getActiveBlockUnderMouse())) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            installZoomPersistence();
+            triggerOriginalKey(key === 'q' ? 37 : 39, key === 'q' ? 'ArrowLeft' : 'ArrowRight');
             return;
         }
         if (rangeMode && movesECG) {

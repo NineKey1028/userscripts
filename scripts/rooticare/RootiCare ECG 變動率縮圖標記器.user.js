@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.12.7
-// @description  依變動率與 BPM 條件標記 ECG 縮圖；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
+// @version      1.17.0
+// @description  依變動率、BPM、彩色波形高度／寬度標記 ECG 縮圖；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -13,11 +13,13 @@
 // @grant        none
 // ==/UserScript==
 
-// 使用教學：在 MP（Morphology）頁面，以清單下方的 ＋ 新增變動率或紅點心律篩選條件。
+// 使用教學：在 MP（Morphology）頁面，以清單下方的 ＋ 新增變動率或心搏速率篩選條件。
 // 設定 ≥ / ≤ 與門檻值；變動率以百分比輸入，心律以 BPM 輸入，所有條件需同時符合。
+// 心搏高度以 mV、寬度以 ms 輸入；高度以估算的平坦基準線為 0，向下為負。
+// 心搏寬度量中央主峰兩側首次回到基準線容差帶的水平距離；容差為 0.5 px 或峰高 5% 的較大值。
 // 符合條件的縮圖會上色；已移出目前 type 或跨分類的項目以淡黃色提示。
 // 縮圖批次修改：選擇「改為」分類與速度，再按「▶ 批次修改」，逐頁處理符合條件的項目。
-// Morphology Player：可另設前一搏分類條件，選擇目標分類後按「▶ 播放」自動修改或跳過。
+// Morphology Player：可另設前一搏分類條件，選擇目標分類後按「▶ 批次修改」自動修改或跳過。
 // 速度可選 10 / 20 / 40 / 100 ms；網站資料尚未同步時會等待，並非保證的處理耗時。
 // 按暫停按鈕或 Esc 可停止；變更設定、操作面板外的頁面或隱藏頁面時也會暫停。
 // 播放器左側顯示修改與跳過數量，右側顯示目前心搏資訊；重新載入後不會自動開始批次操作。
@@ -68,6 +70,11 @@
         style.textContent = `
             .rc-condition-editor, .rc-condition-editor [data-role=conditions] { display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap; }
             .rc-condition-editor .rc-condition { display:inline-flex;align-items:center;gap:4px;white-space:nowrap;padding:3px 5px;border:1px solid #e1e8d9;border-radius:5px;background:#f7f9f4; }
+            .rc-condition-editor .rc-condition-group { display:inline-flex;flex-direction:column;gap:2px;padding:3px 5px;border:1px solid #e1e8d9;border-radius:5px;background:#f7f9f4; }
+            .rc-condition-editor .rc-condition-heading { display:flex;align-items:center;justify-content:flex-start;gap:4px;white-space:nowrap;font-weight:600; }
+            .rc-condition-editor .rc-condition-group .rc-condition { padding:0;border:0;background:transparent; }
+            .rc-condition-editor .rc-bound-label { display:inline-flex;align-items:center;gap:3px;min-width:24px; }
+            #${CONFIG.controlId} .rc-condition-group input[type=number], #rooticare-morphology-quick-editor .rc-condition-group input[type=number] { width:78px;min-width:78px;flex-shrink:0;font-variant-numeric:tabular-nums; }
             .rc-condition-editor [hidden] { display:none !important; }
             .rc-condition-editor .rc-unit { color:#7b8574;font-size:11px; }
             #${CONFIG.controlId} .rc-condition-editor button, #rooticare-morphology-quick-editor .rc-condition-editor button { min-width:0;width:25px;height:25px;padding:0;border:1px solid #dce3d6;border-radius:5px;background:#f0f5e9;color:#526a36;font-size:17px; }
@@ -87,13 +94,21 @@
             }
             #${CONFIG.controlId} {
                 position: relative; left: auto; bottom: auto; z-index: 1; clear: both;
-                display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px 9px;
+                display: inline-flex; align-items: stretch; flex-wrap: nowrap; gap: 7px 9px;
+                overflow-x:auto;min-width:0;
                 width: max-content; max-width: calc(100% - 28px); margin: 12px 14px 16px; padding: 6px 9px;
                 box-sizing: border-box; border: 1px solid #dce3d6; border-radius: 8px;
                 background: #fff; color: #374333; box-shadow: 0 3px 14px #24332118;
                 font: 12px/1.45 Arial, "Microsoft JhengHei", sans-serif; cursor: default;
             }
             #${CONFIG.controlId} * { box-sizing: border-box; }
+            #${CONFIG.controlId} > *, #${CONFIG.controlId} .rc-condition-group { flex-shrink:0; }
+            #${CONFIG.controlId} .rc-condition-editor,
+            #${CONFIG.controlId} .rc-condition-editor [data-role=conditions],
+            #${CONFIG.controlId} .thumbnail-batch-actions { flex-wrap:nowrap; }
+            #${CONFIG.controlId} .rc-condition-editor [data-role=conditions] { align-self:stretch;align-items:stretch; }
+            #${CONFIG.controlId} .rc-condition-group,
+            #${CONFIG.controlId} .thumbnail-batch-actions { min-height:78px; }
             #${CONFIG.controlId} label { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 0; font: inherit; color: inherit; white-space: nowrap; cursor: pointer; }
             #${CONFIG.controlId} input[type=checkbox] { appearance: auto; position: static; float: none; width: 12px; height: 12px; min-height: 0; margin: 0; accent-color: #779b3a; cursor: pointer; }
             #${CONFIG.controlId} select, #${CONFIG.controlId} input[type=number] {
@@ -103,7 +118,7 @@
             }
             #${CONFIG.controlId} select { cursor: pointer; }
             #${CONFIG.controlId} input[type=number] { width: 51px; }
-            #${CONFIG.controlId} .thumbnail-batch-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-left: 9px; border-left: 1px solid #e7ece2; }
+            #${CONFIG.controlId} .thumbnail-batch-actions { display:inline-grid;grid-template-columns:repeat(3,max-content);grid-template-rows:27px 1fr;align-items:start;gap:7px;padding:3px 0 3px 9px;border-left:1px solid #e7ece2; }
             #${CONFIG.controlId} [data-role=batch-label] { min-width: 43px; font-weight: 600; }
             #${CONFIG.controlId} button {
                 appearance: none; position: static; float: none; display: inline-flex; align-items: center; justify-content: center;
@@ -116,7 +131,11 @@
             #${CONFIG.controlId} button:active { background: #dbe7cb; }
             #${CONFIG.controlId} :is(button,input,select):focus-visible { outline: 2px solid #91ad68; outline-offset: 1px; }
             #${CONFIG.controlId} :disabled { opacity: .45; cursor: default; }
-            #${CONFIG.controlId} [data-role=batch-status] { color: #7b8574; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+            #${CONFIG.controlId} [data-role=batch-single] { grid-column:3;grid-row:1;background:#326b9b;border-color:#2b608d;color:#fff; }
+            #${CONFIG.controlId} [data-role=batch-single]:hover { background:#285a84;border-color:#244f74; }
+            #${CONFIG.controlId} [data-role=batch-play] { grid-column:3;grid-row:2;background:#7c9f32;border-color:#74972e;color:#fff; }
+            #${CONFIG.controlId} [data-role=batch-play]:hover { background:#6c8e27;border-color:#638326; }
+            #${CONFIG.controlId} [data-role=batch-status] { grid-column:1 / 3;grid-row:2;width:0;min-width:100%;color:#64705e;font-size:11px;line-height:1.7;font-variant-numeric:tabular-nums;white-space:pre-line;overflow-wrap:normal;word-break:normal; }
 
             #rooticare-morphology-quick-editor {
                 box-sizing: border-box; margin: 0 0 7px; padding: 6px 8px 5px;
@@ -143,7 +162,9 @@
             #rooticare-morphology-quick-editor .qe-unit { color: #7f8978; font-size: 11px; }
             #rooticare-morphology-quick-editor [data-role=label] { min-width: 46px; font-weight: 700; }
             #rooticare-morphology-quick-editor .qe-speed { margin-left: 5px; }
-            #rooticare-morphology-quick-editor .qe-buttons { display: inline-flex; gap: 5px; margin-left: auto; }
+            #rooticare-morphology-quick-editor .qe-buttons { display:inline-flex;flex-direction:column;align-items:stretch;gap:5px;margin-left:auto; }
+            #rooticare-morphology-quick-editor [data-role=single] { background:#326b9b;border-color:#2b608d;color:#fff; }
+            #rooticare-morphology-quick-editor [data-role=single]:hover { background:#285a84;border-color:#244f74; }
             #rooticare-morphology-quick-editor button { position: static; float: none; width: auto; margin: 0; height: 25px; padding: 0 8px; border: 1px solid #dce2d5; border-radius: 6px; background: #fff; color: #526047; font: 600 12px Arial, "Microsoft JhengHei", sans-serif; cursor: pointer; transition: background .12s, border-color .12s; }
             #rooticare-morphology-quick-editor button:hover { background: #f2f5ed; border-color: #a9bb92; }
             #rooticare-morphology-quick-editor [data-role=play] { min-width: 70px; border-color: #74972e; background: #7c9f32; color: #fff; }
@@ -156,54 +177,128 @@
             #rooticare-morphology-quick-editor [data-role=status] { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             #rooticare-morphology-quick-editor [data-role=status] { color: #6c785f; }
         `;
-        style.textContent += '\n#rooticare-morphology-quick-editor .qe-toolbar { flex-wrap:wrap; }\n#rooticare-morphology-quick-editor [data-role=status] { white-space:normal;overflow:visible; }';
+        style.textContent += `
+            #rooticare-morphology-quick-editor .qe-toolbar { flex-wrap:wrap; }
+            #${CONFIG.controlId} [data-role=batch-status],
+            #rooticare-morphology-quick-editor [data-role=status] {
+                display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+                overflow:hidden;text-overflow:ellipsis;min-width:0;
+            }
+            #${CONFIG.controlId} [data-role=batch-status] { min-width:100%;max-height:3.4em; }
+            #rooticare-morphology-quick-editor [data-role=status] {
+                white-space:normal;line-height:1.45;max-height:2.9em;
+            }
+        `;
         (document.head || document.documentElement).appendChild(style);
     }
 
     const conditionEditors = new Set();
+    const CONDITION_LABELS = { rate: '心搏變動率', bpm: '心搏速率', height: '心搏高度', width: '心搏寬度' };
+    const boundsMessages = { thumbnail: '', player: '' };
+    const boundsMessageTimers = { thumbnail: null, player: null };
+
+    function clearBoundsMessage(kind) {
+        clearTimeout(boundsMessageTimers[kind]);
+        boundsMessageTimers[kind] = null;
+        boundsMessages[kind] = '';
+        if (kind === 'player') playerStatus(playerStatusMessage);
+        else refreshThumbnailStatus();
+    }
+
+    function showBoundsMessage(kind, message) {
+        clearTimeout(boundsMessageTimers[kind]);
+        boundsMessages[kind] = message;
+        if (kind === 'player') playerStatus(playerStatusMessage);
+        else refreshThumbnailStatus();
+        boundsMessageTimers[kind] = setTimeout(() => clearBoundsMessage(kind), 2500);
+    }
+    const isShapeCondition = condition => ['height', 'width'].includes(condition.kind);
     let sharedConditions = [];
+    let playerPreviousConditions = [];
     let syncingConditions = false;
 
-    // 同步縮圖與播放器共用的變動率 / BPM 條件；前一搏分類條件只保留在各自編輯器。
+    // 同步縮圖與播放器共用的數值條件；前一搏分類條件只保留在播放器。
     // 以同步鎖阻止 change 事件互相回傳，並移除已離開 DOM 的編輯器參照。
     function synchronizeConditions(source) {
         if (syncingConditions) return;
         const settings = readConditions(source.parentElement);
-        sharedConditions = settings.conditions.filter(condition => condition.kind !== 'previous')
+        if (source.dataset?.allowPrevious === 'true') {
+            playerPreviousConditions = settings.conditions.filter(condition => condition.kind === 'previous')
+                .map(condition => ({ ...condition }));
+        }
+        sharedConditions = (settings.editorConditions || settings.conditions).filter(condition => condition.kind !== 'previous')
             .map(condition => ({ ...condition }));
         syncingConditions = true;
         try {
             for (const editor of conditionEditors) {
                 if (!editor.isConnected) { conditionEditors.delete(editor); continue; }
                 if (editor === source) continue;
-                const previous = readConditions(editor.parentElement).conditions.filter(condition => condition.kind === 'previous');
-                editor.replaceConditions([...sharedConditions, ...previous]);
+                const local = readConditions(editor.parentElement).conditions.filter(condition => condition.kind === 'previous');
+                editor.replaceConditions([...sharedConditions, ...local]);
                 // 通知另一處的既有處理器暫停並重算；同步鎖避免互相回傳。
                 editor.dispatchEvent(new Event('change', { bubbles: true }));
             }
         } finally { syncingConditions = false; }
     }
 
-    // 建立可新增、移除與調整比較方式的條件列；同種類、同比較方式不重複新增。
+    // 每種數值指標用一個容器，內含可獨立啟用的上下限；前一搏分類沿用獨立條件列。
     // allowPrevious 決定是否提供前一搏分類；初值與共用條件以複本保存，避免多處共用同一物件。
     function createConditionEditor(parent, allowPrevious, initial = []) {
         const editor = document.createElement('span');
         editor.className = 'rc-condition-editor';
-        editor.innerHTML = `<span data-role="conditions"></span><button type="button" data-role="condition-add" aria-label="新增條件" title="新增條件">＋</button><select data-role="condition-menu" aria-label="選擇新增條件" hidden><option value="rate:>=">ECG 變動率 ≥</option><option value="rate:<=">ECG 變動率 ≤</option><option value="bpm:>=">紅點心律 ≥</option><option value="bpm:<=">紅點心律 ≤</option>${allowPrevious ? '<option value="previous:=">前一個點 =</option><option value="previous:!=">前一個點 ≠</option>' : ''}</select>`;
+        editor.dataset.allowPrevious = String(allowPrevious);
+        editor.innerHTML = `<span data-role="conditions"></span><button type="button" data-role="condition-add" aria-label="新增條件" title="新增條件">＋</button><select data-role="condition-menu" aria-label="選擇新增條件" hidden>${Object.entries(CONDITION_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}${allowPrevious ? '<option value="previous:=">前一個點 =</option><option value="previous:!=">前一個點 ≠</option>' : ''}</select>`;
         const rows = editor.querySelector('[data-role="conditions"]');
+        const statusKind = allowPrevious ? 'player' : 'thumbnail';
+        const clearBoundsNotice = () => {
+            if (!boundsMessages[statusKind]) return;
+            clearBoundsMessage(statusKind);
+        };
         const menu = editor.querySelector('[data-role="condition-menu"]');
         const notify = () => editor.dispatchEvent(new Event('change', { bubbles: true }));
         const addButton = editor.querySelector('[data-role="condition-add"]');
-        const used = (kind, operator, except = null) => [...rows.children].some(row => row !== except
+        const used = (kind, operator, except = null) => [...rows.querySelectorAll('.rc-condition')].some(row => row !== except
             && row.dataset.kind === kind && row.querySelector('[data-role="condition-operator"]').value === operator);
+        // 輸入期間只更新原生 min/max，允許負號及多位數正常輸入；
+        // 提交或新增條件時修正正在編輯的值，保留另一端的設定。
+        function refreshNumericBounds(changedRow = null) {
+            const numericRows = [...rows.querySelectorAll('.rc-condition')].filter(row => row.dataset.kind !== 'previous');
+            for (const row of numericRows) {
+                const input = row.querySelector('[data-role="condition-value"]');
+                const operator = row.querySelector('[data-role="condition-operator"]').value;
+                const other = numericRows.find(candidate => candidate !== row && candidate.dataset.kind === row.dataset.kind
+                    && candidate.querySelector('[data-role="condition-operator"]').value !== operator);
+                const otherText = other?.querySelector('[data-role="condition-value"]').value ?? '';
+                const otherEnabled = other?.querySelector('[data-role="condition-enabled"]')?.checked;
+                const otherValue = otherEnabled && otherText.trim() !== '' ? Number(otherText) : NaN;
+                const active = row.querySelector('[data-role="condition-enabled"]').checked;
+                input.disabled = !active;
+                const baseMin = row.dataset.kind === 'bpm' ? 1 : row.dataset.kind === 'width' ? 0 : -Infinity;
+                const min = operator === '<=' && Number.isFinite(otherValue) ? Math.max(baseMin, otherValue) : baseMin;
+                const max = operator === '>=' && Number.isFinite(otherValue) ? otherValue : Infinity;
+                input.min = Number.isFinite(min) ? String(min) : '';
+                input.max = Number.isFinite(max) ? String(max) : '';
+                if (active && row === changedRow && input.value.trim() !== '' && Number.isFinite(Number(input.value))) {
+                    const before = Number(input.value);
+                    const corrected = Math.max(min, Math.min(max, before));
+                    input.value = String(corrected);
+                    if (corrected !== before) {
+                        const label = CONDITION_LABELS[row.dataset.kind];
+                        showBoundsMessage(statusKind, `${label}目前篩選不可 ${before > max ? '>' : '<'} ${corrected}`);
+                    }
+                }
+            }
+            // 修正一端後再更新另一端的原生限制。
+            if (changedRow) refreshNumericBounds();
+        }
         // 依已使用的條件組合停用重複選項；所有組合用盡時停用新增按鈕並收起選單。
         function refreshAvailability() {
             for (const option of menu.options) {
                 if (!option.value) continue;
                 const [kind, operator] = option.value.split(':');
-                option.disabled = used(kind, operator);
+                option.disabled = kind === 'previous' ? used(kind, operator) : Boolean(rows.querySelector(`[data-group-kind="${kind}"]`));
             }
-            for (const row of rows.children) {
+            for (const row of rows.querySelectorAll('.rc-condition[data-kind="previous"]')) {
                 const select = row.querySelector('[data-role="condition-operator"]');
                 for (const option of select.options) option.disabled = used(row.dataset.kind, option.value, row);
             }
@@ -212,25 +307,70 @@
         }
         // 插入一列條件並設定初值與刪除事件；達列數上限或組合重複時不新增。
         function add(condition, announce = true) {
-            if (used(condition.kind, condition.operator) || rows.children.length >= (allowPrevious ? 6 : 4)) return;
+            if (used(condition.kind, condition.operator)) return;
             const row = document.createElement('span');
             row.className = 'rc-condition';
             row.dataset.kind = condition.kind;
-            row.innerHTML = `<button type="button" data-role="condition-remove" aria-label="移除此條件" title="移除此條件">×</button><span>${condition.kind === 'rate' ? 'ECG 變動率' : condition.kind === 'bpm' ? '紅點心律' : '前一個點'}</span><select data-role="condition-operator" aria-label="比較方式">${condition.kind === 'previous' ? '<option value="=">=</option><option value="!=">≠</option>' : '<option value=">=">≥</option><option value="<=">≤</option>'}</select>${condition.kind === 'previous' ? '<select data-role="condition-value" aria-label="前一搏分類"><option>V</option><option>S</option><option>N</option></select>' : `<input type="number" data-role="condition-value" aria-label="${condition.kind === 'rate' ? '變動率百分比' : 'BPM 門檻'}" step="${condition.kind === 'rate' ? '0.1' : '1'}" ${condition.kind === 'bpm' ? 'min="1"' : ''}><span class="rc-unit">${condition.kind === 'rate' ? '%' : 'BPM'}</span>`}`;
+            row.innerHTML = `<button type="button" data-role="condition-remove" aria-label="移除此條件" title="移除此條件">×</button><span>${condition.kind === 'rate' ? '心搏變動率' : condition.kind === 'bpm' ? '心搏速率' : '前一個點'}</span><select data-role="condition-operator" aria-label="比較方式">${condition.kind === 'previous' ? '<option value="=">=</option><option value="!=">≠</option>' : '<option value=">=">≥</option><option value="<=">≤</option>'}</select>${condition.kind === 'previous' ? '<select data-role="condition-value" aria-label="前一搏分類"><option>V</option><option>S</option><option>N</option></select>' : `<input type="number" data-role="condition-value" aria-label="${condition.kind === 'rate' ? '變動率百分比' : 'BPM 門檻'}" step="${condition.kind === 'rate' ? '0.1' : '1'}" ${condition.kind === 'bpm' ? 'min="1"' : ''}><span class="rc-unit">${condition.kind === 'rate' ? '%' : 'BPM'}</span>`}`;
+            let group = null;
+            if (condition.kind !== 'previous') {
+                group = rows.querySelector(`[data-group-kind="${condition.kind}"]`);
+                if (!group) {
+                    group = document.createElement('span');
+                    group.className = 'rc-condition-group';
+                    group.dataset.groupKind = condition.kind;
+                    group.innerHTML = `<span class="rc-condition-heading"><button type="button" data-role="condition-remove" aria-label="移除此指標">×</button>${CONDITION_LABELS[condition.kind]}</span>`;
+                    const removable = group;
+                    group.querySelector('[data-role="condition-remove"]').addEventListener('click', () => {
+                        clearBoundsNotice(); removable.remove(); refreshAvailability(); refreshNumericBounds(); notify();
+                    });
+                    rows.appendChild(group);
+                }
+                const unit = condition.kind === 'rate' ? '%' : condition.kind === 'bpm' ? 'BPM' : condition.kind === 'height' ? 'mV' : 'ms';
+                const operator = condition.operator === '>=' ? '≥' : '≤';
+                row.innerHTML = `<label class="rc-bound-label"><input type="checkbox" data-role="condition-enabled" aria-label="啟用${CONDITION_LABELS[condition.kind]} ${operator}">${operator}</label><input type="hidden" data-role="condition-operator"><input type="number" data-role="condition-value" aria-label="${CONDITION_LABELS[condition.kind]} ${operator}" step="${condition.kind === 'bpm' ? '1' : '0.1'}"><span class="rc-unit">${unit}</span>`;
+                row.querySelector('[data-role="condition-enabled"]').checked = condition.enabled !== false;
+                row.querySelector('[data-role="condition-enabled"]').addEventListener('change', () => {
+                    clearBoundsNotice(); refreshNumericBounds(row);
+                });
+            }
             row.querySelector('[data-role="condition-operator"]').value = condition.operator;
+            if (isShapeCondition(condition)) {
+                const input = row.querySelector('[data-role="condition-value"]');
+                input.setAttribute('aria-label', condition.kind === 'height' ? '心搏高度門檻' : '心搏寬度門檻');
+                input.step = condition.kind === 'height' ? '0.01' : '1';
+                if (condition.kind === 'width') input.min = '0';
+                row.querySelector('.rc-unit').textContent = condition.kind === 'height' ? 'mV' : 'ms';
+                row.title = condition.kind === 'height'
+                    ? 'mV：以平坦波形估算基準線為 0，向上為正、向下為負；依實際電壓比例換算。'
+                    : 'ms：主峰兩側首次回到基準線容差帶的時間；依實際時間比例換算。無法確認兩端時不命中。';
+            }
             row.querySelector('[data-role="condition-value"]').value = String(condition.value);
-            row.querySelector('[data-role="condition-remove"]').addEventListener('click', () => {
-                row.remove(); refreshAvailability(); notify();
+            row.querySelector('[data-role="condition-remove"]')?.addEventListener('click', () => {
+                clearBoundsNotice(); row.remove(); refreshAvailability(); refreshNumericBounds(); notify();
             });
             const operatorSelect = row.querySelector('[data-role="condition-operator"]');
             let previousOperator = condition.operator;
             operatorSelect.addEventListener('change', () => {
+                clearBoundsNotice();
                 if (used(condition.kind, operatorSelect.value, row)) operatorSelect.value = previousOperator;
                 else previousOperator = operatorSelect.value;
                 refreshAvailability();
+                refreshNumericBounds(row);
             });
-            rows.appendChild(row);
+            if (condition.kind !== 'previous') {
+                const input = row.querySelector('[data-role="condition-value"]');
+                input.addEventListener('input', () => { clearBoundsNotice(); refreshNumericBounds(); });
+                input.addEventListener('change', () => refreshNumericBounds(row));
+                input.addEventListener('blur', () => {
+                    const before = input.value;
+                    refreshNumericBounds(row);
+                    if (input.value !== before) notify();
+                });
+            }
+            (group || rows).appendChild(row);
             refreshAvailability();
+            refreshNumericBounds(announce ? row : null);
             if (announce) notify();
         }
         // 收起新增選單並恢復 ＋ 按鈕，清空選中項以便再次選取同一選項。
@@ -253,10 +393,17 @@
         menu.addEventListener('change', () => {
             if (!menu.value) return;
             const [kind, operator] = menu.value.split(':');
-            add({kind, operator, value: kind === 'rate' ? 12 : kind === 'bpm' ? 100 : 'N'});
+            const value = kind === 'rate' ? 12 : kind === 'bpm' ? 100 : kind === 'previous' ? 'N' : 0;
+            if (kind === 'previous') add({ kind, operator, value });
+            else {
+                add({ kind, operator: '>=', value, enabled: true }, false);
+                add({ kind, operator: '<=', value, enabled: false }, false);
+                notify();
+            }
             collapseConditionMenu();
         });
         editor.replaceConditions = conditions => {
+            clearBoundsNotice();
             rows.replaceChildren();
             conditions.forEach(condition => add({ ...condition }, false));
             refreshAvailability();
@@ -277,22 +424,29 @@
     // 把條件列讀成 kind / operator / value；空白數值轉為 NaN 交由驗證函式攔截。
     function readConditions(parent) {
         const editor = parent?.querySelector('.rc-condition-editor');
-        return {
-            conditions: [...(editor?.querySelectorAll('.rc-condition') || [])].map(row => ({
+        const editorConditions = [...(editor?.querySelectorAll('.rc-condition') || [])].map(row => ({
                 kind: row.dataset.kind,
+                enabled: row.dataset.kind === 'previous' || row.querySelector('[data-role="condition-enabled"]')?.checked !== false,
                 operator: row.querySelector('[data-role="condition-operator"]').value,
                 value: row.dataset.kind === 'previous' ? row.querySelector('[data-role="condition-value"]').value
-                    : Number(row.querySelector('[data-role="condition-value"]').value || NaN),
-            })),
-        };
+                    : row.querySelector('[data-role="condition-value"]').value.trim() === '' ? NaN
+                        : Number(row.querySelector('[data-role="condition-value"]').value),
+            }));
+        return { conditions: editorConditions.filter(condition => condition.enabled), editorConditions };
     }
 
     // 至少需要一項條件；核對種類、運算子及數值，BPM 門檻必須大於零。
     function validConditions(settings) {
         return settings?.conditions?.length > 0 && settings.conditions.every(condition =>
             condition.kind === 'previous' ? ['V', 'S', 'N'].includes(condition.value) && ['=', '!='].includes(condition.operator)
-                : ['rate', 'bpm'].includes(condition.kind) && ['>=', '<='].includes(condition.operator)
-                    && Number.isFinite(condition.value) && (condition.kind !== 'bpm' || condition.value > 0));
+                : ['rate', 'bpm', 'height', 'width'].includes(condition.kind) && ['>=', '<='].includes(condition.operator)
+                    && Number.isFinite(condition.value) && (condition.kind !== 'bpm' || condition.value > 0)
+                    && (condition.kind !== 'width' || condition.value >= 0))
+            && ['rate', 'bpm', 'height', 'width'].every(kind => {
+                const lower = settings.conditions.find(condition => condition.kind === kind && condition.operator === '>=');
+                const upper = settings.conditions.find(condition => condition.kind === kind && condition.operator === '<=');
+                return !lower || !upper || lower.value <= upper.value;
+            });
     }
 
     // 比較單一條件；變動率輸入的百分比先轉比例，缺少可用指標時一律視為不符合。
@@ -303,20 +457,39 @@
             return condition.operator === '!=' ? metrics.previousClassification !== condition.value
                 : metrics.previousClassification === condition.value;
         }
-        const value = condition.kind === 'rate' ? metrics.rate : metrics.bpm;
+        const value = metrics[condition.kind];
         if (value == null || !Number.isFinite(value)) return false;
         const threshold = condition.kind === 'rate' ? condition.value / 100 : condition.value;
         return condition.operator === '<=' ? value <= threshold : value >= threshold;
     }
 
-    // 格式化前一搏分類與前後 R-R，缺值顯示破折號，不影響分類判斷。
-    function playerMetricText(metrics) {
-        const rr = value => value == null ? '—' : `${Math.round(value)} ms`;
-        return `前一搏 ${metrics.previousClassification || '—'} · RR ${rr(metrics.previousRrMs)} → ${rr(metrics.rrMs)}`;
+    // 只顯示畫面未直接提供的量測資訊，缺值顯示破折號。
+    function playerMetricText(metrics = {}) {
+        const shape = (value, digits, unit) => value == null ? '—' : `${value.toFixed(digits)} ${unit}`;
+        const rate = metrics.displayRate == null ? '—' : `${(metrics.displayRate * 100).toFixed(1)}%`;
+        return `變動 ${rate} · 寬 ${shape(metrics.width, 1, 'ms')} · 高 ${shape(metrics.height, 3, 'mV')}`;
     }
 
 
     // 將條件與批次控制放到目前 Morphology 容器；容器更換時暫停舊任務再重新掛載。
+    let thumbnailLayoutObserver;
+    let thumbnailLayoutContainer;
+    function fitThumbnailControl() {
+        const control = document.getElementById(CONFIG.controlId);
+        const container = control?.parentElement;
+        if (!container) return;
+        const bounds = control.getBoundingClientRect();
+        const parentBounds = container.getBoundingClientRect();
+        const page = container.querySelector('.pagination-blk');
+        const pageBounds = page?.getBoundingClientRect();
+        // getBoundingClientRect 包含縮放，換回 CSS px 後保留頁碼前 12 px 間距。
+        const scale = container.offsetWidth > 0 && parentBounds.width > 0 ? parentBounds.width / container.offsetWidth : 1;
+        const right = pageBounds?.width > 0 ? Math.min(parentBounds.right, pageBounds.left) : parentBounds.right;
+        const width = Math.max(0, Math.floor((right - bounds.left) / scale - 12));
+        const maximum = `${width}px`;
+        if (control.style.maxWidth !== maximum) control.style.maxWidth = maximum;
+    }
+    window.addEventListener('resize', fitThumbnailControl);
     function ensureControl() {
         const container = document.querySelector('.morphology > .container');
         if (!container) return;
@@ -333,6 +506,15 @@
         }
         controlContainer = container;
         if (control.parentElement !== container) container.appendChild(control);
+        if (thumbnailLayoutContainer !== container && typeof ResizeObserver !== 'undefined') {
+            thumbnailLayoutObserver?.disconnect();
+            thumbnailLayoutContainer = container;
+            thumbnailLayoutObserver = new ResizeObserver(fitThumbnailControl);
+            thumbnailLayoutObserver.observe(container);
+            const page = container.querySelector('.pagination-blk');
+            if (page) thumbnailLayoutObserver.observe(page);
+        }
+        fitThumbnailControl();
     }
 
     // 讀取圓點的 SVG 水平座標；無效數字回傳 null，供排序前排除。
@@ -451,6 +633,7 @@
     let playerPending = null;
     let playerLoadingSince = 0;
     let playerPriming = null;
+    let playerShapeReady = null;
     let playerChanged = 0;
     let playerSkipped = 0;
 
@@ -475,7 +658,7 @@
             playerCountsUpdatedAt = now;
         }
         if (live && now - playerStatusUpdatedAt < 250) return;
-        const text = playerLiveText ? `${playerLiveText} · ${message}` : message;
+        const text = boundsMessages.player || (playerLiveText ? `${playerLiveText} · ${message}` : message);
         const status = document.querySelector(`#${PLAYER_CONTROL_ID} [data-role="status"]`);
         if (status && status.textContent !== text) {
             status.textContent = text;
@@ -485,16 +668,19 @@
     }
 
     // 停止排程並清除等待前進、起始同步及載入狀態；保留已累積計數及目標分類。
+    let playerSingleTarget = '';
     function pausePlayer(message = '已暫停') {
+        playerSingleTarget = '';
         playerRunning = false;
         clearTimeout(playerTimer);
         playerTimer = null;
         playerPending = null;
         playerPriming = null;
+        playerShapeReady = null;
         playerLoadingSince = 0;
         const button = document.querySelector(`#${PLAYER_CONTROL_ID} [data-role="play"]`);
         if (button) {
-            button.textContent = '▶ 播放';
+            button.textContent = '▶ 批次修改';
             button.dataset.running = 'false';
         }
         playerStatus(message);
@@ -552,6 +738,7 @@
         const interval = previous ? current.x - previous.x : 0;
         const previousInterval = beforePrevious ? previous.x - beforePrevious.x : 0;
         return {
+            ...readColoredWaveShape(wave, true),
             classification: current.classification,
             previousClassification: previous?.classification || null,
             rrMs: interval > 0 ? interval * duration / width * 1000 : null,
@@ -593,7 +780,25 @@
         const precedingInterval = beforePrevious ? Number(previous.index) - Number(beforePrevious.index) : 0;
         const bpm = interval > 0 ? Math.round(60 * sampleRate / interval) : null;
         const rate = interval > 0 && precedingInterval > 0 ? (precedingInterval - interval) / interval : null;
+        let shape = null;
+        if (readPlayerSettings()?.conditions.some(isShapeCondition)) {
+            const waveScope = angular.element(position.wave.querySelector('.ecgWave')).isolateScope?.();
+            // 條件使用 SVG 時額外核對繪圖元件資料，未同步時先等待，不能直接跳過。
+            if (waveScope?.ecgData !== item.ecgData || waveScope?.annoData !== item.annoData
+                || waveScope?.posInfo !== item.posInfo) return null;
+            const path = position.wave.querySelector('.ecgWave path.ecg-path');
+            const gradient = path?.closest('svg')?.querySelector('linearGradient');
+            if (!path || !gradient) return null;
+            const signature = `${position.signature}:${path.getAttribute('d')}:${gradient.innerHTML}`;
+            if (playerShapeReady?.item !== item || playerShapeReady.signature !== signature) {
+                playerShapeReady = { item, signature };
+                return null;
+            }
+            shape = readColoredWaveShape(position.wave, true);
+            if (['V', 'A'].includes(beats[index].type) && !shape) return null;
+        }
         return { player, item, progress, target, metrics: {
+            ...shape,
             classification: ({ N: 'N', A: 'S', V: 'V', X: 'A' })[beats[index].type],
             previousClassification: previous ? ({ N: 'N', A: 'S', V: 'V', X: 'A' })[previous.type] : null,
             rrMs: interval > 0 ? interval / sampleRate * 1000 : null,
@@ -649,6 +854,12 @@
         if (!validPlayerSettings(settings)) { pausePlayer('已暫停：請檢查篩選設定'); return; }
         pauseNativePlayer(dialog);
         const position = readPlayerPosition(dialog);
+        if (single && position) {
+            if (playerSingleTarget && playerSingleTarget !== position.signature) {
+                pausePlayer('本筆位置已變更，未修改'); return;
+            }
+            playerSingleTarget = position.signature;
+        }
         // 原站初始 value=0，但顯示 1/總數；分類或 Next 只會將它加到 1，
         // progress 仍是 0。先透過原生 range 的 ng-change 同步為 1，不更改分類。
         const range = dialog.querySelector('input[type="range"][ng-model="morphologyPlayer.progressBar.value"]');
@@ -681,17 +892,16 @@
         const verified = readVerifiedPlayerItem(dialog, position);
         const metrics = verified?.metrics;
         if (!metrics) {
-            if (single) { playerStatus('本筆資料尚未就緒或無法定位中央心搏'); return; }
             if (!playerLoadingSince) playerLoadingSince = Date.now();
             if (Date.now() - playerLoadingSince > 15000) { pausePlayer('已暫停：無法確認目前項目的原始資料，未跳過本筆'); return; }
-            playerLiveText = position ? `${position.index}/${position.total} · BPM — · 變動率 —` : '';
+            playerLiveText = '';
             playerStatus('等待項目資料同步…', true);
-            playerTimer = setTimeout(playerStep, settings.interval);
+            playerTimer = setTimeout(() => playerStep(single), settings.interval);
             return;
         }
         playerLoadingSince = 0;
         const hit = playerMatches(metrics, settings);
-        if (single && !hit) { playerStatus('本筆不符合條件，未修改'); return; }
+        if (single && !hit) { pausePlayer('本筆不符合條件，未修改'); return; }
         const next = dialog.querySelector('[ng-click="progressAdjustment(1)"]');
         if (!hit && position.index < position.total && (!next || next.classList.contains('disabled'))) {
             pausePlayer('已暫停：無法前進到下一筆'); return;
@@ -710,16 +920,14 @@
         }
         if (hit) playerChanged++;
         else playerSkipped++;
-        const bpmText = metrics.displayBpm === null ? '—' : String(metrics.displayBpm);
-        const rateText = metrics.displayRate === null ? '—' : `${(metrics.displayRate * 100).toFixed(1)}%`;
         playerViewedSignature = position.signature;
-        playerLiveText = `${position.index}/${position.total} · ${metrics.classification}${hit ? `→${settings.label}` : ''} · BPM ${bpmText} · 變動率 ${rateText} · ${playerMetricText(metrics)}`;
+        playerLiveText = playerMetricText(metrics);
         playerStatus(hit ? '修改' : '跳過', true);
         if (position.index === position.total) {
-            pausePlayer('完成 · 請檢查後 Save');
+            pausePlayer('完成');
         } else if (single) {
             // 單筆不啟動自動循環。
-            playerPending = null;
+            pausePlayer('單次完成');
         } else {
             // 使用所選的 10/20/40/100ms 間隔；網站尚未前進時由 pending 檢查等待。
             playerTimer = setTimeout(playerStep, settings.interval);
@@ -737,12 +945,10 @@
                 playerStatusMessage = '檢視中';
             }
             playerViewedSignature = position?.signature || '';
-            const bpm = metrics?.displayBpm == null ? '—' : String(metrics.displayBpm);
-            const rate = metrics?.displayRate == null ? '—' : `${(metrics.displayRate * 100).toFixed(1)}%`;
-            playerLiveText = `${position ? `${position.index}/${position.total}` : '—'} · ${metrics?.classification || '—'} · BPM ${bpm} · 變動率 ${rate} · ${metrics ? playerMetricText(metrics) : '前一搏 — · RR —'}`;
+            playerLiveText = metrics ? playerMetricText(metrics) : '';
             playerStatus(metrics ? playerStatusMessage : '等待 ECG 載入…');
         } catch (error) {
-            playerLiveText = 'BPM — · 變動率 —';
+            playerLiveText = '';
             playerStatus('等待播放器畫面更新…');
         }
     }
@@ -809,11 +1015,10 @@
             <div class="qe-row qe-actions">
                 <label><span class="qe-caption">改為</span><select data-role="label" aria-label="目標分類"><option value="V">V</option><option value="S">S</option><option value="N">N</option><option value="A">A</option></select></label>
                 <label class="qe-speed"><span class="qe-caption">速度</span><select data-role="speed" aria-label="自動修改速度" title="網站尚未完成切換時會自動等待"><option value="10">10 ms</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="100">100 ms</option></select></label>
-                <div class="qe-buttons"><button type="button" data-role="play" data-running="false">▶ 播放</button></div>
+                <div class="qe-buttons"><button type="button" data-role="single">單次修改</button><button type="button" data-role="play" data-running="false">▶ 批次修改</button></div>
             </div>
-            </div><div class="qe-footer"><span class="qe-counts"><span>修改 <b data-role="changed-count">0</b></span><span>跳過 <b data-role="skipped-count">0</b></span></span><span data-role="status">待命 · BPM — · 變動率 — · Esc 暫停</span></div>`;
-        const sourceSettings = readConditions(document.getElementById(CONFIG.controlId));
-        const editor = createConditionEditor(panel.querySelector('[data-role="player-conditions"]'), true, sourceSettings.conditions);
+            </div><div class="qe-footer"><span class="qe-counts"><span>修改 <b data-role="changed-count">0</b></span><span>跳過 <b data-role="skipped-count">0</b></span></span><span data-role="status">待命 · Esc 暫停</span></div>`;
+        const editor = createConditionEditor(panel.querySelector('[data-role="player-conditions"]'), true, playerPreviousConditions);
         // 原站 keydown 在 document；表單操作不得傳入分類/導覽快捷鍵處理器。
         for (const name of ['keydown', 'keyup', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick']) {
             panel.addEventListener(name, event => event.stopPropagation());
@@ -825,7 +1030,15 @@
         });
         panel.addEventListener('change', () => pausePlayer('設定已變更，請重新播放'));
         panel.addEventListener('input', () => pausePlayer('設定已變更，請重新播放'));
+        panel.querySelector('[data-role="single"]').addEventListener('click', () => {
+            pausePlayer('單次修改中');
+            boundsMessages.player = '';
+            if (!validPlayerSettings(readPlayerSettings())) return;
+            if (thumbnailRun) pauseThumbnails('播放器單次修改，縮圖批次已暫停');
+            playerStep(true);
+        });
         panel.querySelector('[data-role="play"]').addEventListener('click', () => {
+            boundsMessages.player = '';
             if (playerRunning) { pausePlayer(); refreshPlayerView(); return; }
             if (!validPlayerSettings(readPlayerSettings())) return;
             if (thumbnailRun) pauseThumbnails('播放器已啟動，縮圖批次已暫停');
@@ -847,11 +1060,77 @@
     let thumbnailEpoch = 0;
     let thumbnailChanged = 0;
     let thumbnailPages = 0;
+    let thumbnailMessage = '待命 · Esc 暫停';
+    let thumbnailHasBatchStatus = false;
+    let thumbnailStatusScheduled = false;
+
+    function scheduleThumbnailStatus() {
+        if (thumbnailStatusScheduled) return;
+        thumbnailStatusScheduled = true;
+        setTimeout(() => {
+            thumbnailStatusScheduled = false;
+            refreshThumbnailStatus();
+        }, 0);
+    }
+
+    // 單選顯示該搏；多選顯示各指標範圍。只量目前頁面已繪製的選取縮圖。
+    function thumbnailSelectionText() {
+        const selected = [...document.querySelectorAll('#right-list .ecg-trend')]
+            .filter(thumb => thumb.querySelector('.idBackground.selectedBackground'));
+        let total = selected.length;
+        try { total = Math.max(total, thumbnailScope()?.morphology?.state?.selectedSegments?.length || 0); }
+        catch (_) { /* 無 Angular 時仍可顯示本頁 DOM 選取。 */ }
+        if (!total) return '';
+        const values = selected.map(thumb => {
+            const dots = [...thumb.querySelectorAll('circle.anno-dot')]
+                .map(dot => ({ dot, x: numericX(dot) })).filter(item => item.x !== null).sort((a, b) => a.x - b.x);
+            let index = dots.findIndex(({ dot }) => dot.classList.contains('current'));
+            if (index < 0) index = dots.findIndex(({ dot }) => /rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)/i.test(getComputedStyle(dot).fill));
+            let shape = null, bpm = null;
+            try {
+                shape = readColoredWaveShape(thumb);
+                if (index > 0) bpm = getRedBeatBpm(thumb, dots[index], dots[index - 1]);
+            } catch (_) { /* 重畫中無法量測的數值顯示缺值。 */ }
+            return { bpm, width: shape?.width, height: shape?.height };
+        });
+        const range = (kind, digits, unit) => {
+            const available = values.map(value => value[kind]).filter(value => Number.isFinite(value));
+            if (!available.length) return '—';
+            const low = Math.min(...available), high = Math.max(...available);
+            const text = low.toFixed(digits) === high.toFixed(digits) ? low.toFixed(digits)
+                : `${low.toFixed(digits)}～${high.toFixed(digits)}`;
+            const missing = available.length < selected.length ? `（${selected.length - available.length} 筆缺值）` : '';
+            return `${text}${unit}${missing}`;
+        };
+        const count = total !== selected.length ? `本頁選取 ${selected.length} / 共 ${total}（以下為本頁）`
+            : selected.length === 1 ? '選取 1 搏' : `多選 ${selected.length} 搏`;
+        return `${count} · 心搏速率(BPM) ${range('bpm', 0, '')} · 心搏寬度 ${range('width', 1, ' ms')} · 心搏高度 ${range('height', 3, ' mV')}`;
+    }
+
+    function refreshThumbnailStatus() {
+        const status = document.querySelector(`#${CONFIG.controlId} [data-role="batch-status"]`);
+        if (!status) return;
+        const selection = thumbnailSelectionText();
+        const batch = thumbnailHasBatchStatus ? `修改 ${thumbnailChanged} · 頁 ${thumbnailPages} · ${thumbnailMessage}` : thumbnailMessage;
+        const compactBatch = batch.replace(/ · Esc 暫停/g, '');
+        let text = boundsMessages.thumbnail || compactBatch;
+        if (selection && !boundsMessages.thumbnail) {
+            const [count, bpm, width, height] = selection.split(' · ');
+            const compact = value => value.replace('心搏速率(BPM) ', 'BPM ')
+                .replace('心搏寬度 ', '寬 ').replace('心搏高度 ', '高 ')
+                .replace(/ (ms|mV)/g, ' $1').replace(/ /g, ' ');
+            // 將數值範圍與單位設為不斷行的完整片段，依指標分兩列閱讀。
+            text = `${count}　${compact(bpm)}　${compactBatch}\n${compact(width)}　│　${compact(height)}`;
+        }
+        if (status.textContent !== text) status.textContent = text;
+        status.title = boundsMessages.thumbnail || (selection ? `${selection} · ${batch}` : batch);
+    }
 
     // 顯示縮圖批次的累積修改數、已處理頁數與目前等待 / 完成狀態。
     function thumbnailStatus(message) {
-        const status = document.querySelector(`#${CONFIG.controlId} [data-role="batch-status"]`);
-        if (status) status.textContent = `修改 ${thumbnailChanged} · 頁 ${thumbnailPages} · ${message}`;
+        thumbnailMessage = message;
+        thumbnailHasBatchStatus = true;
+        refreshThumbnailStatus();
     }
 
     // 清除目前任務及計時器，並遞增 epoch，使已排程的舊回呼即使執行也不再操作頁面。
@@ -917,19 +1196,269 @@
         return { page, total, entries, signature: `${page}:${segments.map(s => s.absoluteIndex).join(',')}` };
     }
 
+    const shapeCache = new WeakMap();
+
+    // 讀取網站 D3 basis 產生的 M/L/C 路徑。保留曲線極值及密集取樣，
+    // 不讀紅點，也不使用螢幕像素；遇到未知命令時拒絕量測。
+    function sampleWavePath(d) {
+        const tokens = d.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:e[-+]?\d+)?/gi) || [];
+        const points = [];
+        let i = 0, x = 0, y = 0;
+        while (i < tokens.length) {
+            const command = tokens[i++];
+            const count = command === 'C' ? 6 : ['M', 'L'].includes(command) ? 2 : 0;
+            if (!count || i + count > tokens.length) return null;
+            const values = tokens.slice(i, i + count).map(Number);
+            if (!values.every(Number.isFinite)) return null;
+            i += count;
+            if (command !== 'C') {
+                [x, y] = values;
+                points.push({ x, y });
+                continue;
+            }
+            const [x1, y1, x2, y2, x3, y3] = values;
+            if (!(x <= x1 && x1 <= x2 && x2 <= x3)) return null;
+            const ts = [0.25, 0.5, 0.75, 1];
+            const a = -y + 3 * y1 - 3 * y2 + y3;
+            const b = 2 * (y - 2 * y1 + y2);
+            const c = y1 - y;
+            if (Math.abs(a) < 1e-12) {
+                if (Math.abs(b) > 1e-12) ts.push(-c / b);
+            } else {
+                const discriminant = b * b - 4 * a * c;
+                if (discriminant >= 0) {
+                    ts.push((-b + Math.sqrt(discriminant)) / (2 * a), (-b - Math.sqrt(discriminant)) / (2 * a));
+                }
+            }
+            for (const t of ts.filter(t => t > 0 && t <= 1).sort((a, b) => a - b)) {
+                const u = 1 - t;
+                points.push({ x: u ** 3 * x + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t ** 3 * x3,
+                    y: u ** 3 * y + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t ** 3 * y3 });
+            }
+            x = x3; y = y3;
+        }
+        return points.length > 2 ? points : null;
+    }
+
+    // 以彩色區附近、非彩色區的低斜率波形估算等電位基準。
+    // 取 0.5 SVG px 分箱的加權眾數，避免 R 峰或負向峰拉動平均值。
+    function estimateWaveBaseline(points, left, right) {
+        const bins = new Map();
+        const padding = (right - left) * 3;
+        for (let i = 1; i < points.length; i++) {
+            const a = points[i - 1], b = points[i];
+            const x = (a.x + b.x) / 2;
+            const dx = b.x - a.x;
+            if (!(dx > 0) || (b.x >= left && a.x <= right)
+                || x < left - padding || x > right + padding) continue;
+            const slope = Math.abs((b.y - a.y) / dx);
+            if (slope > 1) continue;
+            const y = (a.y + b.y) / 2;
+            const key = Math.round(y * 2);
+            const weight = dx / (1 + slope * slope * 16);
+            const bin = bins.get(key) || { weight: 0, sum: 0 };
+            bin.weight += weight; bin.sum += y * weight;
+            bins.set(key, bin);
+        }
+        const best = [...bins.values()].sort((a, b) => b.weight - a.weight)[0];
+        return best && best.weight >= 0.5 ? best.sum / best.weight : null;
+    }
+
+    // 量中央主峰的基準線寬度。正負峰使用同一規則；過零即為回到基準線，
+    // 不將另一側的反向峰或相鄰心搏接在一起。找不到完整兩端時回傳 null。
+    function measureWaveWidth(points, baseline, center, leftLimit, rightLimit, peakRadius, anchoredPeak = null) {
+        if (!Number.isFinite(baseline)) return null;
+        let peak = anchoredPeak === null ? -1 : anchoredPeak;
+        for (let i = 0; anchoredPeak === null && i < points.length; i++) {
+            if (Math.abs(points[i].x - center) > peakRadius
+                || points[i].x <= leftLimit || points[i].x >= rightLimit) continue;
+            if (peak < 0 || Math.abs(points[i].y - baseline) > Math.abs(points[peak].y - baseline)) peak = i;
+        }
+        if (peak < 0) return null;
+        const amplitude = Math.abs(points[peak].y - baseline);
+        const tolerance = Math.max(0.5, amplitude * 0.05);
+        if (amplitude <= tolerance * 2) return null;
+        const sign = Math.sign(baseline - points[peak].y);
+        const departure = point => sign * (baseline - point.y);
+        function crossing(direction) {
+            let previous = points[peak];
+            for (let i = peak + direction; i >= 0 && i < points.length; i += direction) {
+                let point = points[i];
+                const limit = direction < 0 ? leftLimit : rightLimit;
+                const outside = direction < 0 ? point.x < limit : point.x > limit;
+                if (outside) {
+                    if (point.x === previous.x) return null;
+                    point = { x: limit, y: previous.y + (point.y - previous.y)
+                        * (limit - previous.x) / (point.x - previous.x) };
+                }
+                if (departure(point) <= tolerance) {
+                    const from = departure(previous), to = departure(point);
+                    return previous.x + (point.x - previous.x) * (from - tolerance) / (from - to);
+                }
+                if (outside) return null;
+                previous = point;
+            }
+            return null;
+        }
+        const left = crossing(-1), right = crossing(1);
+        return left !== null && right !== null && right > left ? right - left : null;
+    }
+
+    // Player 比較標記附近短時間範圍內的正負極值，保留雙向波形的主要方向。
+    function anchoredWavePeak(points, baseline, center, left, right, radius) {
+        if (!Number.isFinite(baseline)) return -1;
+        let peak = -1;
+        for (let i = 1; i < points.length - 1; i++) {
+            const p = points[i], before = points[i - 1], after = points[i + 1];
+            if (p.x <= left || p.x >= right || Math.abs(p.x - center) > radius
+                || Math.abs(p.y - baseline) <= 1) continue;
+            const extremum = (p.y < before.y && p.y <= after.y) || (p.y > before.y && p.y >= after.y);
+            if (!extremum) continue;
+            if (peak < 0 || Math.abs(p.y - baseline) > Math.abs(points[peak].y - baseline)) peak = i;
+        }
+        return peak;
+    }
+
+    // 縮圖保留彩線高度；Player 的高度與寬度使用同一個中央心搏主峰。
+    // objectBoundingBox 漸層以 path 自身範圍換算；平移不影響相對高度或寬度。
+    function readColoredWavePixels(container, player = false) {
+        const path = container.querySelector('.ecgWave path.ecg-path');
+        const svg = path?.closest('svg');
+        const gradient = svg?.querySelector('linearGradient');
+        if (!path || !gradient || gradient.getAttribute('gradientUnits') === 'userSpaceOnUse') return null;
+        const stops = [...gradient.querySelectorAll('stop')];
+        const isColored = stop => /^(red|#f00|#ff0000|#0568f7|blue|#00f|#0000ff)$/i
+            .test(stop.getAttribute('stop-color') || '');
+        const offset = stop => {
+            const text = stop.getAttribute('offset') || '';
+            return text.endsWith('%') ? parseFloat(text) / 100 : Number(text);
+        };
+        // Player 同一列可有多個紅／藍區段，中央 stop 才是目標心搏。
+        const colored = player ? stops.findIndex(stop => Math.abs(offset(stop) - 0.5) < 1e-6)
+            : stops.findIndex(isColored);
+        if (colored < 1 || colored >= stops.length - 1 || !isColored(stops[colored])) return null;
+        let first = colored, last = colored;
+        const color = stops[colored].getAttribute('stop-color').toLowerCase();
+        while (!player && first > 0 && stops[first - 1].getAttribute('stop-color')?.toLowerCase() === color) first--;
+        while (!player && last < stops.length - 1 && stops[last + 1].getAttribute('stop-color')?.toLowerCase() === color) last++;
+        if (first === 0 || last === stops.length - 1) return null;
+        // 相鄰不同彩色心搏間沒有灰色停止點時，以漸層中點分界，排除另一搏的峰。
+        const start = isColored(stops[first - 1])
+            ? (offset(stops[first - 1]) + offset(stops[first])) / 2 : offset(stops[first - 1]);
+        const end = isColored(stops[last + 1])
+            ? (offset(stops[last]) + offset(stops[last + 1])) / 2 : offset(stops[last + 1]);
+        if (!(start >= 0 && end <= 1 && end > start)) return null;
+        const d = path.getAttribute('d') || '';
+        // Player 的相鄰 stop 是心搏位置；取中點限制寬度搜尋，避免跨入相鄰心搏。
+        // 縮圖的相鄰 stop 只是固定著色邊界，故允許搜尋到上色區之外。
+        const centerOffset = offset(stops[colored]);
+        const widthStart = player ? (offset(stops[colored - 1]) + centerOffset) / 2 : Math.max(0, centerOffset - 0.1);
+        const widthEnd = player ? (offset(stops[colored + 1]) + centerOffset) / 2 : Math.min(1, centerOffset + 0.1);
+        const segmentSeconds = readWaveScale(container).seconds;
+        const playerSeconds = segmentSeconds > 0 && Number.isFinite(segmentSeconds) ? segmentSeconds : 10;
+        const key = `${player}:${playerSeconds}:${start}:${end}:${widthStart}:${widthEnd}:${centerOffset}:${d}`;
+        const cached = shapeCache.get(path);
+        if (cached?.key === key) return cached.value;
+        const points = sampleWavePath(d);
+        let value = null;
+        if (points) {
+            const minX = points[0].x, maxX = points[points.length - 1].x;
+            const left = minX + (maxX - minX) * (player ? widthStart : start);
+            const right = minX + (maxX - minX) * (player ? widthEnd : end);
+            const inside = points.filter(point => point.x >= left && point.x <= right);
+            // 補上漸層邊界的插值，避免邊界剛好落在兩個取樣點間。
+            for (const boundary of [left, right]) {
+                const index = points.findIndex(point => point.x >= boundary);
+                if (index > 0) {
+                    const a = points[index - 1], b = points[index];
+                    if (b.x > a.x) inside.push({ x: boundary,
+                        y: a.y + (b.y - a.y) * (boundary - a.x) / (b.x - a.x) });
+                }
+            }
+            const baseline = estimateWaveBaseline(points, left, right);
+            if (inside.length && right > left) {
+                const upper = baseline === null ? null : baseline - Math.min(...inside.map(point => point.y));
+                const lower = baseline === null ? null : baseline - Math.max(...inside.map(point => point.y));
+                const span = maxX - minX;
+                value = { width: measureWaveWidth(points, baseline, minX + span * centerOffset,
+                    minX + span * widthStart, minX + span * widthEnd, span * 0.01), height: baseline === null ? null
+                    : Math.abs(upper) >= Math.abs(lower) ? upper : lower, baseline };
+                if (player) {
+                    const center = minX + span * centerOffset;
+                    // ±60 ms 納入緊鄰的小 R／深 S，避免沿整段彩線搜尋到較晚的 T 波。
+                    const peak = anchoredWavePeak(points, baseline, center, left, right, span * 0.06 / playerSeconds);
+                    value.height = peak < 0 ? null : baseline - points[peak].y;
+                    value.width = measureWaveWidth(points, baseline, center, left, right, span * 0.01, peak);
+                }
+            }
+        }
+        shapeCache.set(path, { key, value });
+        return value;
+    }
+
+    // 與網站 ecgWave 的線性座標相同：整個 centerGroup 寬度對應 segSec，
+    // 高度對應 maxMVolt-minMVolt。偏移僅改變零點，不影響相對振幅。
+    function readWaveScale(container) {
+        const wave = container.querySelector('.ecgWave');
+        const group = wave?.querySelector('.centerGroup');
+        let scope;
+        try { scope = window.angular?.element(wave)?.isolateScope?.(); } catch (_) { /* 未載入 */ }
+        const number = (key, attribute) => {
+            const value = scope?.[key];
+            if (value != null && Number.isFinite(Number(value))) return Number(value);
+            const text = wave?.getAttribute(attribute);
+            return text != null && text.trim() !== '' ? Number(text) : NaN;
+        };
+        const seconds = number('segSec', 'seg-sec');
+        const minimum = number('minMVolt', 'min-m-volt'), maximum = number('maxMVolt', 'max-m-volt');
+        const width = Number(group?.getAttribute('width')), height = Number(group?.getAttribute('height'));
+        const zoom = number('zoomScale', 'zoom-scale');
+        const zoomFactor = Number.isFinite(zoom) && zoom > 0 ? Number(zoom.toFixed(1)) : 1;
+        return {
+            seconds,
+            msPerPixel: seconds > 0 && width > 0 ? seconds * 1000 / width : null,
+            mvPerPixel: Number.isFinite(minimum) && Number.isFinite(maximum) && maximum > minimum
+                && height > 0 && zoomFactor > 0 ? (maximum - minimum) / height / zoomFactor : null
+        };
+    }
+
+    function readColoredWaveShape(container, player = false) {
+        const pixels = readColoredWavePixels(container, player);
+        if (!pixels) return null;
+        const scale = readWaveScale(container);
+        return {
+            width: pixels.width != null && scale.msPerPixel != null ? pixels.width * scale.msPerPixel : null,
+            height: pixels.height != null && scale.mvPerPixel != null ? pixels.height * scale.mvPerPixel : null
+        };
+    }
+
     // 各條件先各自產生命中集合，再取交集，確保同一縮圖符合全部條件。
     function thumbnailHits(settings) {
         if (!validConditions(settings)) return new Set();
+        const shapes = new Map();
+        if (settings.conditions.some(isShapeCondition)) {
+            for (const thumb of document.querySelectorAll('#right-list .ecg-trend')) {
+                shapes.set(thumb, readColoredWaveShape(thumb));
+            }
+        }
         const sets = settings.conditions.map(condition => condition.kind === 'rate'
             ? findRateHits(condition.operator, condition.value / 100)
-            : findHeartRateHits(condition.value, condition.operator));
+            : condition.kind === 'bpm' ? findHeartRateHits(condition.value, condition.operator)
+                : new Set([...shapes].filter(([, metrics]) => metrics && conditionMatches(metrics, condition))
+                    .map(([thumb]) => thumb)));
         return new Set([...sets[0]].filter(thumb => sets.every(set => set.has(thumb))));
     }
 
     // 使用網站原生 Ctrl 狀態及 selectEcg 建立精確目標集合，先清掉包含其他頁的舊選取。
     // finally 保證放開合成 Ctrl；操作後再核對模型與縮圖選取旗標，防止分類連帶修改其他項目。
-    function selectThumbnailBatch(scope, page, targets) {
+    function selectThumbnailBatch(scope, page, targets, retainOtherPages = false) {
         const desired = new Set(targets.map(entry => entry.segment));
+        if (retainOtherPages) {
+            const current = new Set(page.entries.map(entry => entry.segment));
+            for (const segment of scope.morphology.state.selectedSegments) {
+                if (!current.has(segment)) desired.add(segment);
+            }
+        }
         // 原站以 document 的按鍵狀態決定是否多選，單純 click.ctrlKey 不足以累加選取。
         document.dispatchEvent(new KeyboardEvent('keydown', {
             key: 'Control', code: 'ControlLeft', keyCode: 17, which: 17, ctrlKey: true, bubbles: true,
@@ -939,12 +1468,15 @@
                 scope.focusRight();
                 // 包含其他頁的既有選取，避免分類按鈕順帶修改非命中項目。
                 for (const segment of scope.morphology.state.selectedSegments.slice()) {
+                    if (desired.has(segment)) continue;
                     const index = scope.morphology.ecgEnlargedChart.information.posInfo
                         .findIndex(info => Number(info.absoluteIndex) === Number(segment.absoluteIndex));
                     if (index < 0) throw new Error('無法定位既有選取');
                     scope.selectEcg(segment, index);
                 }
-                for (const entry of targets) scope.selectEcg(entry.segment, entry.index);
+                for (const entry of targets) {
+                    if (!scope.morphology.state.selectedSegments.includes(entry.segment)) scope.selectEcg(entry.segment, entry.index);
+                }
             });
         } finally {
             document.dispatchEvent(new KeyboardEvent('keyup', {
@@ -996,10 +1528,12 @@
             }
             if (!run.applied) {
                 const hits = thumbnailHits(run.settings);
+                const selectionOnly = run.settings.label === 'select';
                 const targets = page.entries.filter(entry => hits.has(entry.thumb)
-                    && (entry.segment.modifiedLabel || entry.segment.label) !== run.settings.label);
-                selectThumbnailBatch(scope, page, targets);
-                if (targets.length) {
+                    && (selectionOnly || (entry.segment.modifiedLabel || entry.segment.label) !== run.settings.label));
+                selectThumbnailBatch(scope, page, targets, selectionOnly && run.selectionStarted);
+                if (selectionOnly) run.selectionStarted = true;
+                if (!selectionOnly && targets.length) {
                     const button = document.querySelector(`.right-content [ng-click="changeLabel('right-${run.settings.label}')"]`);
                     if (!button || button.classList.contains('disabled')) throw new Error('找不到可用分類按鈕');
                     button.click();
@@ -1011,9 +1545,10 @@
                 run.applied = true;
                 run.appliedSignature = page.signature;
                 thumbnailStatus(`${page.page}/${page.total} · 本頁完成`);
+                if (run.singlePage) { pauseThumbnails(selectionOnly ? '單頁選取完成' : '單頁完成'); return; }
                 // 分類造成頁面縮減時停下，避免位移後跳過未處理心搏。
                 if (model.state.type !== run.type || model.state.label !== run.category) {
-                    pauseThumbnails('目前 type 已結束 · 請檢查後 Save'); return;
+                    pauseThumbnails('目前 type 已結束'); return;
                 }
                 const after = readThumbnailPage(scope);
                 if (after && after.signature !== page.signature) {
@@ -1024,7 +1559,7 @@
             if (page.signature !== run.appliedSignature) {
                 pauseThumbnails('分類後清單位置改變，請檢查後重新播放'); return;
             }
-            if (page.page >= page.total) { pauseThumbnails('已到最後一頁 · 請檢查後 Save'); return; }
+            if (page.page >= page.total) { pauseThumbnails('已到最後一頁'); return; }
             const next = document.querySelector('.pagination-container [ng-click="selectPage(page + 1, $event)"], .pagination [ng-click="selectPage(page + 1, $event)"]');
             if (!next || next.closest('.disabled') || next.hasAttribute('disabled')) throw new Error('無法翻到下一頁');
             run.expectedPage = page.page + 1;
@@ -1042,19 +1577,20 @@
 
     // 驗證單一 type 與可用分類操作，尊重網站禁止改為 N 的設定。
     // 先停止播放器，再保存模型、分類、type、設定及預期頁碼，從目前頁開始執行。
-    function startThumbnails() {
+    function startThumbnails(singlePage = false) {
+        boundsMessages.thumbnail = '';
         const settings = readThumbnailSettings();
         const scope = thumbnailScope();
         const model = scope?.morphology;
         if (!validConditions(settings)) { thumbnailStatus('請新增至少一項條件並輸入有效數值'); return; }
-        if (!['V', 'S', 'N', 'A'].includes(settings.label) || !model?.state?.type
+        if (!['V', 'S', 'N', 'A', 'select'].includes(settings.label) || !model?.state?.type
             || typeof scope.selectEcg !== 'function' || typeof scope.focusRight !== 'function'
             || model.state.multipleTypesSelected || model.state.classificationMode || model.compareMode?.selectMode
             || document.querySelector('.ngdialog')) { thumbnailStatus('請選取單一 type 並關閉其他模式／視窗'); return; }
         if (settings.label === 'N' && model.content?.disableN) { thumbnailStatus('網站目前禁止改為 N'); return; }
         pausePlayer('縮圖批次修改中');
         thumbnailEpoch++;
-        thumbnailRun = { model, settings, category: model.state.label, type: model.state.type,
+        thumbnailRun = { model, settings, singlePage, category: model.state.label, type: model.state.type,
             expectedPage: Number(model.pagination.currentPage), waitSince: Date.now(), stableSignature: '', applied: false };
         document.querySelector(`#${CONFIG.controlId} [data-role="batch-play"]`).textContent = 'Ⅱ 暫停';
         thumbnailStep(thumbnailEpoch);
@@ -1065,15 +1601,45 @@
     function installThumbnailBatchControl(control) {
         const group = document.createElement('span');
         group.className = 'thumbnail-batch-actions';
-        group.innerHTML = `<label>改為 <select data-role="batch-label" aria-label="縮圖批次目標分類"><option>V</option><option>S</option><option>N</option><option>A</option></select></label><label>速度 <select data-role="batch-speed" aria-label="縮圖批次修改速度" title="每次檢查／處理的排程間隔，資料未同步時會等待"><option value="10" selected>10 ms</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="100">100 ms</option></select></label><button type="button" data-role="batch-play">▶ 批次修改</button>`;
+        group.innerHTML = `<label>改為 <select data-role="batch-label" aria-label="縮圖批次目標分類"><option>V</option><option>S</option><option>N</option><option>A</option><option value="select">僅選中</option></select></label><label>速度 <select data-role="batch-speed" aria-label="縮圖批次修改速度" title="每次檢查／處理的排程間隔，資料未同步時會等待"><option value="10" selected>10 ms</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="100">100 ms</option></select></label><button type="button" data-role="batch-play">▶ 批次修改</button>`;
         control.appendChild(group);
+        const singlePage = document.createElement('button');
+        singlePage.type = 'button';
+        singlePage.dataset.role = 'batch-single';
+        singlePage.textContent = '單頁修改';
+        group.insertBefore(singlePage, group.querySelector('[data-role="batch-play"]'));
+        singlePage.addEventListener('click', () => {
+            if (thumbnailRun) pauseThumbnails();
+            startThumbnails(true);
+        });
         const status = document.createElement('span');
         status.dataset.role = 'batch-status';
         status.textContent = '待命 · Esc 暫停';
         group.appendChild(status);
-        for (const name of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'keydown', 'keyup']) {
+        for (const name of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick']) {
             control.addEventListener(name, event => event.stopPropagation());
         }
+        // 保留表單編輯按鍵；非輸入狀態的原生翻頁鍵與修飾鍵交回網站。
+        // keyup 同樣放行，避免原生長按／Ctrl 多選狀態卡住。
+        for (const name of ['keydown', 'keyup']) control.addEventListener(name, event => {
+            const key = event.key.toLowerCase();
+            const modifier = ['control', 'shift', 'alt', 'meta'].includes(key);
+            const editing = event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
+            const navigation = ['q', 'e', 'arrowleft', 'arrowright', 'pageup', 'pagedown', 'home', 'end'].includes(key);
+            if (modifier) return;
+            if (!editing && navigation && !event.isComposing) {
+                if (name === 'keydown') {
+                    event.preventDefault();
+                    const scope = thumbnailScope();
+                    if (typeof scope?.focusRight === 'function') {
+                        if (scope.$root?.$$phase) scope.focusRight();
+                        else scope.$apply(() => scope.focusRight());
+                    }
+                }
+                return;
+            }
+            event.stopPropagation();
+        });
         for (const name of ['change', 'input']) control.addEventListener(name, () => {
             if (thumbnailRun) pauseThumbnails('設定已變更，請重新播放');
         });
@@ -1087,6 +1653,7 @@
     // 符合條件但顯示分類不同於目前分類者另加提示類別，不改變原生選取狀態。
     function update() {
         ensureControl(); ensurePlayerControl();
+        refreshThumbnailStatus();
         document.querySelectorAll('#right-list .ecg-trend').forEach(thumb => thumb.classList.remove(CONFIG.hitClass, CONFIG.reclassifiedClass));
         const settings = readThumbnailSettings();
         if (!validConditions(settings)) return;
@@ -1115,6 +1682,17 @@
         enabled = false;
         heartRateEnabled = false;
         update();
+        // capture 排程到原站選取完成之後；涵蓋 Ctrl/Shift 多選及取消選取。
+        document.addEventListener('click', event => {
+            if (event.target.closest?.('#right-list')) {
+                if (!thumbnailRun && event.target.closest?.('.ecg-trend')) {
+                    thumbnailMessage = '待命 · Esc 暫停';
+                    thumbnailHasBatchStatus = false;
+                }
+                clearBoundsMessage('thumbnail');
+                scheduleThumbnailStatus();
+            }
+        }, true);
         observer = new MutationObserver(records => {
             if (!document.querySelector('.morphology > .container')) {
                 enabled = false;
@@ -1122,6 +1700,8 @@
                 controlContainer = null;
             }
             const relevant = records.some(record => {
+                const statusTarget = record.target instanceof Element ? record.target : record.target.parentElement;
+                if (statusTarget?.closest(`#${CONFIG.controlId} [data-role="batch-status"]`)) return false;
                 if (record.target instanceof Element && record.target.closest(`#${PLAYER_CONTROL_ID}`)) return false;
                 if (record.target.parentElement?.closest(`#${PLAYER_CONTROL_ID}`)) return false;
                 // 播放器每筆會重畫多個波形；面板仍存在時不重掃背後的縮圖列表。
@@ -1135,6 +1715,10 @@
 
                 // CSS :has() 直接跟隨網站的 selectedBackground，選取色即時顯示，毋須整批重算。
                 if (target.matches('#right-list .idBackground')) {
+                    // 選取色不必重算整頁標記，但必須更新單選／多選資訊。
+                    if ((record.oldValue || '').includes('selectedBackground') !== target.classList.contains('selectedBackground')) {
+                        scheduleThumbnailStatus();
+                    }
                     const ignored = new Set(['selectedBackground']);
                     return stripClasses(record.oldValue, ignored) !== stripClasses(target.getAttribute('class'), ignored);
                 }

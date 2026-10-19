@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP快速點擊選取器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.2
+// @version      1.3
 // @description  在 MP 右側清單按住左鍵滑過 ECG 縮圖，連續選取或取消選取；支援 Ctrl 多選及 Alt 原生拖曳。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -17,6 +17,7 @@
 // 從未選取的縮圖開始：沿途選取；從已選取的縮圖開始：沿途取消選取。
 // 移動超過 3 像素才進入滑動多選；同一次拖曳中，每張縮圖只處理一次。
 // Ctrl 可配合網頁原生多選；按住 Alt 時保留原生拖曳操作。
+// 按 ` 反轉當頁全部縮圖的選取，保留其他頁選取；輸入欄位與彈出視窗中不處理。
 // 一般單擊仍使用網頁原生行為；拖曳結束後會攔截多餘的點擊，避免反轉選取結果。
 
 (function() {
@@ -37,6 +38,30 @@
 
     // 以文件層事件代理支援稍後載入的縮圖；按下時記錄起點，超過位移門檻才進入拖曳選取。
     function init() {
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== '`' || e.repeat || e.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+            if (e.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')
+                || document.querySelector('.ngdialog') || isMouseDown) return;
+            const list = document.querySelector('#right-list');
+            if (!list || list.getClientRects().length === 0) return;
+            const items = [...list.querySelectorAll('.ecg-trend')].filter(item => item.getClientRects().length > 0);
+            if (!items.length) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            clearPendingClick();
+            // 網站以 Control 按鍵狀態維持多選；只有 click.ctrlKey 並不足以保留跨頁選取。
+            try {
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Control', code: 'ControlLeft', keyCode: 17, which: 17, ctrlKey: true, bubbles: true
+                }));
+                for (const item of items) triggerClick(item, true);
+            } finally {
+                document.dispatchEvent(new KeyboardEvent('keyup', {
+                    key: 'Control', code: 'ControlLeft', keyCode: 17, which: 17, bubbles: true
+                }));
+            }
+        }, true);
 
         // 攔截目標清單的原生拖曳；Alt 操作交由網站處理。
         document.addEventListener('dragstart', (e) => {
