@@ -18,6 +18,8 @@
 // 心搏高度以 mV、寬度以 ms 輸入；高度以估算的平坦基準線為 0，向下為負。
 // 心搏寬度量中央主峰兩側首次回到基準線容差帶的水平距離；容差為 0.5 px 或峰高 5% 的較大值。
 // 若先遇到低於峰高 12% 的谷底（例如與 P 波相連），以谷底為邊界；正負向波形規則相同。
+// 前一個點 = / ≠：縮圖與播放器各自設定；縮圖從網站保存的每搏分類讀取（畫面上非目標心搏皆為黑點），
+// 網站資料中的 A 即 S。沒有前一搏時 = 與 ≠ 都不命中。
 // 波形方向（僅縮圖清單）：勾選向上或向下（互斥），以主峰偏離基準線最大的一側判斷縮圖，
 // 並同時將代表波形方向相符的左側 type 區塊上色；此條件不加入 Morphology Player。
 // 雜訊判斷(測試版)（僅縮圖清單）：可選「= 雜訊」或「≠ 雜訊」。符合任一項即視為雜訊：
@@ -231,7 +233,7 @@
     let thumbnailLocalConditions = [];
     let syncingConditions = false;
 
-    // 同步縮圖與播放器共用的數值條件；前一搏分類只保留在播放器，波形方向只保留在縮圖清單。
+    // 同步縮圖與播放器共用的數值條件；前一搏分類由兩處各自設定，波形方向與雜訊判斷只保留在縮圖清單。
     // 以同步鎖阻止 change 事件互相回傳，並移除已離開 DOM 的編輯器參照。
     function synchronizeConditions(source) {
         if (syncingConditions) return;
@@ -241,7 +243,7 @@
             playerPreviousConditions = settings.conditions.filter(condition => condition.kind === 'previous')
                 .map(condition => ({ ...condition }));
         } else {
-            thumbnailLocalConditions = editorConditions.filter(condition => condition.kind in THUMBNAIL_ONLY_LABELS)
+            thumbnailLocalConditions = editorConditions.filter(condition => condition.kind in THUMBNAIL_ONLY_LABELS || condition.kind === 'previous')
                 .map(condition => ({ ...condition }));
         }
         sharedConditions = editorConditions.filter(condition => !isLocalCondition(condition))
@@ -266,7 +268,7 @@
         const editor = document.createElement('span');
         editor.className = 'rc-condition-editor';
         editor.dataset.allowPrevious = String(allowPrevious);
-        editor.innerHTML = `<span data-role="conditions"></span><button type="button" data-role="condition-add" aria-label="新增條件" title="新增條件">＋</button><select data-role="condition-menu" aria-label="選擇新增條件" hidden>${Object.entries(CONDITION_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}${allowPrevious ? '<option value="previous:=">前一個點 =</option><option value="previous:!=">前一個點 ≠</option>' : Object.entries(THUMBNAIL_ONLY_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}</select>`;
+        editor.innerHTML = `<span data-role="conditions"></span><button type="button" data-role="condition-add" aria-label="新增條件" title="新增條件">＋</button><select data-role="condition-menu" aria-label="選擇新增條件" hidden>${Object.entries(CONDITION_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}<option value="previous">前一個點</option>${allowPrevious ? '' : Object.entries(THUMBNAIL_ONLY_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}</select>`;
         const rows = editor.querySelector('[data-role="conditions"]');
         const statusKind = allowPrevious ? 'player' : 'thumbnail';
         const clearBoundsNotice = () => {
@@ -314,12 +316,17 @@
         function refreshAvailability() {
             for (const option of menu.options) {
                 if (!option.value) continue;
-                const [kind, operator] = option.value.split(':');
-                option.disabled = kind === 'previous' ? used(kind, operator) : Boolean(rows.querySelector(`[data-group-kind="${kind}"]`));
+                const [kind] = option.value.split(':');
+                // 前一個點只有一個選單項目；= 與 ≠ 都已加入時才停用。
+                option.disabled = kind === 'previous' ? used(kind, '=') && used(kind, '!=')
+                    : Boolean(rows.querySelector(`[data-group-kind="${kind}"]`));
             }
-            for (const row of rows.querySelectorAll('.rc-condition[data-kind="previous"]')) {
+            const previousRows = rows.querySelectorAll('.rc-condition[data-kind="previous"]');
+            for (const row of previousRows) {
                 const select = row.querySelector('[data-role="condition-operator"]');
                 for (const option of select.options) option.disabled = used(row.dataset.kind, option.value, row);
+                // 只有一列時由卡片標題的移除鈕整張移除。
+                row.querySelector('[data-role="condition-remove"]').hidden = previousRows.length < 2;
             }
             addButton.disabled = [...menu.options].filter(option => option.value).every(option => option.disabled);
             if (addButton.disabled) menu.hidden = true;
@@ -330,45 +337,47 @@
             const row = document.createElement('span');
             row.className = 'rc-condition';
             row.dataset.kind = condition.kind;
-            row.innerHTML = `<button type="button" data-role="condition-remove" aria-label="移除此條件" title="移除此條件">×</button><span>${condition.kind === 'rate' ? '心搏變動率' : condition.kind === 'bpm' ? '心搏速率' : '前一個點'}</span><select data-role="condition-operator" aria-label="比較方式">${condition.kind === 'previous' ? '<option value="=">=</option><option value="!=">≠</option>' : '<option value=">=">≥</option><option value="<=">≤</option>'}</select>${condition.kind === 'previous' ? '<select data-role="condition-value" aria-label="前一搏分類"><option>V</option><option>S</option><option>N</option></select>' : `<input type="number" data-role="condition-value" aria-label="${condition.kind === 'rate' ? '變動率百分比' : 'BPM 門檻'}" step="${condition.kind === 'rate' ? '0.1' : '1'}" ${condition.kind === 'bpm' ? 'min="1"' : ''}><span class="rc-unit">${condition.kind === 'rate' ? '%' : 'BPM'}</span>`}`;
-            let group = null;
-            if (condition.kind !== 'previous') {
-                group = rows.querySelector(`[data-group-kind="${condition.kind}"]`);
-                if (!group) {
-                    group = document.createElement('span');
-                    group.className = 'rc-condition-group';
-                    group.dataset.groupKind = condition.kind;
-                    group.innerHTML = `<span class="rc-condition-heading"><button type="button" data-role="condition-remove" aria-label="移除此指標">×</button>${CONDITION_LABELS[condition.kind] || THUMBNAIL_ONLY_LABELS[condition.kind]}</span>`;
-                    const removable = group;
-                    group.querySelector('[data-role="condition-remove"]').addEventListener('click', () => {
-                        clearBoundsNotice(); removable.remove(); refreshAvailability(); refreshNumericBounds(); notify();
-                    });
-                    rows.appendChild(group);
-                }
-                if (condition.kind === 'noise') {
-                    // 找不到平坦基準線（寬高無法量測）即視為雜訊；= 只留雜訊，≠ 排除雜訊。
-                    row.innerHTML = '<select data-role="condition-operator" aria-label="雜訊判斷" title="找不到平坦基準線、紅色心搏後 ST-T 段大幅來回擺動 2 次以上，或紅點旁緊接著另一個 QRS，視為雜訊"><option value="=">= 雜訊</option><option value="!=">≠ 雜訊</option></select><input type="hidden" data-role="condition-value">';
-                } else if (condition.kind === 'direction') {
-                    // 向上／向下互斥，兩者皆未勾選時此條件不生效；值存在隱藏欄位供讀取。
-                    row.innerHTML = '<input type="hidden" data-role="condition-operator"><input type="hidden" data-role="condition-value">'
-                        + [['up', '↑ 向上'], ['down', '↓ 向下']].map(([value, label]) => `<label class="rc-bound-label" title="主峰偏離基準線最大的方向"><input type="checkbox" data-role="direction-option" value="${value}" aria-label="波形${label.slice(2)}"${condition.value === value ? ' checked' : ''}>${label}</label>`).join('');
-                    row.addEventListener('change', event => {
-                        const option = event.target.closest?.('[data-role="direction-option"]');
-                        if (!option) return;
-                        for (const other of row.querySelectorAll('[data-role="direction-option"]')) {
-                            if (other !== option) other.checked = false;
-                        }
-                        row.querySelector('[data-role="condition-value"]').value = option.checked ? option.value : '';
-                    });
-                } else {
-                    const unit = condition.kind === 'rate' ? '%' : condition.kind === 'bpm' ? 'BPM' : condition.kind === 'height' ? 'mV' : 'ms';
-                    const operator = condition.operator === '>=' ? '≥' : '≤';
-                    row.innerHTML = `<label class="rc-bound-label"><input type="checkbox" data-role="condition-enabled" aria-label="啟用${CONDITION_LABELS[condition.kind]} ${operator}">${operator}</label><input type="hidden" data-role="condition-operator"><input type="number" data-role="condition-value" aria-label="${CONDITION_LABELS[condition.kind]} ${operator}" step="${condition.kind === 'bpm' ? '1' : '0.1'}"><span class="rc-unit">${unit}</span>`;
-                    row.querySelector('[data-role="condition-enabled"]').checked = condition.enabled !== false;
-                    row.querySelector('[data-role="condition-enabled"]').addEventListener('change', () => {
-                        clearBoundsNotice(); refreshNumericBounds(row);
-                    });
-                }
+            // 每種條件一張卡片：第一行為標題與移除鈕，條件列放在下方。
+            let group = rows.querySelector(`[data-group-kind="${condition.kind}"]`);
+            if (!group) {
+                group = document.createElement('span');
+                group.className = 'rc-condition-group';
+                group.dataset.groupKind = condition.kind;
+                group.innerHTML = `<span class="rc-condition-heading"><button type="button" data-role="condition-remove" aria-label="移除此指標">×</button>${CONDITION_LABELS[condition.kind] || THUMBNAIL_ONLY_LABELS[condition.kind] || '前一個點'}</span>`;
+                const removable = group;
+                group.querySelector('[data-role="condition-remove"]').addEventListener('click', () => {
+                    clearBoundsNotice(); removable.remove(); refreshAvailability(); refreshNumericBounds(); notify();
+                });
+                rows.appendChild(group);
+            }
+            if (condition.kind === 'previous') {
+                // = 與 ≠ 可各加一列；同卡片有兩列時，各列尾端顯示自己的移除鈕。
+                row.innerHTML = '<select data-role="condition-operator" aria-label="比較方式"><option value="=">=</option><option value="!=">≠</option></select>'
+                    + '<select data-role="condition-value" aria-label="前一搏分類"><option>V</option><option>S</option><option>N</option></select>'
+                    + '<button type="button" data-role="condition-remove" aria-label="移除此條件" title="移除此條件">×</button>';
+            } else if (condition.kind === 'noise') {
+                // 找不到平坦基準線（寬高無法量測）即視為雜訊；= 只留雜訊，≠ 排除雜訊。
+                row.innerHTML = '<select data-role="condition-operator" aria-label="雜訊判斷" title="找不到平坦基準線、紅色心搏後 ST-T 段大幅來回擺動 2 次以上，或紅點旁緊接著另一個 QRS，視為雜訊"><option value="=">= 雜訊</option><option value="!=">≠ 雜訊</option></select><input type="hidden" data-role="condition-value">';
+            } else if (condition.kind === 'direction') {
+                // 向上／向下互斥，兩者皆未勾選時此條件不生效；值存在隱藏欄位供讀取。
+                row.innerHTML = '<input type="hidden" data-role="condition-operator"><input type="hidden" data-role="condition-value">'
+                    + [['up', '↑ 向上'], ['down', '↓ 向下']].map(([value, label]) => `<label class="rc-bound-label" title="主峰偏離基準線最大的方向"><input type="checkbox" data-role="direction-option" value="${value}" aria-label="波形${label.slice(2)}"${condition.value === value ? ' checked' : ''}>${label}</label>`).join('');
+                row.addEventListener('change', event => {
+                    const option = event.target.closest?.('[data-role="direction-option"]');
+                    if (!option) return;
+                    for (const other of row.querySelectorAll('[data-role="direction-option"]')) {
+                        if (other !== option) other.checked = false;
+                    }
+                    row.querySelector('[data-role="condition-value"]').value = option.checked ? option.value : '';
+                });
+            } else {
+                const unit = condition.kind === 'rate' ? '%' : condition.kind === 'bpm' ? 'BPM' : condition.kind === 'height' ? 'mV' : 'ms';
+                const operator = condition.operator === '>=' ? '≥' : '≤';
+                row.innerHTML = `<label class="rc-bound-label"><input type="checkbox" data-role="condition-enabled" aria-label="啟用${CONDITION_LABELS[condition.kind]} ${operator}">${operator}</label><input type="hidden" data-role="condition-operator"><input type="number" data-role="condition-value" aria-label="${CONDITION_LABELS[condition.kind]} ${operator}" step="${condition.kind === 'bpm' ? '1' : '0.1'}"><span class="rc-unit">${unit}</span>`;
+                row.querySelector('[data-role="condition-enabled"]').checked = condition.enabled !== false;
+                row.querySelector('[data-role="condition-enabled"]').addEventListener('change', () => {
+                    clearBoundsNotice(); refreshNumericBounds(row);
+                });
             }
             row.querySelector('[data-role="condition-operator"]').value = condition.operator;
             if (isShapeCondition(condition)) {
@@ -383,7 +392,9 @@
             }
             row.querySelector('[data-role="condition-value"]').value = String(condition.value);
             row.querySelector('[data-role="condition-remove"]')?.addEventListener('click', () => {
-                clearBoundsNotice(); row.remove(); refreshAvailability(); refreshNumericBounds(); notify();
+                clearBoundsNotice(); row.remove();
+                if (group && !group.querySelector('.rc-condition')) group.remove();
+                refreshAvailability(); refreshNumericBounds(); notify();
             });
             const operatorSelect = row.querySelector('[data-role="condition-operator"]');
             let previousOperator = condition.operator;
@@ -428,9 +439,10 @@
         menu.addEventListener('blur', collapseConditionMenu);
         menu.addEventListener('change', () => {
             if (!menu.value) return;
-            const [kind, operator] = menu.value.split(':');
-            const value = kind === 'rate' ? 12 : kind === 'bpm' ? 100 : kind === 'previous' ? 'N' : 0;
-            if (kind === 'previous') add({ kind, operator, value });
+            const [kind] = menu.value.split(':');
+            const value = kind === 'rate' ? 12 : kind === 'bpm' ? 100 : kind === 'previous' ? 'V' : 0;
+            // 前一個點預設 =，已有 = 時改加 ≠；比較方式可在該列切換。
+            if (kind === 'previous') add({ kind, operator: used(kind, '=') ? '!=' : '=', value });
             // 新增波形方向時預設勾選向上，可再改為向下或取消勾選。
             else if (kind === 'direction') add({ kind, operator: '=', value: 'up' });
             else if (kind === 'noise') add({ kind, operator: '=', value: 'noise' });
@@ -1668,6 +1680,20 @@
         };
     }
 
+    // 縮圖畫面上的非目標心搏都畫成黑點，但網站在縮圖資料中保存了每一搏的分類；
+    // 以圓點綁定的絕對取樣索引查表，網站的 N / A / V / X 對應面板的 N / S / V / A。找不到時回傳 null。
+    function readPreviousClassification(thumb) {
+        const wave = thumb.querySelector('.ecgWave');
+        let labels;
+        try { labels = window.angular?.element(wave)?.isolateScope?.()?.annoData; } catch (_) { /* 未載入 */ }
+        if (!labels || typeof labels !== 'object') return null;
+        const dots = [...thumb.querySelectorAll('circle.anno-dot')]
+            .map(dot => ({ dot, x: numericX(dot) })).filter(item => item.x !== null).sort((a, b) => a.x - b.x);
+        const index = dots.findIndex(({ dot }) => dot.classList.contains('current'));
+        const previous = index > 0 ? dots[index - 1].dot.__data__ : null;
+        return previous == null ? null : ({ N: 'N', A: 'S', V: 'V', X: 'A' })[labels[previous]] || null;
+    }
+
     // 各條件先各自產生命中集合，再取交集，確保同一縮圖符合全部條件。
     function thumbnailHits(settings) {
         if (!validConditions(settings)) return new Set();
@@ -1680,6 +1706,8 @@
         const sets = settings.conditions.map(condition => condition.kind === 'rate'
             ? findRateHits(condition.operator, condition.value / 100)
             : condition.kind === 'bpm' ? findHeartRateHits(condition.value, condition.operator)
+            : condition.kind === 'previous' ? new Set([...document.querySelectorAll('#right-list .ecg-trend')]
+                .filter(thumb => conditionMatches({ previousClassification: readPreviousClassification(thumb) }, condition)))
                 : new Set([...shapes].filter(([, metrics]) => metrics && conditionMatches(metrics, condition))
                     .map(([thumb]) => thumb)));
         return new Set([...sets[0]].filter(thumb => sets.every(set => set.has(thumb))));
