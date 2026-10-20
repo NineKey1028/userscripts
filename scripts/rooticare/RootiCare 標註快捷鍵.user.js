@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.13.2
+// @version      1.14.4
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -15,6 +15,7 @@
 
 // 使用教學：在 ECG 或事件心電圖中，將滑鼠移到要處理的位置再按快捷鍵。
 // 1 / 2 / 3：新增或切換為 V / S / N；4：刪除該位置的標籤。
+// Shift + 左鍵拖曳既有標籤：左右微調位置，放開後加入未儲存修改；Esc 取消。
 // 按住 Alt + 1 / 2 / 3 並移動滑鼠：僅修改碰到的既有標籤。
 // 按住 4 並移動滑鼠：連續刪除碰到的標籤；滑鼠中鍵：刪除點擊的標籤。
 // Ctrl + 1 / 2 / 3：記錄區間起點，在面板設定篩選條件，再於終點按快捷鍵套用 V / S / N。
@@ -23,6 +24,7 @@
 // Q / E：模擬方向鍵 ← / → 切換時間；滑鼠點選與滾輪切換時間也保留高度縮放。
 // ch1／ch2／ch3 旁的眼睛可切換導程曲線；本次頁面內保留狀態，重新載入恢復全開。
 // 滑鼠移過 BPM／心律標籤列時，以細紅色垂直線對齊下方心電圖。
+// 滑鼠移過心電圖波形（含 Measure／Ruler 視窗）時，顯示較淡的紅色垂直對照線。
 // Morphology 頁面停用標註操作；Alt 按鍵事件仍會被攔截。
 
 (function() {
@@ -155,6 +157,7 @@
     document.body.appendChild(alignmentGuide);
     let guideMarker = null;
     let guideMouseX = 0;
+    let guideMouseY = 0;
     let guideFrame = null;
     function hideAlignmentGuide() {
         guideMarker = null;
@@ -165,30 +168,41 @@
     function drawAlignmentGuide() {
         guideFrame = null;
         if (!ENABLE_ALIGNMENT_GUIDE || isDisabledPage() || !guideMarker?.isConnected) { hideAlignmentGuide(); return; }
-        const wave = guideMarker.nextElementSibling;
+        const overWave = guideMarker.matches('div.ecgWave');
+        const wave = overWave ? guideMarker : guideMarker.nextElementSibling;
         if (!wave?.matches('div.ecgWave')) { hideAlignmentGuide(); return; }
-        const markerBounds = guideMarker.getBoundingClientRect();
-        const waveBounds = wave.getBoundingClientRect();
+        const plot = overWave ? wave.querySelector('.centerGroup .centerRect') : null;
+        if (overWave && !plot) { hideAlignmentGuide(); return; }
+        const markerBounds = (plot || guideMarker).getBoundingClientRect();
+        const waveBounds = (plot || wave).getBoundingClientRect();
         if (waveBounds.height <= 0 || guideMouseX < markerBounds.left || guideMouseX > markerBounds.right
-            || guideMouseX < waveBounds.left || guideMouseX > waveBounds.right) {
+            || guideMouseX < waveBounds.left || guideMouseX > waveBounds.right
+            || (overWave && (guideMouseY < waveBounds.top || guideMouseY > waveBounds.bottom))) {
             hideAlignmentGuide(); return;
         }
         // 對齊實體像素邊界，固定為一個實體像素，避免瀏覽器縮放／DPI 讓紅線跨兩欄像素。
         const ratio = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
             ? window.devicePixelRatio : 1;
         const snap = value => Math.round(value * ratio) / ratio;
-        const top = snap(markerBounds.top);
+        // 同一區塊可能有主波形及下方概覽；向前尋找共用的標籤列。
+        let labelRow = overWave ? wave.previousElementSibling : guideMarker;
+        while (labelRow?.matches('div.ecgWave')) labelRow = labelRow.previousElementSibling;
+        const labelBounds = labelRow?.matches('svg.ecgRMarker') ? labelRow.getBoundingClientRect() : null;
+        const top = snap(labelBounds && labelBounds.height > 0 ? Math.min(labelBounds.top, markerBounds.top) : markerBounds.top);
         alignmentGuide.style.width = `${1 / ratio}px`;
         alignmentGuide.style.left = `${snap(guideMouseX)}px`;
         alignmentGuide.style.top = `${top}px`;
         alignmentGuide.style.height = `${snap(waveBounds.bottom) - top}px`;
+        alignmentGuide.style.background = overWave ? 'rgba(224, 32, 32, 0.3)' : '#e02020';
         alignmentGuide.style.display = 'block';
     }
     document.addEventListener('mousemove', event => {
-        const marker = event.target.closest?.('svg.ecgRMarker');
+        if (labelDrag) return; // 拖曳期間由標籤的實際位置更新紅線，避免被游標位置覆蓋。
+        const marker = event.target.closest?.('svg.ecgRMarker, div.ecgWave');
         if (!ENABLE_ALIGNMENT_GUIDE || !marker || isDisabledPage()) { hideAlignmentGuide(); return; }
         guideMarker = marker;
         guideMouseX = event.clientX;
+        guideMouseY = event.clientY;
         if (guideFrame === null) guideFrame = requestAnimationFrame(drawAlignmentGuide);
     }, { passive: true });
     document.addEventListener('mouseleave', hideAlignmentGuide);
@@ -631,6 +645,204 @@
         new MutationObserver(updatePageAvailability).observe(document.body, { childList: true, subtree: true });
     }
     window.addEventListener('blur', cancelRange);
+    // 拖曳只預覽 DOM，放開後才以原生修改格式提交；不自動儲存報告。
+    let labelDrag = null;
+    let dragClickUntil = 0;
+    const movedLabelSources = new WeakMap();
+    // 原位仍有原始心搏資料；重新新增 N 時撤銷刪除，避免送出互相抵消的新增／刪除。
+    function restoreMovedLabelSource(pending, index) {
+        const position = pending.findIndex(item => item[4] && item[1] === index && item[2] === 'X');
+        if (position < 0) return false;
+        const original = pending[position][3];
+        if (original === 'N') pending.splice(position, 1);
+        else pending[position][2] = 'N';
+        return true;
+    }
+    document.addEventListener('click', event => {
+        if (event.button !== 0 || event.shiftKey || labelDrag || Date.now() < dragClickUntil || isDisabledPage()) return;
+        const svg = event.target.closest?.('svg.ecgRMarker');
+        if (!svg || event.target.closest?.('.annoText') || !svg.closest(TARGET_BLOCK_SELECTOR)) return;
+        try {
+            const context = getRangeContext(svg, event.clientX);
+            const sources = movedLabelSources.get(context.modifiedData);
+            const original = context.scope.annoData.find(beat => Math.abs(beat.index - context.index) <= 10);
+            if (!original || !sources?.has(original.index)
+                || !context.modifiedData.some(item => item[4] && item[1] === original.index && item[2] === 'X')) return;
+            event.preventDefault(); event.stopImmediatePropagation();
+            context.parent.$apply(() => restoreMovedLabelSource(context.modifiedData, original.index));
+        } catch (_) { /* 不可編輯時沿用原生禁用狀態。 */ }
+    }, true);
+    function previewDragIntervals(drag) {
+        const width = Number(drag.svg.getAttribute('width'));
+        const pixelsPerSample = width / (drag.first.rate * Number(drag.first.scope.segSec));
+        for (const item of drag.intervals) {
+            const from = item.side === 'left' ? item.neighbor : drag.index;
+            const to = item.side === 'left' ? drag.index : item.neighbor;
+            const interval = to - from;
+            if (!(interval > 0)) continue;
+            item.text.nodeValue = String(Math.floor(interval / drag.first.rate * 1000));
+            if (item.bpm) item.bpm.textContent = String(Math.round(60 * drag.first.rate / interval));
+            // 父 text 的總長度包含下方 tspan；兩列須分別量寬，再共用同一中心。
+            const rrWidth = item.node.getSubStringLength(0, item.text.nodeValue.length);
+            const bpmWidth = item.bpm ? item.bpm.getComputedTextLength() : 0;
+            const margin = Math.max(rrWidth, bpmWidth) / 2 + 1;
+            const center = Math.max(margin, Math.min(width - margin,
+                ((from + to) / 2 - drag.first.viewStart) * pixelsPerSample));
+            item.node.setAttribute('px', center);
+            item.node.setAttribute('x', center - rrWidth / 2);
+            if (item.bpm) item.bpm.setAttribute('x', center - bpmWidth / 2);
+        }
+    }
+    function finishLabelDrag(commit = false) {
+        const drag = labelDrag;
+        if (!drag) return;
+        labelDrag = null;
+        hideAlignmentGuide();
+        dragClickUntil = Date.now() + 400;
+        drag.label.setAttribute('x', drag.originalX);
+        for (const item of drag.intervals) {
+            item.text.nodeValue = item.originalText;
+            item.node.setAttribute('x', item.x);
+            item.node.setAttribute('px', item.px);
+            if (item.bpm) {
+                item.bpm.textContent = item.originalBpm;
+                item.bpm.setAttribute('x', item.bpmX);
+            }
+        }
+        if (!commit || drag.index === drag.first.index) return;
+        try {
+            const current = getRangeContext(drag.svg, drag.lastX);
+            if (!drag.svg.isConnected || isDisabledPage() || current.scope !== drag.first.scope
+                || current.record !== drag.first.record || current.viewStart !== drag.first.viewStart
+                || current.rate !== drag.first.rate || current.modifiedData !== drag.first.modifiedData
+                || JSON.stringify(current.modifiedData) !== drag.pendingSnapshot) return;
+            const pending = current.modifiedData;
+            const source = pending.find(item => item[4] && item[1] === drag.first.index);
+            const original = source ? source[3] : drag.type;
+            const destination = pending.find(item => item[4] && item[1] === drag.index);
+            const destinationOriginal = destination ? destination[3]
+                : current.scope.annoData.find(item => item.index === drag.index)?.type || 'X';
+            const edit = (index, type, originalType) => [current.startTime
+                + Math.floor((index - current.viewStart) / current.rate), index, type, originalType, 1];
+            current.parent.$apply(() => {
+                for (let i = pending.length - 1; i >= 0; i--) {
+                    if (pending[i][4] && [drag.first.index, drag.index].includes(pending[i][1])) pending.splice(i, 1);
+                }
+                pending.push(edit(drag.first.index, 'X', original), edit(drag.index, drag.type, destinationOriginal));
+                let sources = movedLabelSources.get(pending);
+                if (!sources) { sources = new Set(); movedLabelSources.set(pending, sources); }
+                sources.add(drag.first.index);
+            });
+        } catch (error) {
+            console.warn('[RootiCare 標籤位置微調] 已取消', error);
+        }
+    }
+    document.addEventListener('pointerdown', event => {
+        const marker = event.target.closest?.('svg.ecgRMarker');
+        if (event.button === 0 && event.shiftKey && marker?.closest(TARGET_BLOCK_SELECTOR) && !isDisabledPage()) {
+            event.preventDefault(); event.stopImmediatePropagation();
+            dragClickUntil = Date.now() + 400;
+        }
+        if (event.button !== 0 || !event.shiftKey || event.ctrlKey || event.altKey || event.metaKey
+            || isDisabledPage() || rangeMode || rangeBusy || labelDrag) return;
+        const label = event.target.closest?.('.annoText');
+        const svg = label?.closest('svg.ecgRMarker');
+        if (!svg || !label.closest(TARGET_BLOCK_SELECTOR)) return;
+        // Shift 點擊不送入原生循環分類，即使目前標籤不可編輯也不變更分類。
+        event.preventDefault(); event.stopImmediatePropagation();
+        dragClickUntil = Date.now() + 400;
+        try {
+            const first = getRangeContext(svg, event.clientX);
+            const beat = label.__data__;
+            if (!Number.isInteger(beat?.index) || !['N', 'A', 'S', 'V'].includes(beat.type)) return;
+            first.index = beat.index;
+            const effective = new Map(first.scope.annoData.map(item => [item.index, item.type]));
+            for (const item of first.modifiedData) if (item[4]) effective.set(item[1], item[2]);
+            const neighbors = [...effective].filter(([, type]) => ['N', 'A', 'S', 'V'].includes(type))
+                .map(([index]) => index).sort((a, b) => a - b);
+            const position = neighbors.indexOf(beat.index);
+            if (position < 0) return;
+            const labelMargin = (label.getComputedTextLength() / 2 + 1)
+                / Number(svg.getAttribute('width')) * first.rate * Number(first.scope.segSec);
+            const previous = neighbors[position - 1] ?? (Number(first.scope.idxAdjust?.[0]) > 0
+                ? beat.index - Number(first.scope.idxAdjust[0]) : null);
+            const next = neighbors[position + 1] ?? (Number(first.scope.idxAdjust?.[1]) > 0
+                ? beat.index + Number(first.scope.idxAdjust[1]) : null);
+            const durationNodes = [...svg.querySelectorAll('.annoDuration')]
+                .filter(node => typeof node.__data__ === 'number').sort((a, b) => a.__data__ - b.__data__);
+            const rightNode = durationNodes.find(node => node.__data__ > beat.index);
+            const intervals = durationNodes.flatMap(node => {
+                const side = node.__data__ === beat.index ? 'left' : node === rightNode ? 'right' : null;
+                const neighbor = side === 'left' ? previous : next;
+                const text = [...node.childNodes].find(child => child.nodeType === 3);
+                if (!side || neighbor == null || !text || !text.nodeValue.trim()) return [];
+                const bpm = node.querySelector('tspan');
+                return [{ node, side, neighbor, text, bpm, originalText: text.nodeValue,
+                    originalBpm: bpm?.textContent, x: node.getAttribute('x'), px: node.getAttribute('px'),
+                    bpmX: bpm?.getAttribute('x') }];
+            });
+            labelDrag = { label, svg, first, type: beat.type, pointerId: event.pointerId,
+                intervals,
+                startX: event.clientX, lastX: event.clientX, originalX: label.getAttribute('x'), index: beat.index,
+                pendingSnapshot: JSON.stringify(first.modifiedData),
+                min: Math.max(Math.ceil(first.viewStart + labelMargin), (neighbors[position - 1] ?? -Infinity) + 1),
+                max: Math.min(Math.floor(first.viewStart + first.rate * Number(first.scope.segSec) - labelMargin),
+                    (neighbors[position + 1] ?? Infinity) - 1) };
+            updateLabelDragPosition(event);
+        } catch (_) { /* 原生禁用或資料尚未就緒時不開始拖曳。 */ }
+    }, true);
+    document.addEventListener('pointermove', event => {
+        const drag = labelDrag;
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (!event.shiftKey || !(event.buttons & 1) || !drag.label.isConnected || isDisabledPage()) {
+            finishLabelDrag(); return;
+        }
+        updateLabelDragPosition(event);
+    }, true);
+    function updateLabelDragPosition(event) {
+        const drag = labelDrag;
+        if (!drag) return;
+        const bounds = drag.svg.getBoundingClientRect();
+        if (!(bounds.width > 0) || drag.min > drag.max) { finishLabelDrag(); return; }
+        const samplesPerPixel = drag.first.rate * Number(drag.first.scope.segSec) / bounds.width;
+        drag.index = Math.max(drag.min, Math.min(drag.max,
+            Math.round(drag.first.viewStart + (event.clientX - bounds.left) * samplesPerPixel)));
+        drag.lastX = event.clientX;
+        const scale = Number(drag.svg.getAttribute('width')) / bounds.width;
+        const centerX = (drag.index - drag.first.viewStart) / samplesPerPixel * scale;
+        drag.label.setAttribute('x', centerX - drag.label.getComputedTextLength() / 2);
+        previewDragIntervals(drag);
+        guideMarker = drag.svg;
+        guideMouseX = bounds.left + (drag.index - drag.first.viewStart) / samplesPerPixel;
+        guideMouseY = event.clientY;
+        if (guideFrame !== null) cancelAnimationFrame(guideFrame);
+        drawAlignmentGuide();
+    }
+    document.addEventListener('pointerup', event => {
+        if (!labelDrag || event.pointerId !== labelDrag.pointerId) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        finishLabelDrag(event.shiftKey && event.button === 0);
+    }, true);
+    for (const name of ['mousedown', 'mouseup', 'click', 'dblclick']) {
+        document.addEventListener(name, event => {
+            const shiftOnMarker = event.shiftKey && event.button === 0 && !isDisabledPage()
+                && event.target.closest?.('svg.ecgRMarker')?.closest(TARGET_BLOCK_SELECTOR);
+            if (shiftOnMarker || labelDrag || (Date.now() < dragClickUntil && event.button === 0)) {
+                event.preventDefault(); event.stopImmediatePropagation();
+            }
+        }, true);
+    }
+    document.addEventListener('keydown', event => {
+        if (!labelDrag) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (event.key === 'Escape') finishLabelDrag();
+    }, true);
+    document.addEventListener('keyup', event => {
+        if (event.key === 'Shift' && labelDrag) finishLabelDrag();
+    }, true);
+    document.addEventListener('pointercancel', () => finishLabelDrag(), true);
+    window.addEventListener('blur', () => finishLabelDrag());
     // 第一次快捷鍵記錄端點，第二次讀取篩選條件並套用區間；目標分類以第二次按鍵為準。
     // 執行中鎖住區間操作；完成或失敗後顯示結果，並延遲收起提示，不自動儲存報告。
     async function selectRangePoint(tag) {
@@ -687,6 +899,14 @@
             return;
         }
         if (isDisabledPage()) { cancelRange(); rangeHint.style.display = 'none'; return; }
+        // 提示可能沒有建立區間（例如無效端點）；Esc 也須能在輸入欄聚焦時收起。
+        if (e.key === 'Escape' && (rangeMode || rangeHint.style.display !== 'none')) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            cancelRange();
+            rangeHint.style.display = 'none';
+            return;
+        }
         if (rangeHint.contains(e.target)) {
             if (e.key === 'Escape') { e.preventDefault(); cancelRange(); }
             return;
@@ -695,13 +915,11 @@
 
         const key = e.key.toLowerCase();
         const isAltPressed = e.altKey;
-        if (key === 'escape' && rangeMode) {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            cancelRange();
-            return;
-        }
+        // W / S 縮放只處理無修飾鍵的按鍵，保留 Ctrl+S 等瀏覽器快捷鍵。
+        if (['w', 's'].includes(key) && (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey)) return;
         if (e.ctrlKey && !e.altKey && !e.metaKey && ['1', '2', '3'].includes(key)) {
+            // 區間端點與一般數字標註鍵使用相同的滑鼠容器限制。
+            if (!getActiveBlockUnderMouse()) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             if (!rangeBusy && !e.repeat) {
@@ -735,6 +953,16 @@
         }
         if (rangeMode || rangeBusy) return;
 
+        // 高度縮放不依賴滑鼠位置；數字標註鍵仍限制在下方的 ECG 容器內。
+        if (key === 'w' || key === 's') {
+            if (document.querySelector('.fixed-board') || document.querySelector(TARGET_BLOCK_SELECTOR)) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                key === 'w' ? triggerOriginalKey(38, 'ArrowUp') : triggerOriginalKey(40, 'ArrowDown');
+            }
+            return;
+        }
+
         const activeBlock = getActiveBlockUnderMouse();
         if (!activeBlock) return;
 
@@ -757,13 +985,6 @@
             await processCommand(targetTag);
         }
 
-        if (key === 'w' || key === 's') {
-            if (document.querySelector('.fixed-board') || activeBlock) {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                key === 'w' ? triggerOriginalKey(38, 'ArrowUp') : triggerOriginalKey(40, 'ArrowDown');
-            }
-        }
     }, true);
 
     // 滑鼠中鍵：刪除標籤
