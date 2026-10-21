@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.19.0
+// @version      1.20.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -13,24 +13,37 @@
 // @grant        none
 // ==/UserScript==
 
-// 使用教學：在 ECG 或事件心電圖中，將滑鼠移到要處理的位置再按快捷鍵。
-// 1 / 2 / 3：新增或切換為 V / S / N；4：刪除該位置的標籤。
-// Ctrl + 左鍵拖曳既有標籤：左右微調位置，放開後加入未儲存修改；Esc 取消。
-// 按住 Alt + 1 / 2 / 3 並移動滑鼠：僅修改碰到的既有標籤；按下即生效，不需等待鍵盤連發。
-// 按住 4 並移動滑鼠：立即連續刪除碰到的標籤；滑鼠中鍵：刪除點擊的標籤。
-// Shift + 1 / 2 / 3：記錄區間起點，在面板設定篩選條件，再於終點按快捷鍵套用 V / S / N。
-// 區間可跨心電圖視窗；Esc：取消尚未完成的區間操作。
-// 區間面板「填補整理」分頁：在開頭那顆之前、結尾那顆之後各按一次 Shift + 1 / 2 / 3；
-// 依開頭那顆的 RR 平均補滿兩者之間的心搏（多刪少補，保留的維持原類型）。
-// 分頁選擇保留到重新整理頁面為止。
-// W / S：模擬方向鍵 ↑ / ↓，調整心電圖縮放。
-// Q / E：模擬方向鍵 ← / → 切換時間；滑鼠點選與滾輪切換時間也保留高度縮放。
-// ch1／ch2／ch3 旁的眼睛可切換導程曲線；本次頁面內保留狀態，重新載入恢復全開。
-// 滑鼠移過 BPM／心律標籤列時，以細紅色垂直線對齊下方心電圖。
-// 滑鼠移過心電圖波形（含 Measure／Ruler 視窗）時，顯示較淡的紅色垂直對照線。
-// HR Min／HR Max／HR Max sinus 清單：每張心電圖上方的「排除 ±1 分」會移除排序在後、時間相差 ±1 分鐘內的心電圖；標題列可還原。
-// 事件清單（VEB、SVEB、Coppie 等）的頁碼拉條：選印綠線下方以細線連到一列小圓點（同頁多張顯示張數，滑過顯示頁碼），點擊跳頁；右側顯示選印張數。
-// Morphology 頁面停用標註操作；Alt 按鍵事件仍會被攔截。
+/*
+ * ── 使用教學 ────────────────────────────────────────────
+ * 滑鼠移到心電圖上要處理的位置，再按快捷鍵。
+ * 所有修改都只加入「未儲存修改」，不會自動儲存。
+ *
+ * 【標註】
+ *   1 / 2 / 3            新增或改為 V / S / N
+ *   4／滑鼠中鍵          刪除標籤
+ *   按住 4 移動          連續刪除碰到的標籤
+ *   按住 Alt+1/2/3 移動  只修改碰到的既有標籤
+ *   Ctrl+左鍵拖曳        左右微調標籤位置（Esc 取消）；
+ *                        按在標籤列空白處會吸過最近的標籤
+ *
+ * 【區間】Shift+1/2/3 按兩次（起點、終點），可跨視窗；Esc 取消
+ *   篩選修改  依 BPM、變動率、原標籤篩選後改為 V / S / N
+ *   填補整理  在頭尾兩顆標籤外側各按一次，依開頭 RR 平均補滿中間心搏
+ *            （頭尾不改；多刪少補，保留的維持原類型）
+ *   分頁選擇保留到重新整理頁面為止。
+ *
+ * 【檢視】
+ *   W / S   縮放（↑ / ↓）
+ *   Q / E   切換時間（← / →），縮放高度保持不變
+ *   ch1～3 旁的眼睛  顯示／隱藏導程（重新載入恢復全開）
+ *   滑過標籤列或波形時，顯示紅色垂直對齊線
+ *
+ * 【清單】
+ *   HR Min／Max／Max sinus  「排除 ±1 分」移除後面相近時間的心電圖，標題列可還原
+ *   事件清單頁碼拉條        選印位置下方的圓點可點擊跳頁，右側顯示選印張數
+ *
+ * Morphology 頁面不提供以上功能。
+ */
 
 (function() {
     'use strict';
@@ -923,6 +936,20 @@
             console.warn('[RootiCare 標籤位置微調] 已取消', error);
         }
     }
+    // 標籤列中水平距離游標最近、可拖曳（N / A / S / V）的標籤。
+    function findNearestDraggableLabel(svg, clientX) {
+        let nearest = null;
+        let nearestDistance = Infinity;
+        for (const label of svg.querySelectorAll('.annoText')) {
+            const beat = label.__data__;
+            if (!Number.isInteger(beat?.index) || !['N', 'A', 'S', 'V'].includes(beat.type)) continue;
+            const bounds = label.getBoundingClientRect();
+            if (!(bounds.width > 0)) continue;
+            const distance = Math.abs(bounds.left + bounds.width / 2 - clientX);
+            if (distance < nearestDistance) { nearest = label; nearestDistance = distance; }
+        }
+        return nearest;
+    }
     document.addEventListener('pointerdown', event => {
         const marker = event.target.closest?.('svg.ecgRMarker');
         if (event.button === 0 && event.ctrlKey && marker?.closest(TARGET_BLOCK_SELECTOR) && !isDisabledPage()) {
@@ -931,7 +958,9 @@
         }
         if (event.button !== 0 || !event.ctrlKey || event.shiftKey || event.altKey || event.metaKey
             || isDisabledPage() || rangeMode || rangeBusy || labelDrag) return;
-        const label = event.target.closest?.('.annoText');
+        // 按在標籤上就拖曳該標籤；按在標籤列空白處則吸過最近的標籤，直接移到游標位置後可繼續拖曳。
+        let label = event.target.closest?.('.annoText');
+        if (!label && marker) label = findNearestDraggableLabel(marker, event.clientX);
         const svg = label?.closest('svg.ecgRMarker');
         if (!svg || !label.closest(TARGET_BLOCK_SELECTOR)) return;
         // Ctrl 點擊不送入原生循環分類，即使目前標籤不可編輯也不變更分類。
