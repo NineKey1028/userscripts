@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.18.0
+// @version      1.19.1
 // @description  依變動率、BPM、彩色波形高度／寬度、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -32,6 +32,8 @@
 // 速度可選 10 / 20 / 40 / 100 ms；網站資料尚未同步時會等待，並非保證的處理耗時。
 // 按暫停按鈕或 Esc 可停止；變更設定、操作面板外的頁面或隱藏頁面時也會暫停。
 // 播放器左側顯示修改與跳過數量，右側顯示目前心搏資訊；重新載入後不會自動開始批次操作。
+// 快速選印：在 VEB / SVEB 分頁選取縮圖後按 5，自動選印該心搏所屬分類清單（VT、Triplet、Couplet、Bigeminy 等）
+// 中包含它的心電圖，都不屬於時選印 VEB / SVEB 清單；全部已選印時再按 5 取消。NOR / ART 分頁不處理。
 
 (() => {
     'use strict';
@@ -2049,6 +2051,230 @@
         window.addEventListener('resize', scheduleUpdate);
         window.visualViewport?.addEventListener('resize', scheduleUpdate);
     }
+
+    // MP 快速選印：在 VEB / SVEB 分頁按 5，將選取的縮圖加入（或移出）報告選印。
+    // 心搏依網站的分類規則歸入 VT、Triplet、Couplet、Bigeminy 等清單，選印該清單中包含此心搏的心電圖；
+    // 都不屬於時才選印 VEB / SVEB 清單本身。直接讀寫網站保存的選印資料，與事件清單的印表機圖示相同。
+    const PRINT_KEY = '5';
+    const PRINT_STRIP_AFTER = 6; // 事件清單心電圖顯示起點前 4 秒至後 6 秒（網站 getTmsRange(t, 10)）
+    const PRINT_RUN_GAP = 1.2; // 連發（Couplet、Triplet、VT 等）相鄰心搏的最大間隔（秒）
+    // run：事件時間附近、間隔不超過 PRINT_RUN_GAP 的連續心搏都屬於該事件（beats 為最多心搏數）；
+    // 其他分類：心搏時間等於事件時間，或落在事件心電圖（起點後 6 秒）內。
+    const PRINT_CATEGORIES = {
+        V: { list: 'tmsPVC', pos: 'posPVC', fallback: { key: 'pvcTmsArr', name: 'VEB' }, groups: [
+            { record: 'VT_tms', key: 'vtTmsArr', name: 'VT', run: true },
+            { record: 'triplet_tms', key: 'tripletTmsArr', name: 'Triplet', run: true, beats: 3 },
+            { record: 'couplet_tms', key: 'coupletTmsArr', name: 'Couplet', run: true, beats: 2 },
+            { record: 'bigemini_tms', key: 'bigeminiTmsArr', name: 'Bigeminy' },
+            { record: 'trigemini_tms', key: 'trigeminiTmsArr', name: 'Trigeminy' },
+        ] },
+        S: { list: 'tmsSVEB', pos: 'posSVEB', fallback: { key: 'svebTmsArr', name: 'SVEB' }, groups: [
+            { record: 'SVT_tms', key: 'svtTmsArr', name: 'SVT', run: true },
+            { record: '3S_tms', key: 'S_tripletTmsArr', name: 'S Triplet', run: true, beats: 3 },
+            { record: '2S_tms', key: 'S_coupletTmsArr', name: 'S Couplet', run: true, beats: 2 },
+            { record: 'S_bigemini_tms', key: 'S_bigeminiTmsArr', name: 'S Bigeminy' },
+            { record: 'S_trigemini_tms', key: 'S_trigeminiTmsArr', name: 'S Trigeminy' },
+            { record: 'SVE_tms', key: 'sveTmsArr', name: 'SVE' },
+        ] },
+    };
+    let printContext = null;
+    let printBusy = false;
+
+    function plainData(value) {
+        return value && typeof value.plain === 'function' ? value.plain() : value;
+    }
+    function readStoredId(name) {
+        try { return JSON.parse(localStorage.getItem(`rooti-care.${name}`)); } catch (_) { return null; }
+    }
+    // 讀取心搏位置與分類事件；同一份紀錄沿用快取，找不到心搏時才重新讀取。
+    async function loadPrintContext(force = false) {
+        const scope = thumbnailScope();
+        const user = scope?.rooticare?.selectedUser;
+        const ids = { vendorId: user?.vendorId, idNumber: user?.idNumber,
+            measureId: readStoredId('_measureId'), afId: readStoredId('_afId') };
+        if (!ids.vendorId || !ids.idNumber || !ids.measureId || !ids.afId) throw new Error('找不到病患或紀錄編號');
+        const cacheKey = `${ids.vendorId}|${ids.idNumber}|${ids.measureId}|${ids.afId}`;
+        if (!force && printContext?.cacheKey === cacheKey) return printContext;
+        const manager = window.angular.element(document.body).injector().get('WppManager');
+        const [tags, subCategories] = await Promise.all([
+            manager.Af.getTagTms(ids.vendorId, ids.idNumber, ids.afId),
+            manager.Af.getSubCategoryRecord(ids.vendorId, ids.idNumber, ids.measureId).catch(() => null),
+        ]);
+        const record = Object.assign({}, plainData(tags) || {}, plainData(subCategories) || {});
+        const lists = {};
+        for (const [label, config] of Object.entries(PRINT_CATEGORIES)) {
+            const times = (record[config.list] || []).map(Number);
+            const positions = (record[config.pos] || []).map(Number);
+            const indexByPos = new Map(positions.map((pos, index) => [pos, index]));
+            const firstIndexByTime = new Map();
+            times.forEach((time, index) => { if (!firstIndexByTime.has(time)) firstIndexByTime.set(time, index); });
+            const groups = config.groups.map(group => ({ ...group,
+                starts: [...new Set((record[group.record] || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b) }));
+            lists[label] = { times, positions, indexByPos, firstIndexByTime, groups, fallback: config.fallback };
+        }
+        const sampleRate = Number(readStoredId('_sampleRate')) || 250;
+        printContext = { cacheKey, ids, manager, lists, sampleRate };
+        return printContext;
+    }
+    // 第一個不早於 time 的位置（二分搜尋）。
+    function lowerBound(values, time) {
+        let low = 0, high = values.length;
+        while (low < high) {
+            const middle = (low + high) >> 1;
+            if (values[middle] < time) low = middle + 1; else high = middle;
+        }
+        return low;
+    }
+    // 事件時間只到秒，未必對到連發的第一搏；以事件時間的心搏為錨點，
+    // 向前後擴展相鄰間隔不超過 PRINT_RUN_GAP 的心搏，得到整段連發的索引範圍。
+    function runAround(list, anchor, sampleRate, maxBeats) {
+        const gap = PRINT_RUN_GAP * sampleRate;
+        let first = anchor, last = anchor;
+        while (first > 0 && list.positions[first] - list.positions[first - 1] <= gap) first--;
+        while (last < list.positions.length - 1 && list.positions[last + 1] - list.positions[last] <= gap) last++;
+        // 有固定心搏數的分類（Couplet、Triplet）只取錨點附近的對應數量，避免併入相鄰的另一組。
+        if (maxBeats && last - first + 1 > maxBeats) {
+            first = Math.max(first, anchor - maxBeats + 1);
+            last = Math.min(last, first + maxBeats - 1);
+        }
+        return [first, last];
+    }
+    // 依序檢查分類，找出包含此心搏的事件；都不符合時歸入 VEB / SVEB 清單本身。
+    function resolvePrintTarget(list, index, sampleRate) {
+        const time = list.times[index];
+        for (const group of list.groups) {
+            if (!group.starts.length) continue;
+            if (group.run) {
+                // 只需檢查附近的事件：連發的心搏與事件時間相差不會超過數秒。
+                for (let i = lowerBound(group.starts, time - 10); i < group.starts.length && group.starts[i] <= time + 10; i++) {
+                    const start = group.starts[i];
+                    const anchor = list.firstIndexByTime.get(start);
+                    if (anchor === undefined) continue;
+                    const [first, last] = runAround(list, anchor, sampleRate, group.beats);
+                    if (index >= first && index <= last) return { key: group.key, name: group.name, time: start };
+                }
+                continue;
+            }
+            const position = lowerBound(group.starts, time + 1) - 1; // 最後一個不晚於此心搏的事件
+            const start = group.starts[position];
+            if (start !== undefined && time - start <= PRINT_STRIP_AFTER) return { key: group.key, name: group.name, time: start };
+        }
+        return { key: list.fallback.key, name: list.fallback.name, time };
+    }
+    function findBeat(context, segment, label) {
+        const position = Number(segment.absoluteIndex);
+        // 先查目前分頁的清單；縮圖已改分類但未儲存時再查另一份。
+        for (const kind of [label, label === 'V' ? 'S' : 'V']) {
+            const index = context.lists[kind].indexByPos.get(position);
+            if (index !== undefined) return { list: context.lists[kind], index };
+        }
+        return null;
+    }
+    function selectedPrintSegments(scope) {
+        const selected = scope?.morphology?.state?.selectedSegments || [];
+        if (selected.length) return selected.slice();
+        // 沒有選取時改用滑鼠下方的縮圖。
+        const hovered = document.querySelector('#right-list .ecg-trend:hover');
+        const segment = hovered && window.angular.element(hovered).scope?.()?.segment;
+        return segment ? [segment] : [];
+    }
+
+    function printToast(message, isError = false) {
+        let toast = document.getElementById('rc-mp-print-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'rc-mp-print-toast';
+            toast.setAttribute('role', 'status');
+            toast.style.cssText = 'position:fixed;left:50%;bottom:28px;z-index:2147483000;transform:translateX(-50%);'
+                + 'max-width:min(560px,calc(100vw - 32px));padding:8px 14px;border-radius:16px;color:#fff;'
+                + 'font:600 13px/1.4 Arial,"Microsoft JhengHei",sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.25);'
+                + 'pointer-events:none;transition:opacity .2s;';
+            document.body.appendChild(toast);
+        }
+        toast.textContent = message;
+        toast.style.background = isError ? '#c0392b' : '#4f6b1a';
+        toast.style.opacity = '1';
+        clearTimeout(toast.rcTimer);
+        // 訊息消失後重新開始累計。
+        toast.rcTimer = setTimeout(() => { toast.style.opacity = '0'; printTally = null; }, isError ? 4000 : 2500);
+    }
+    // 訊息顯示期間連續選印時，依分類累加張數；改為取消選印（或反之）時重新計算。
+    let printTally = null;
+    function printTallyMessage(remove, changed, missing) {
+        if (!printTally || printTally.remove !== remove) printTally = { remove, counts: new Map(), missing: 0 };
+        for (const target of changed) printTally.counts.set(target.name, (printTally.counts.get(target.name) || 0) + 1);
+        printTally.missing += missing;
+        const detail = [...printTally.counts].map(([name, count]) => `${name} ${count} 張`).join('、');
+        return `${remove ? '已取消選印' : '已選印'}：${detail || '0 張'}`
+            + (printTally.missing ? `（${printTally.missing} 張找不到心搏時間）` : '');
+    }
+
+    async function togglePrintForSelection() {
+        const scope = thumbnailScope();
+        const label = scope?.morphology?.state?.label;
+        if (label !== 'V' && label !== 'S') return; // NOR / ART 分頁不處理
+        const segments = selectedPrintSegments(scope);
+        if (!segments.length) { printToast('請先選取縮圖', true); return; }
+        printBusy = true;
+        try {
+            let context = await loadPrintContext();
+            let beats = segments.map(segment => findBeat(context, segment, label));
+            if (beats.some(beat => !beat)) {
+                context = await loadPrintContext(true);
+                beats = segments.map(segment => findBeat(context, segment, label));
+            }
+            const missing = beats.filter(beat => !beat).length;
+            const targets = new Map();
+            for (const beat of beats) {
+                if (!beat) continue;
+                const target = resolvePrintTarget(beat.list, beat.index, context.sampleRate);
+                targets.set(`${target.key}:${target.time}`, target);
+            }
+            if (!targets.size) { printToast('找不到這些心搏的時間，無法選印', true); return; }
+
+            // 每次重新讀取網站保存的選印，避免覆蓋其他頁面的變更。
+            const { ids, manager } = context;
+            const events = plainData(await manager.Af.getPDFSelectedEvents(ids.vendorId, ids.idNumber, ids.measureId));
+            if (!events || typeof events !== 'object') throw new Error('讀不到目前的選印資料');
+            const has = target => (events[target.key] || []).some(time => Number(time) === target.time);
+            const remove = [...targets.values()].every(has); // 全部已選印時改為取消
+            // 只計入這次真的有變動的心電圖（已選印的不重複計算）。
+            const changed = [...targets.values()].filter(target => remove ? has(target) : !has(target));
+            for (const target of targets.values()) {
+                const times = (events[target.key] || []).map(Number).filter(time => time !== target.time);
+                if (!remove) times.push(target.time);
+                events[target.key] = times.sort((a, b) => a - b);
+                // 與網站相同：選入子分類時，從 VEB / SVEB 移除同一時間，避免重複列印。
+                if (!remove) {
+                    for (const fallback of [PRINT_CATEGORIES.V.fallback.key, PRINT_CATEGORIES.S.fallback.key]) {
+                        if (fallback !== target.key && Array.isArray(events[fallback])) {
+                            events[fallback] = events[fallback].filter(time => Number(time) !== target.time);
+                        }
+                    }
+                }
+            }
+            await manager.Af.postPDFSelectedEvents(ids.vendorId, ids.idNumber, ids.measureId, events);
+
+            printToast(printTallyMessage(remove, changed, missing));
+        } catch (error) {
+            printToast(`選印失敗：${error?.message || error}`, true);
+        } finally {
+            printBusy = false;
+        }
+    }
+
+    document.addEventListener('keydown', event => {
+        if (event.key !== PRINT_KEY || event.repeat || event.isComposing
+            || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+        if (!document.querySelector('.morphology > .container') || document.querySelector('.ngdialog')) return;
+        if (event.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+        if (thumbnailRun || playerRunning) return;
+        const label = thumbnailScope()?.morphology?.state?.label;
+        if (label !== 'V' && label !== 'S') return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!printBusy) togglePrintForSelection();
+    }, true);
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
     else init();
