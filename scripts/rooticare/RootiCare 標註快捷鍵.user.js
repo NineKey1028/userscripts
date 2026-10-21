@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.16.5
+// @version      1.18.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -15,10 +15,10 @@
 
 // 使用教學：在 ECG 或事件心電圖中，將滑鼠移到要處理的位置再按快捷鍵。
 // 1 / 2 / 3：新增或切換為 V / S / N；4：刪除該位置的標籤。
-// Shift + 左鍵拖曳既有標籤：左右微調位置，放開後加入未儲存修改；Esc 取消。
-// 按住 Alt + 1 / 2 / 3 並移動滑鼠：僅修改碰到的既有標籤。
-// 按住 4 並移動滑鼠：連續刪除碰到的標籤；滑鼠中鍵：刪除點擊的標籤。
-// Ctrl + 1 / 2 / 3：記錄區間起點，在面板設定篩選條件，再於終點按快捷鍵套用 V / S / N。
+// Ctrl + 左鍵拖曳既有標籤：左右微調位置，放開後加入未儲存修改；Esc 取消。
+// 按住 Alt + 1 / 2 / 3 並移動滑鼠：僅修改碰到的既有標籤；按下即生效，不需等待鍵盤連發。
+// 按住 4 並移動滑鼠：立即連續刪除碰到的標籤；滑鼠中鍵：刪除點擊的標籤。
+// Shift + 1 / 2 / 3：記錄區間起點，在面板設定篩選條件，再於終點按快捷鍵套用 V / S / N。
 // 區間可跨心電圖視窗；Esc：取消尚未完成的區間操作。
 // W / S：模擬方向鍵 ↑ / ↓，調整心電圖縮放。
 // Q / E：模擬方向鍵 ← / → 切換時間；滑鼠點選與滾輪切換時間也保留高度縮放。
@@ -233,6 +233,37 @@
         currentMousePos.x = e.clientX;
         currentMousePos.y = e.clientY;
     }, { passive: true });
+
+    // 按住 4 或 Alt + 1 / 2 / 3 時直接跟隨滑鼠處理，不等鍵盤連發的延遲。
+    // 每次移動沿上一點到目前位置取樣，快速甩過也不漏掉中間的標籤；只處理碰到的既有標籤。
+    const SWEEP_STEP = 3; // 取樣間距（像素）
+    const SWEEP_MAX_SAMPLES = 200;
+    let heldSweep = null; // { key, tag, alt, last: { x, y } }
+    function stopHeldSweep() { heldSweep = null; }
+    function sweepTo(x, y) {
+        const from = heldSweep.last;
+        heldSweep.last = { x, y };
+        const distance = Math.hypot(x - from.x, y - from.y);
+        const samples = Math.min(SWEEP_MAX_SAMPLES, Math.max(1, Math.ceil(distance / SWEEP_STEP)));
+        for (let i = 1; i <= samples; i++) {
+            const point = { x: from.x + (x - from.x) * i / samples, y: from.y + (y - from.y) * i / samples };
+            const el = getElementAtPoint(point.x, point.y);
+            if (!el?.classList.contains('annoText') || el.textContent.trim() === heldSweep.tag) continue;
+            const block = el.closest(TARGET_BLOCK_SELECTOR);
+            if (block) processCommand(heldSweep.tag, point, block);
+        }
+    }
+    window.addEventListener('mousemove', (e) => {
+        if (!heldSweep) return;
+        if (isDisabledPage() || rangeMode || rangeBusy || labelDrag || (heldSweep.alt && !e.altKey)) {
+            stopHeldSweep(); return;
+        }
+        sweepTo(e.clientX, e.clientY);
+    }, { passive: true });
+    document.addEventListener('keyup', (e) => {
+        if (heldSweep && (e.key === heldSweep.key || (e.key === 'Alt' && heldSweep.alt))) stopHeldSweep();
+    }, true);
+    window.addEventListener('blur', stopHeldSweep);
 
     // 檢查滑鼠位置下是否有 ECG 區塊
     function getActiveBlockUnderMouse() {
@@ -459,7 +490,7 @@
                 <label><input type="checkbox" data-source="N" checked> N</label>
                 <label><input type="checkbox" data-source="S" checked> S</label>
                 <label><input type="checkbox" data-source="V" checked> V</label></span>
-            </div><div data-role="help">在另一端按 Ctrl + 1→V／2→S／3→N，即套用篩選修改</div>`;
+            </div><div data-role="help">在另一端按 Shift + 1→V／2→S／3→N，即套用篩選修改</div>`;
         rangeMessage = rangeHint.querySelector('[data-role="message"]');
         rangeControls = rangeHint.querySelector('[data-role="filters"]');
         rangeHint.querySelector('[data-role="minimize"]').addEventListener('click', () => {
@@ -677,7 +708,7 @@
         return true;
     }
     document.addEventListener('click', event => {
-        if (event.button !== 0 || event.shiftKey || labelDrag || Date.now() < dragClickUntil || isDisabledPage()) return;
+        if (event.button !== 0 || event.ctrlKey || labelDrag || Date.now() < dragClickUntil || isDisabledPage()) return;
         const svg = event.target.closest?.('svg.ecgRMarker');
         if (!svg || event.target.closest?.('.annoText') || !svg.closest(TARGET_BLOCK_SELECTOR)) return;
         try {
@@ -757,16 +788,16 @@
     }
     document.addEventListener('pointerdown', event => {
         const marker = event.target.closest?.('svg.ecgRMarker');
-        if (event.button === 0 && event.shiftKey && marker?.closest(TARGET_BLOCK_SELECTOR) && !isDisabledPage()) {
+        if (event.button === 0 && event.ctrlKey && marker?.closest(TARGET_BLOCK_SELECTOR) && !isDisabledPage()) {
             event.preventDefault(); event.stopImmediatePropagation();
             dragClickUntil = Date.now() + 400;
         }
-        if (event.button !== 0 || !event.shiftKey || event.ctrlKey || event.altKey || event.metaKey
+        if (event.button !== 0 || !event.ctrlKey || event.shiftKey || event.altKey || event.metaKey
             || isDisabledPage() || rangeMode || rangeBusy || labelDrag) return;
         const label = event.target.closest?.('.annoText');
         const svg = label?.closest('svg.ecgRMarker');
         if (!svg || !label.closest(TARGET_BLOCK_SELECTOR)) return;
-        // Shift 點擊不送入原生循環分類，即使目前標籤不可編輯也不變更分類。
+        // Ctrl 點擊不送入原生循環分類，即使目前標籤不可編輯也不變更分類。
         event.preventDefault(); event.stopImmediatePropagation();
         dragClickUntil = Date.now() + 400;
         try {
@@ -813,7 +844,7 @@
         const drag = labelDrag;
         if (!drag || event.pointerId !== drag.pointerId) return;
         event.preventDefault(); event.stopImmediatePropagation();
-        if (!event.shiftKey || !(event.buttons & 1) || !drag.label.isConnected || isDisabledPage()) {
+        if (!event.ctrlKey || !(event.buttons & 1) || !drag.label.isConnected || isDisabledPage()) {
             finishLabelDrag(); return;
         }
         updateLabelDragPosition(event);
@@ -840,13 +871,13 @@
     document.addEventListener('pointerup', event => {
         if (!labelDrag || event.pointerId !== labelDrag.pointerId) return;
         event.preventDefault(); event.stopImmediatePropagation();
-        finishLabelDrag(event.shiftKey && event.button === 0);
+        finishLabelDrag(event.ctrlKey && event.button === 0);
     }, true);
     for (const name of ['mousedown', 'mouseup', 'click', 'dblclick']) {
         document.addEventListener(name, event => {
-            const shiftOnMarker = event.shiftKey && event.button === 0 && !isDisabledPage()
+            const ctrlOnMarker = event.ctrlKey && event.button === 0 && !isDisabledPage()
                 && event.target.closest?.('svg.ecgRMarker')?.closest(TARGET_BLOCK_SELECTOR);
-            if (shiftOnMarker || labelDrag || (Date.now() < dragClickUntil && event.button === 0)) {
+            if (ctrlOnMarker || labelDrag || (Date.now() < dragClickUntil && event.button === 0)) {
                 event.preventDefault(); event.stopImmediatePropagation();
             }
         }, true);
@@ -857,7 +888,7 @@
         if (event.key === 'Escape') finishLabelDrag();
     }, true);
     document.addEventListener('keyup', event => {
-        if (event.key === 'Shift' && labelDrag) finishLabelDrag();
+        if (event.key === 'Control' && labelDrag) finishLabelDrag();
     }, true);
     document.addEventListener('pointercancel', () => finishLabelDrag(), true);
     window.addEventListener('blur', () => finishLabelDrag());
@@ -868,7 +899,7 @@
         const block = getActiveBlockUnderMouse();
         const svg = block?.querySelector('.annoGroup')?.closest('svg');
         if (!svg) {
-            showRangeHint('請在 ECG 上按 Ctrl + 1／2／3 選取端點');
+            showRangeHint('請在 ECG 上按 Shift + 1／2／3 選取端點');
             return;
         }
         try {
@@ -935,13 +966,15 @@
         const isAltPressed = e.altKey;
         // W / S 縮放只處理無修飾鍵的按鍵，保留 Ctrl+S 等瀏覽器快捷鍵。
         if (['w', 's'].includes(key) && (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey)) return;
-        if (e.ctrlKey && !e.altKey && !e.metaKey && ['1', '2', '3'].includes(key)) {
+        // Shift + 數字的 e.key 會變成 ! @ # 等符號，改以實體按鍵位置判斷（含數字鍵盤）。
+        const rangeDigit = /^(?:Digit|Numpad)([123])$/.exec(e.code || '')?.[1];
+        if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && rangeDigit) {
             // 區間端點與一般數字標註鍵使用相同的滑鼠容器限制。
             if (!getActiveBlockUnderMouse()) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             if (!rangeBusy && !e.repeat) {
-                await selectRangePoint({ '1': 'V', '2': 'S', '3': 'N' }[key]);
+                await selectRangePoint({ '1': 'V', '2': 'S', '3': 'N' }[rangeDigit]);
             }
             return;
         }
@@ -971,6 +1004,13 @@
         }
         if (rangeMode || rangeBusy) return;
 
+        // 按住期間由滑鼠移動接手；鍵盤連發不再重複處理。
+        if (!e.ctrlKey && !e.metaKey && (key === '4' || (isAltPressed && ['1', '2', '3'].includes(key)))) {
+            if (e.repeat && heldSweep?.key === key) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+            heldSweep = { key, tag: { '1': 'V', '2': 'S', '3': 'N', '4': '' }[key], alt: key !== '4',
+                last: { x: currentMousePos.x, y: currentMousePos.y } };
+        }
+
         // 高度縮放不依賴滑鼠位置；數字標註鍵仍限制在下方的 ECG 容器內。
         if (key === 'w' || key === 's') {
             if (document.querySelector('.fixed-board') || document.querySelector(TARGET_BLOCK_SELECTOR)) {
@@ -984,7 +1024,8 @@
         const activeBlock = getActiveBlockUnderMouse();
         if (!activeBlock) return;
 
-        if (['1', '2', '3', '4'].includes(key)) {
+        // Ctrl / ⌘ + 數字保留給瀏覽器（如切換分頁），不視為標註鍵。
+        if (['1', '2', '3', '4'].includes(key) && !e.ctrlKey && !e.metaKey) {
             e.preventDefault();
             e.stopImmediatePropagation();
 
