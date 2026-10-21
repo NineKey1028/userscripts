@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.22
+// @version      2.23
 // @description  檢查 Longest R-R 間隔、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -179,6 +179,25 @@
         return { seconds: Number.isFinite(seconds) ? seconds : NaN, sourceEcgs: rrEcgs };
     }
 
+    // 判斷間隔文字的前一搏是否也繪在同一片段內。
+    // 原站 ecgRMarker 的第一個間隔沒有片段內前一搏，改用 idxAdjust 顯示；該值由 getDurationDiff
+    // 在整段取回資料中找前一搏，不檢查中間是否為無資料區或錄製起點，片段靠近錄製頭尾時會得到數秒的假間隔。
+    // 這種間隔的前一搏不在片段內，無法從報告核對，因此不納入比較；片段內兩搏之間的長停頓仍照常計算。
+    function hasPreviousBeatInStrip(label, marker) {
+        const beats = [...marker.querySelectorAll('.annoText')];
+        // d3 綁定資料：間隔文字為右側心搏索引，心搏文字為 { index, type }。
+        const beatIndexes = beats.map(beat => Number(beat.__data__?.index)).filter(Number.isFinite);
+        const labelIndex = Number(label.__data__);
+        if (typeof label.__data__ === 'number' && Number.isFinite(labelIndex) && beatIndexes.length) {
+            return beatIndexes.some(index => index < labelIndex);
+        }
+        // 沒有綁定資料時改用座標：片段內間隔的 px 位於兩搏中點，邊界間隔的 px 在第一搏左側。
+        const px = Number(label.getAttribute('px'));
+        const beatXs = beats.map(beat => Number(beat.getAttribute('x'))).filter(Number.isFinite);
+        if (!Number.isFinite(px) || !beatXs.length) return true;
+        return px > Math.min(...beatXs);
+    }
+
     // 讀取報告畫面上的間隔與 BPM，回傳 ECG、標題及統一為毫秒的間隔值。
     // 數字格式、範圍與換算心率皆須合理，避免將量測文字或其他標註誤當成 R-R 間隔。
     function getDisplayedIntervals(report) {
@@ -190,7 +209,7 @@
 
             const marker = label.closest('.ecgRMarker');
             const ecg = marker?.closest('.event-ecg-blk');
-            if (!ecg) continue;
+            if (!ecg || !hasPreviousBeatInStrip(label, marker)) continue;
 
             // 統一換算為毫秒；逗號小數格式如 2,83 秒，換算為 2830 ms。
             const milliseconds = Number(rawInterval.replace(',', '.')) *
