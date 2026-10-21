@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.18.0
+// @version      1.19.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -20,6 +20,9 @@
 // 按住 4 並移動滑鼠：立即連續刪除碰到的標籤；滑鼠中鍵：刪除點擊的標籤。
 // Shift + 1 / 2 / 3：記錄區間起點，在面板設定篩選條件，再於終點按快捷鍵套用 V / S / N。
 // 區間可跨心電圖視窗；Esc：取消尚未完成的區間操作。
+// 區間面板「填補整理」分頁：在開頭那顆之前、結尾那顆之後各按一次 Shift + 1 / 2 / 3；
+// 依開頭那顆的 RR 平均補滿兩者之間的心搏（多刪少補，保留的維持原類型）。
+// 分頁選擇保留到重新整理頁面為止。
 // W / S：模擬方向鍵 ↑ / ↓，調整心電圖縮放。
 // Q / E：模擬方向鍵 ← / → 切換時間；滑鼠點選與滾輪切換時間也保留高度縮放。
 // ch1／ch2／ch3 旁的眼睛可切換導程曲線；本次頁面內保留狀態，重新載入恢復全開。
@@ -445,8 +448,16 @@
         #rooticare-range-hotkeys button:hover { background:#f0f3ec;color:#374333; }
         #rooticare-range-hotkeys :is(button,input,select):focus-visible { outline:2px solid #91ad68;outline-offset:1px; }
         #rooticare-range-hotkeys [data-role=help] { margin-top:6px;color:#7b8574;font-size:11px; }
+        #rooticare-range-hotkeys [data-role=tabs] { margin-top:7px;display:flex;gap:2px;border-bottom:1px solid #dce3d6; }
+        #rooticare-range-hotkeys [data-role=tabs] button { width:auto;height:24px;padding:0 10px;border-radius:5px 5px 0 0;
+            margin-bottom:-1px;border:1px solid transparent;font:600 12px/22px Arial,"Microsoft JhengHei",sans-serif;color:#889180; }
+        #rooticare-range-hotkeys [data-role=tabs] button[aria-selected=true] { border-color:#dce3d6;border-bottom-color:#fff;
+            background:#fff;color:#4f6b1a; }
+        #rooticare-range-hotkeys [data-role=fill] { margin-top:7px;color:#526047; }
         #rooticare-range-hotkeys.rh-minimized { padding:5px 9px; }
         #rooticare-range-hotkeys.rh-minimized [data-role=filters],
+        #rooticare-range-hotkeys.rh-minimized [data-role=tabs],
+        #rooticare-range-hotkeys.rh-minimized [data-role=fill],
         #rooticare-range-hotkeys.rh-minimized [data-role=help] { display:none !important; }
         #rooticare-range-hotkeys.rh-minimized [data-role=message] {
             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal;
@@ -457,6 +468,25 @@
     let rangeMessage;
     let rangeControls;
     let rangeMinimized = false;
+    // 區間分頁：filter 篩選修改、fill 填補整理。只存在本次頁面執行期，重新整理後回到篩選修改。
+    let rangeTool = 'filter';
+    const RANGE_HELP = {
+        filter: '在另一端按 Shift + 1→V／2→S／3→N，即套用篩選修改',
+        fill: '在結尾之後按 Shift + 1→V／2→S／3→N，補上的標籤使用該類型'
+    };
+    function updateRangeTool() {
+        if (!rangeControls) return;
+        for (const tab of rangeHint.querySelectorAll('[data-tool]')) {
+            tab.setAttribute('aria-selected', String(tab.dataset.tool === rangeTool));
+        }
+        const open = rangeMode?.first && !rangeBusy;
+        rangeControls.style.display = open && rangeTool === 'filter' ? 'flex' : 'none';
+        rangeHint.querySelector('[data-role="fill"]').style.display = open && rangeTool === 'fill' ? 'block' : 'none';
+        rangeHint.querySelector('[data-role="tabs"]').style.display = open ? 'flex' : 'none';
+        const help = rangeHint.querySelector('[data-role="help"]');
+        help.textContent = RANGE_HELP[rangeTool];
+        help.style.display = open ? 'block' : 'none';
+    }
     function updateRangeMinimized() {
         rangeHint.classList.toggle('rh-minimized', rangeMinimized);
         const button = rangeHint.querySelector('[data-role="minimize"]');
@@ -473,6 +503,11 @@
         rangeHint.innerHTML = `<div class="rh-head"><div data-role="message" role="status" aria-live="polite"></div>
                 <button type="button" data-role="minimize" aria-label="最小化" title="最小化" aria-expanded="true">−</button>
                 <button type="button" data-role="cancel" aria-label="取消區間選取" title="取消 · Esc">×</button></div>
+            <div data-role="tabs" role="tablist">
+                <button type="button" role="tab" data-tool="filter">篩選修改</button>
+                <button type="button" role="tab" data-tool="fill">填補整理</button></div>
+            <div data-role="fill">以區間內第一顆與最後一顆標籤為錨點（兩顆不修改），依開頭那顆的 RR 平均補滿中間心搏；
+                中間既有標籤靠近預期位置的保留原類型，多的刪除、缺的補上。</div>
             <div data-role="filters">
                 <span class="rh-group" title="依此心搏與前一心搏的間隔計算 BPM，四捨五入後比較；勾選才啟用">
                 <span>BPM</span>
@@ -490,9 +525,12 @@
                 <label><input type="checkbox" data-source="N" checked> N</label>
                 <label><input type="checkbox" data-source="S" checked> S</label>
                 <label><input type="checkbox" data-source="V" checked> V</label></span>
-            </div><div data-role="help">在另一端按 Shift + 1→V／2→S／3→N，即套用篩選修改</div>`;
+            </div><div data-role="help"></div>`;
         rangeMessage = rangeHint.querySelector('[data-role="message"]');
         rangeControls = rangeHint.querySelector('[data-role="filters"]');
+        for (const tab of rangeHint.querySelectorAll('[data-tool]')) {
+            tab.addEventListener('click', () => { rangeTool = tab.dataset.tool; updateRangeTool(); });
+        }
         rangeHint.querySelector('[data-role="minimize"]').addEventListener('click', () => {
             rangeMinimized = !rangeMinimized;
             updateRangeMinimized();
@@ -542,8 +580,7 @@
         ensureRangeControls();
         rangeMessage.textContent = text;
         rangeMessage.title = text;
-        rangeControls.style.display = rangeMode?.first && !rangeBusy ? 'flex' : 'none';
-        rangeHint.querySelector('[data-role="help"]').style.display = rangeMode?.first && !rangeBusy ? 'block' : 'none';
+        updateRangeTool();
         rangeHint.style.display = 'block';
     }
     // 將滑鼠 X 座標換算成整份 ECG 的絕對取樣索引，包含目前時間窗、取樣率及通道位移。
@@ -607,6 +644,124 @@
         }
         return updates;
     }
+    // 由 cursor 往前讀取相鄰心搏寫入 effective，直到取得 requiredBeats 個有效心搏（N/S/A/V）；未儲存修改優先。
+    async function addPrecedingBeats(manager, af, effective, pending, cursor, requiredBeats) {
+        let precedingBeats = 0;
+        for (let attempts = 0; attempts < 64; attempts++) {
+            const adjacentResponse = await manager.Af.getAdjacentFilteredECGLabel(
+                af._vendorId, af._idNumber, af._measureId, cursor, 1);
+            const adjacent = adjacentResponse?.plain ? adjacentResponse.plain() : adjacentResponse;
+            if (!adjacent || typeof adjacent !== 'object') throw new Error('無法讀取前一心搏以計算 BPM');
+            const entries = Object.entries(adjacent).map(([index, type]) => [Number(index), type])
+                .filter(([index]) => Number.isFinite(index) && index < cursor).sort((a, b) => b[0] - a[0]);
+            if (!entries.length) break;
+            const [index, type] = entries[0];
+            const edit = pending.find(item => item[4] && item[1] === index);
+            effective.set(index, edit ? edit[2] : type);
+            if (['N', 'S', 'A', 'V'].includes(edit ? edit[2] : type)) precedingBeats++;
+            if (precedingBeats >= requiredBeats) break;
+            cursor = index;
+            if (attempts === 63) throw new Error('前一心搏連續刪除過多，無法確認 BPM');
+        }
+    }
+    // 填補整理：以 previous→a 的 RR 為目標，在錨點 a、b 之間排出心搏。
+    // inner 為兩錨點之間的既有心搏 [索引, 類型]；靠近預期位置（±25% RR）的保留，其餘刪除，缺的平均補在保留的心搏之間。
+    const FILL_VARIABILITY = 0.12;
+    function planFill(a, b, previous, inner) {
+        const targetRR = a - previous;
+        const gap = b - a;
+        if (!(targetRR > 0) || !(gap > 0)) throw new Error('無法計算開頭心搏的 RR');
+        const count = Math.max(1, Math.round(gap / targetRR));
+        const spacing = gap / count;
+        const slots = [{ k: 0, index: a }];
+        const kept = new Set();
+        for (let k = 1; k < count; k++) {
+            const expected = a + k * spacing;
+            let best = null;
+            for (const [index] of inner) {
+                if (kept.has(index) || Math.abs(index - expected) > spacing * 0.25) continue;
+                if (best === null || Math.abs(index - expected) < Math.abs(best - expected)) best = index;
+            }
+            if (best !== null) { kept.add(best); slots.push({ k, index: best }); }
+        }
+        slots.push({ k: count, index: b });
+        const variability = (prevRR, rr) => (prevRR - rr) / rr;
+        const beats = [previous, a];
+        const add = [];
+        for (let s = 1; s < slots.length; s++) {
+            const from = slots[s - 1];
+            const to = slots[s];
+            const step = (to.index - from.index) / (to.k - from.k);
+            for (let j = 1; j < to.k - from.k; j++) {
+                const index = Math.round(from.index + j * step);
+                add.push(index);
+                beats.push(index);
+            }
+            beats.push(to.index);
+        }
+        let maxVariability = 0;
+        for (let i = 2; i < beats.length; i++) {
+            const value = Math.abs(variability(beats[i - 1] - beats[i - 2], beats[i] - beats[i - 1]));
+            if (Number.isFinite(value)) maxVariability = Math.max(maxVariability, value);
+        }
+        return { targetRR, count, keep: [...kept], remove: inner.map(([index]) => index).filter(index => !kept.has(index)),
+            add, maxVariability };
+    }
+    // 填補整理：區間內第一顆、最後一顆有效標籤為錨點且不修改；依開頭那顆的 RR 補滿、整理兩者之間的心搏。
+    // 補上的標籤使用 tag；結果寫入未儲存修改，不自動儲存報告。
+    async function applyFillRange(first, last, tag) {
+        if (first.af !== last.af || first.record !== last.record || first.modifiedData !== last.modifiedData)
+            throw new Error('兩點必須屬於同一份報告');
+        if (first.rate !== last.rate) throw new Error('兩個視窗取樣率不同，請重新選取');
+        const start = Math.min(first.index, last.index);
+        const end = Math.max(first.index, last.index);
+        const manager = window.angular.element(document.body).injector().get('WppManager');
+        const af = first.af;
+        const response = await manager.Af.getFilteredECGDataByIndexRange(
+            af._vendorId, af._idNumber, af._measureId, start, end,
+            first.startTime, af.record.ecgLeadMode, first.scope.channelSwitch || 1);
+        const data = response?.plain ? response.plain() : response;
+        if (!data?.anno || typeof data.anno !== 'object') throw new Error('區間標籤讀取失敗');
+        if (data.sampleRate && Number(data.sampleRate) !== first.rate) throw new Error('區間取樣率不一致');
+        const pending = first.modifiedData;
+        const isBeat = type => ['N', 'S', 'A', 'V'].includes(type);
+        const effective = new Map(Object.entries(data.anno).map(([index, type]) => [Number(index), type]));
+        for (const item of pending) {
+            if (item[4] && item[1] >= start && item[1] <= end) effective.set(item[1], item[2]);
+        }
+        const inRange = [...effective].filter(([index, type]) => Number.isFinite(index) && index >= start
+            && index <= end && isBeat(type)).sort((x, y) => x[0] - y[0]);
+        if (inRange.length < 2) throw new Error('區間內至少需要開頭與結尾兩顆標籤');
+        const a = inRange[0][0];
+        const b = inRange[inRange.length - 1][0];
+        await addPrecedingBeats(manager, af, effective, pending, a, 1);
+        if (isDisabledPage() || rangeMode?.cancelled || !first.parent || first.parent.$$destroyed ||
+            first.parent.af !== af || first.modifiedData !== af.ecgAnno.modifiedData)
+            throw new Error('報告已切換，取消區間修改');
+        for (const item of pending) if (item[4] && item[1] < start) effective.set(item[1], item[2]);
+        const previous = [...effective].reduce((max, [index, type]) =>
+            Number.isFinite(index) && index < a && isBeat(type) ? Math.max(max, index) : max, -Infinity);
+        if (!Number.isFinite(previous)) throw new Error('找不到開頭前一顆心搏，無法計算 RR');
+        const plan = planFill(a, b, previous, inRange.slice(1, -1));
+        const target = new Map(plan.remove.map(index => [index, 'X']));
+        for (const index of plan.add) target.set(index, tag);
+        const updates = [];
+        const touched = new Set(target.keys());
+        for (const [index, type] of target) {
+            const existing = pending.find(item => item[4] && item[1] === index);
+            const original = existing ? existing[3] : data.anno[index] || 'X';
+            if (original === type) continue; // 與原始資料相同：只撤銷未儲存修改。
+            updates.push([first.startTime + Math.floor((index - first.viewStart) / first.rate), index, type, original, 1]);
+        }
+        first.parent.$apply(() => {
+            for (let i = pending.length - 1; i >= 0; i--) {
+                if (pending[i][4] && touched.has(pending[i][1])) pending.splice(i, 1);
+            }
+            pending.push(...updates);
+        });
+        return { added: plan.add.length, removed: plan.remove.length, targetRR: plan.targetRR,
+            maxVariability: plan.maxVariability };
+    }
     // 核對兩端點屬於同一報告、同一修改陣列及相同取樣率，再讀取區間原始標籤。
     // 有間隔條件時額外取得前一至兩個有效心搏；套用前再次核對報告，最後於 Angular $apply 更新未儲存資料。
     async function applyIndexRange(first, last, tag, filters) {
@@ -631,25 +786,7 @@
             const firstIndex = [...effective.keys()].reduce((min, index) =>
                 Number.isFinite(index) && index >= start ? Math.min(min, index) : min, Infinity);
             if (Number.isFinite(firstIndex)) {
-                let cursor = firstIndex;
-                let precedingBeats = 0;
-                const requiredBeats = filters.variability?.enabled ? 2 : 1;
-                for (let attempts = 0; attempts < 64; attempts++) {
-                    const adjacentResponse = await manager.Af.getAdjacentFilteredECGLabel(
-                        af._vendorId, af._idNumber, af._measureId, cursor, 1);
-                    const adjacent = adjacentResponse?.plain ? adjacentResponse.plain() : adjacentResponse;
-                    if (!adjacent || typeof adjacent !== 'object') throw new Error('無法讀取前一心搏以計算 BPM');
-                    const entries = Object.entries(adjacent).map(([index, type]) => [Number(index), type])
-                        .filter(([index]) => Number.isFinite(index) && index < cursor).sort((a, b) => b[0] - a[0]);
-                    if (!entries.length) break;
-                    const [index, type] = entries[0];
-                    const edit = pending.find(item => item[4] && item[1] === index);
-                    effective.set(index, edit ? edit[2] : type);
-                    if (['N', 'S', 'A', 'V'].includes(edit ? edit[2] : type)) precedingBeats++;
-                    if (precedingBeats >= requiredBeats) break;
-                    cursor = index;
-                    if (attempts === 63) throw new Error('前一心搏連續刪除過多，無法確認 BPM');
-                }
+                await addPrecedingBeats(manager, af, effective, pending, firstIndex, filters.variability?.enabled ? 2 : 1);
             }
         }
         // 所有非同步讀取完成後，再確認報告與未儲存資料仍一致。
@@ -910,6 +1047,19 @@
                 return;
             }
             const mode = rangeMode;
+            if (rangeTool === 'fill') {
+                mode.tag = tag;
+                rangeBusy = true;
+                showRangeHint(`正在填補整理 → ${tag}…`);
+                const result = await applyFillRange(mode.first, context, tag);
+                rangeMode = null;
+                const notes = [`RR ${Math.round(result.targetRR / mode.first.rate * 1000)} ms`];
+                if (result.maxVariability > FILL_VARIABILITY) notes.push(`最大變動率 ${(result.maxVariability * 100).toFixed(1)}%，超過 12%`);
+                showRangeHint(result.added || result.removed
+                    ? `已補 ${result.added} 顆（${tag}）、刪除 ${result.removed} 顆 · ${notes.join(' · ')} · 尚未儲存`
+                    : `兩錨點之間已符合，不需修改 · ${notes.join(' · ')}`);
+                return;
+            }
             let filters;
             try { filters = readRangeFilters(); }
             catch (error) { showRangeHint(error.message); return; }
