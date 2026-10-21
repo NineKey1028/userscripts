@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.3
+// @version      1.4
 // @description  在 MP 分頁邊界以 Q / E 切換相鄰 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -17,7 +17,8 @@
 // 第一頁按 Q：切換至上一個 type；最後一頁按 E：切換至下一個 type。
 // Ctrl + E：與網頁原生功能協作，快速往下選中 type。
 // 切換 type 後會將目標捲入畫面，聚焦右側清單並點選第一張 ECG 縮圖。
-// 右側跨頁合計選取多張縮圖時，腳本不切換 type；在輸入框中打字時不處理快捷鍵。
+// 右側跨頁合計選取多張縮圖時，腳本不切換 type；在輸入框中打字、開著 Morphology Player 等彈出視窗
+// 或資料載入中時不處理快捷鍵。首尾頁以 MP 縮圖清單的分頁判斷，切換 type 後不再讓網站同時換頁。
 // 左側多選 type 時，隱藏右側灰色遮罩與虛線提示框的外觀，保留原生操作攔截。
 
 (function() {
@@ -42,64 +43,55 @@
         selectedImages: '#right-list .ecg-trend .idBackground.selectedBackground'
     };
 
-    // 防止按鍵重複觸發的旗標（防止長按導致連續跳轉）
-    let isKeyDown = false;
-
-    // 按下 Q / E 時檢查分頁邊界。
-    document.addEventListener('keydown', function(e) {
-        // 如果按鍵已處於按下狀態，或使用者正在輸入框打字，則不執行邏輯
-        if (isKeyDown) return;
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-        // 此處只接續 Q / E 在分頁邊界的 type 切換；Ctrl + E 仍與網站原生按鍵流程協作。
-        const key = e.key.toUpperCase();
-        const links = Array.from(document.querySelectorAll(SELECTORS.allPageLinks));
-
-        // E：最後一頁時銜接下一個 type。
-        if (key === 'E') {
-            // 尋找內容為 ">" 的按鈕
-            const nextBtn = links.find(el => el.innerText.trim() === '>');
-
-            // 判斷是否已經是最後一頁：找不到按鈕、父層禁用、具備 disabled 屬性、隱藏或無法點擊
-            const isLastPage = !nextBtn ||
-                               nextBtn.parentElement.classList.contains('disabled') ||
-                               nextBtn.hasAttribute('disabled') ||
-                               nextBtn.classList.contains('ng-hide') ||
-                               getComputedStyle(nextBtn).pointerEvents === 'none';
-
-            // 如果已經到最後一頁，則切換到「下一個項目類型」
-            if (isLastPage) {
-                isKeyDown = true;
-                switchType('next');
-            }
+    function morphologyScope() {
+        try {
+            return window.angular?.element(document.querySelector('.morphology > .container'))?.scope?.() || null;
+        } catch (_) {
+            return null;
         }
-        // Q：第一頁時銜接上一個 type。
-        else if (key === 'Q') {
-            // 尋找內容為 "<" 的按鈕
-            const prevBtn = links.find(el => el.innerText.trim() === '<');
+    }
 
-            // 判斷是否已經是第一頁
-            const isFirstPage = !prevBtn ||
-                                prevBtn.parentElement.classList.contains('disabled') ||
-                                prevBtn.hasAttribute('disabled') ||
-                                prevBtn.classList.contains('ng-hide') ||
-                                getComputedStyle(prevBtn).pointerEvents === 'none';
+    // 與網站 MP 原生按鍵相同的略過條件：開著彈出視窗（例如 Morphology Player）、
+    // 正在輸入文字或資料載入中時，Q / E 不屬於縮圖清單，不切換 type。
+    function shouldIgnoreKey(e, scope) {
+        if (e.repeat || e.isComposing || e.altKey || e.metaKey || e.shiftKey) return true;
+        if (!document.querySelector('.morphology > .container')) return true;
+        if (document.querySelector('.ngdialog')) return true;
+        const target = e.target instanceof Element ? e.target : document.activeElement;
+        if (target?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return true;
+        try { if (typeof scope?.loading === 'function' && scope.loading()) return true; } catch (_) { /* 沿用一般判斷 */ }
+        return false;
+    }
 
-            // 如果已經在第一頁，則切換到「上一個項目類型」
-            if (isFirstPage) {
-                isKeyDown = true;
-                switchType('prev');
-            }
+    // 以 MP 縮圖清單的分頁模型判斷首尾頁；模型不可用時才退回右側清單的分頁按鈕。
+    function pageEdge(scope, direction) {
+        const page = Number(scope?.morphology?.pagination?.currentPage);
+        const count = Number(scope?.morphology?.pagination?.pageCount);
+        if (Number.isFinite(page) && Number.isFinite(count) && count >= 1) {
+            return direction === 'next' ? page >= count : page <= 1;
+        }
+        const text = direction === 'next' ? '>' : '<';
+        const area = document.querySelector('.morphology .right-content') || document;
+        const button = Array.from(area.querySelectorAll(SELECTORS.allPageLinks)).find(el => el.textContent.trim() === text);
+        return !button || button.parentElement.classList.contains('disabled') || button.hasAttribute('disabled')
+            || button.classList.contains('ng-hide') || getComputedStyle(button).pointerEvents === 'none';
+    }
+
+    // 按下 Q / E 時檢查分頁邊界；只在第一頁按 Q、最後一頁按 E 時接手切換 type。
+    // Ctrl + E 仍與網站原生按鍵流程協作。
+    document.addEventListener('keydown', function(e) {
+        const key = e.key.toUpperCase();
+        if (key !== 'Q' && key !== 'E') return;
+        const scope = morphologyScope();
+        if (shouldIgnoreKey(e, scope)) return;
+        const direction = key === 'E' ? 'next' : 'prev';
+        if (!pageEdge(scope, direction)) return;
+        // 已切換 type 時攔下同一次按鍵，避免網站接著在新 type 的清單上再換頁。
+        if (switchType(direction)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
         }
     }, true); // 使用 Capture 模式確保優先捕獲事件
-
-    // 放開 Q / E 後允許下一次切換。
-    document.addEventListener('keyup', function(e) {
-        const key = e.key.toUpperCase();
-        if (key === 'Q' || key === 'E') {
-            isKeyDown = false; // 重置旗標，允許下次觸發
-        }
-    });
 
     // 網站模型包含其他頁的選取；保留 DOM 計數作為載入中或無 Angular 時的保護。
     function selectedThumbnailCount() {
@@ -122,7 +114,7 @@
     // 以網站的選取樣式尋找目前 type，切換後交由原生點擊載入資料，再聚焦右側第一張縮圖。
     function switchType(direction) {
         // 多選時保護目前清單，避免切換 type 造成選取項目狀態意外改變。
-        if (selectedThumbnailCount() > 1) return;
+        if (selectedThumbnailCount() > 1) return false;
 
         const items = Array.from(document.querySelectorAll(SELECTORS.bItems));
         let currentIndex = -1;
@@ -134,7 +126,7 @@
             }
         });
 
-        if (currentIndex === -1) return; // 若無選中項則跳出
+        if (currentIndex === -1) return false; // 若無選中項則跳出
 
         let targetIndex = -1;
         // 計算目標索引值
@@ -144,32 +136,33 @@
             targetIndex = currentIndex - 1;
         }
 
-        // 如果目標索引有效，執行切換動作
-        if (targetIndex !== -1) {
-            const targetItem = items[targetIndex];
+        // 已在第一個或最後一個 type 時不處理，交回網站原生按鍵。
+        if (targetIndex === -1) return false;
 
-            // 模擬滑鼠點擊動作
-            targetItem.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            targetItem.click();
+        const targetItem = items[targetIndex];
 
-            // 將目標項目滾動到可視範圍（靠最近邊界）
-            targetItem.scrollIntoView({ block: 'nearest' });
+        // 模擬滑鼠點擊動作
+        targetItem.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        targetItem.click();
 
-            // 自動聚焦到右側詳情區域
-            const aRegion = document.querySelector(SELECTORS.aRegion);
-            if (aRegion) {
-                // 如果該區域不可聚焦，強制給予 tabIndex 使其可被 focus
-                if (aRegion.tabIndex < 0) {
-                    aRegion.tabIndex = 0;
-                }
-                aRegion.focus();
+        // 將目標項目滾動到可視範圍（靠最近邊界）
+        targetItem.scrollIntoView({ block: 'nearest' });
 
-                // 自動點擊右側區域內的第一個心電圖圖表或數據項
-                const firstEcg = aRegion.querySelector('.ecg-trend');
-                if (firstEcg) {
-                    firstEcg.click();
-                }
+        // 自動聚焦到右側詳情區域
+        const aRegion = document.querySelector(SELECTORS.aRegion);
+        if (aRegion) {
+            // 如果該區域不可聚焦，強制給予 tabIndex 使其可被 focus
+            if (aRegion.tabIndex < 0) {
+                aRegion.tabIndex = 0;
+            }
+            aRegion.focus();
+
+            // 自動點擊右側區域內的第一個心電圖圖表或數據項
+            const firstEcg = aRegion.querySelector('.ecg-trend');
+            if (firstEcg) {
+                firstEcg.click();
             }
         }
+        return true;
     }
 })();
