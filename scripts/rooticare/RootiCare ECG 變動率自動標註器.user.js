@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率自動標註器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.0
-// @description  依相鄰心搏間隔計算變動率，預設達 12% 時標紅並加粗；按住反引號鍵顯示各組平均心率。
+// @version      1.1
+// @description  依相鄰心搏間隔計算變動率，預設達 12% 時標紅並加粗；按住反引號鍵顯示各組平均心率（排除灰色背景區段）。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -16,7 +16,7 @@
 // 使用教學：開啟含有心搏間隔與 BPM 文字的 ECG 畫面，腳本會自動計算並上色。
 // 變動率 =（前一個有效間隔 − 目前間隔）/ 目前間隔；預設達 12% 時標紅並加粗。
 // 預設採透明度漸層；可修改 HIT_THRESHOLD、ENABLE_GRADIENT 與 TARGET_COLOR。
-// 按住反引號鍵（`）：顯示各組平均心率；放開按鍵：隱藏平均值。
+// 按住反引號鍵（`）：顯示各組平均心率，灰色背景區段的 BPM 不列入；放開按鍵：隱藏平均值。
 // 在輸入框或可編輯區域中不觸發平均值快捷鍵；控制台表格由 ENABLE_LOG 控制。
 
 (function() {
@@ -47,6 +47,7 @@
             let lastValidValue = null;
             let logData = [];
             let heartRates = []; // 用來儲存此組所有有效的心率值
+            const heartRateLabels = []; // 心率與其文字節點，按鍵時用來排除灰色區段
 
             // 排除間隔達到設定上限的文字節點。
             const msElements = textElements.filter(el => {
@@ -70,6 +71,7 @@
                     if (hrMatch) {
                         currentHR = parseInt(hrMatch[0], 10);
                         heartRates.push(currentHR); // 收集心率
+                        heartRateLabels.push({ hr: currentHR, element: el });
                     }
                 }
 
@@ -112,7 +114,7 @@
             // 保存容器與平均值，供按鍵顯示使用。
             groupDataCache.push({
                 element: group,
-                avgHR: avgHR
+                heartRateLabels
             });
 
             if (ENABLE_LOG && logData.length > 0) {
@@ -167,6 +169,31 @@
 
     // 平均心率浮層與快捷鍵
 
+    // 取得同一 ECG 區塊中灰色背景的螢幕水平範圍。
+    // 網站以 .ecgMask 內每秒一格的 rect.mask 表示背景，opacity 大於 0 即為灰色。
+    function getGrayRanges(group) {
+        const block = group.closest('svg.ecgRMarker')?.parentElement;
+        if (!block) return [];
+        return [...block.querySelectorAll('.ecgMask rect.mask')]
+            .filter(mask => Number(mask.getAttribute('opacity') ?? getComputedStyle(mask).opacity) > 0)
+            .map(mask => mask.getBoundingClientRect())
+            .filter(rect => rect.width > 0)
+            .map(rect => [rect.left, rect.right]);
+    }
+
+    // 按鍵當下計算平均心率，只納入文字中心落在白色背景的 BPM，灰色狀態改變後也能即時反映。
+    function getWhiteAverage(groupData) {
+        const grayRanges = getGrayRanges(groupData.element);
+        const rates = groupData.heartRateLabels.filter(({ element }) => {
+            if (!element.isConnected) return false;
+            const rect = element.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            return !grayRanges.some(([left, right]) => centerX >= left && centerX < right);
+        }).map(({ hr }) => hr);
+        if (!rates.length) return null;
+        return (rates.reduce((acc, val) => acc + val, 0) / rates.length).toFixed(2);
+    }
+
     // 為有平均心率的群組建立顯示浮層。
     // 依快取的群組位置建立平均心率浮層；忽略沒有可計算平均值的群組。
     function showAverages() {
@@ -174,7 +201,8 @@
         hideAverages();
 
         groupDataCache.forEach((groupData, idx) => {
-            if (!groupData.avgHR) return; // 沒有資料就不顯示
+            const avgHR = getWhiteAverage(groupData);
+            if (!avgHR) return; // 沒有白色區段的心率就不顯示
 
             // 取得群組在可視視窗中的位置。
             const rect = groupData.element.getBoundingClientRect();
@@ -187,7 +215,7 @@
             // 建立平均心率的顯示節點。
             const overlay = document.createElement('div');
             overlay.className = 'ecg-avg-overlay';
-            overlay.textContent = `Avg: ${groupData.avgHR} bpm`;
+            overlay.textContent = `Avg: ${avgHR} bpm`;
 
             // 設定浮層的位置、顏色與文字樣式。
             Object.assign(overlay.style, {
