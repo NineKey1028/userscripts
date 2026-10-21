@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.14.4
+// @version      1.14.5
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -171,7 +171,9 @@
         const overWave = guideMarker.matches('div.ecgWave');
         const wave = overWave ? guideMarker : guideMarker.nextElementSibling;
         if (!wave?.matches('div.ecgWave')) { hideAlignmentGuide(); return; }
-        const plot = overWave ? wave.querySelector('.centerGroup .centerRect') : null;
+        // 部分頁面在開啟 Measure 前沒有 centerRect，改用 centerGroup 或波形 SVG 的範圍。
+        const plot = overWave ? (wave.querySelector('.centerGroup .centerRect')
+            || wave.querySelector('.centerGroup') || wave.querySelector('svg')) : null;
         if (overWave && !plot) { hideAlignmentGuide(); return; }
         const markerBounds = (plot || guideMarker).getBoundingClientRect();
         const waveBounds = (plot || wave).getBoundingClientRect();
@@ -196,10 +198,24 @@
         alignmentGuide.style.background = overWave ? 'rgba(224, 32, 32, 0.3)' : '#e02020';
         alignmentGuide.style.display = 'block';
     }
+    // 波形上方可能蓋著透明圖層（Measure 未開啟時尤其如此），事件目標不一定是波形本身；
+    // 找不到時改查游標下方所有元素。
+    const GUIDE_MARKER_SELECTOR = 'svg.ecgRMarker, div.ecgWave';
+    function findGuideMarker(event) {
+        const direct = event.target.closest?.(GUIDE_MARKER_SELECTOR);
+        if (direct) return direct;
+        for (const el of document.elementsFromPoint(event.clientX, event.clientY)) {
+            if (el === alignmentGuide) continue;
+            const marker = el.closest?.(GUIDE_MARKER_SELECTOR);
+            if (marker) return marker;
+        }
+        return null;
+    }
     document.addEventListener('mousemove', event => {
         if (labelDrag) return; // 拖曳期間由標籤的實際位置更新紅線，避免被游標位置覆蓋。
-        const marker = event.target.closest?.('svg.ecgRMarker, div.ecgWave');
-        if (!ENABLE_ALIGNMENT_GUIDE || !marker || isDisabledPage()) { hideAlignmentGuide(); return; }
+        if (!ENABLE_ALIGNMENT_GUIDE || isDisabledPage()) { hideAlignmentGuide(); return; }
+        const marker = findGuideMarker(event);
+        if (!marker) { hideAlignmentGuide(); return; }
         guideMarker = marker;
         guideMouseX = event.clientX;
         guideMouseY = event.clientY;
