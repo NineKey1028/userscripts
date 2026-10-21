@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.16.3
+// @version      1.16.5
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -1155,15 +1155,15 @@
 
     // 事件清單頁碼拉條：在選印的綠色垂直線下方加入頁碼按鈕，點擊即跳到該頁，右側顯示選印數量。
     // 直接讀取網站拉條（svg.paginationEventBar）綁定的分頁資料與選印清單，不依賴語系文字。
-    const PRINT_LINK_SPACE = 4; // 拉條下緣到圓點列的連接線高度，需與 .rc-print-panel 上內距相同
+    const PRINT_LINK_SPACE = 4; // 拉條下緣到圓點列的連接線高度，需與 .rc-print-jumps 的 top 相同
     const printBarStyle = document.createElement('style');
     printBarStyle.textContent = `
-        .rc-print-panel { position:relative; box-sizing:border-box; padding:4px 0 2px; }
+        .rc-print-panel { position:relative; height:0; overflow:visible; }
         .rc-print-links { position:absolute; left:0; overflow:visible; pointer-events:none; }
         .rc-print-link { fill:none; stroke:#8fb43a; stroke-width:1; stroke-linecap:round; opacity:.75;
             transition:stroke .12s, stroke-width .12s, opacity .12s; }
         .rc-print-link.is-current, .rc-print-link.is-hot { stroke:#5b7d1a; stroke-width:1.6; opacity:1; }
-        .rc-print-jumps { position:relative; width:100%; height:14px; }
+        .rc-print-jumps { position:relative; top:4px; width:100%; height:14px; }
         .rc-print-jump { position:absolute; top:50%; box-sizing:border-box; width:11px; height:11px; margin:0; padding:0;
             transform:translate(-50%, -50%); border:2px solid #8fb43a; border-radius:50%; background:#fff; color:#fff;
             font-family:inherit; font-weight:700; font-size:8px; line-height:7px; text-align:center; cursor:pointer;
@@ -1205,6 +1205,35 @@
         return { groups: [...groups].sort((a, b) => a[0] - b[0]).map(([page, times]) => ({ page, times })),
             total: events.length, pageCount: pages.length };
     }
+    // 只排一列：依綠線位置（已由左到右排序）回傳每個圓點的中心 x。
+    // 會重疊的圓點合併成一組，以組內綠線的平均位置為中心左右攤開；每次合併都先限制在拉條寬度內，
+    // 再與前一組比較，避免被邊界推回後又疊到相鄰的組。整列比拉條寬時置中。
+    function layoutPrintDots(targets, barWidth) {
+        const gap = Math.max(15, Math.min(18, barWidth / Math.max(1, targets.length)));
+        const place = cluster => {
+            const width = cluster.count * gap;
+            const ideal = cluster.sum / cluster.count - width / 2;
+            cluster.left = width > barWidth ? (barWidth - width) / 2 : Math.min(Math.max(ideal, 0), barWidth - width);
+        };
+        const clusters = [];
+        targets.forEach((target, index) => {
+            let cluster = { first: index, count: 1, sum: target };
+            place(cluster);
+            while (clusters.length) {
+                const previous = clusters[clusters.length - 1];
+                if (previous.left + previous.count * gap <= cluster.left + 0.01) break;
+                clusters.pop();
+                cluster = { first: previous.first, count: previous.count + cluster.count, sum: previous.sum + cluster.sum };
+                place(cluster);
+            }
+            clusters.push(cluster);
+        });
+        const positions = [];
+        for (const cluster of clusters) {
+            for (let i = 0; i < cluster.count; i++) positions[cluster.first + i] = cluster.left + gap * (i + 0.5);
+        }
+        return positions;
+    }
     function jumpToPage(range, page) {
         const input = range.querySelector('input[type="range"]');
         if (!input) return;
@@ -1242,7 +1271,7 @@
             panel.style.width = `${range.offsetWidth}px`;
             panel.style.marginLeft = rangeStyle.marginLeft;
             panel.style.marginRight = rangeStyle.marginRight;
-            // 拉條本身有下邊距；以負邊距貼齊拉條，再把同樣的間距移到這一列下方。
+            // 這一列高度為 0，畫在拉條下邊距的空白裡，不推動下方心電圖；負邊距貼齊拉條，再補回同樣的間距。
             const rangeGap = parseFloat(rangeStyle.marginBottom) || 0;
             panel.style.marginTop = `${-rangeGap}px`;
             panel.style.marginBottom = `${rangeGap}px`;
@@ -1259,28 +1288,8 @@
                     Math.abs(value - estimate) < Math.abs(best - estimate) ? value : best, Infinity);
                 return { page, times, target: Math.abs(nearest - estimate) <= 8 ? nearest + 0.5 : estimate };
             });
-            // 只排一列：相鄰圓點會重疊時合併成一組，以各自綠線的平均位置為中心左右攤開。
-            const gap = Math.max(12, Math.min(16, barWidth / items.length));
-            const clusters = [];
-            for (const item of items) {
-                let cluster = { items: [item], sum: item.target };
-                cluster.left = item.target - gap / 2;
-                while (clusters.length) {
-                    const previous = clusters[clusters.length - 1];
-                    if (previous.left + previous.items.length * gap <= cluster.left) break;
-                    clusters.pop();
-                    cluster = { items: [...previous.items, ...cluster.items], sum: previous.sum + cluster.sum };
-                    cluster.left = cluster.sum / cluster.items.length - cluster.items.length * gap / 2;
-                }
-                clusters.push(cluster);
-            }
-            // 盡量留在拉條寬度內；整列比拉條寬時置中。
-            for (const cluster of clusters) {
-                const width = cluster.items.length * gap;
-                cluster.left = width > barWidth ? (barWidth - width) / 2
-                    : Math.min(Math.max(cluster.left, 0), barWidth - width);
-                cluster.items.forEach((item, index) => { item.x = cluster.left + gap * (index + 0.5); });
-            }
+            layoutPrintDots(items.map(item => item.target), barWidth)
+                .forEach((x, index) => { items[index].x = x; });
 
             // 細曲線從拉條上的綠線底部連到下方圓點。
             const barGap = Math.max(0, range.getBoundingClientRect().bottom - bar.getBoundingClientRect().bottom);
