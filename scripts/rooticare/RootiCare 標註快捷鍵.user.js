@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.14.5
+// @version      1.16.3
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -25,6 +25,8 @@
 // ch1／ch2／ch3 旁的眼睛可切換導程曲線；本次頁面內保留狀態，重新載入恢復全開。
 // 滑鼠移過 BPM／心律標籤列時，以細紅色垂直線對齊下方心電圖。
 // 滑鼠移過心電圖波形（含 Measure／Ruler 視窗）時，顯示較淡的紅色垂直對照線。
+// HR Min／HR Max／HR Max sinus 清單：每張心電圖上方的「排除 ±1 分」會移除排序在後、時間相差 ±1 分鐘內的心電圖；標題列可還原。
+// 事件清單（VEB、SVEB、Coppie 等）的頁碼拉條：選印綠線下方以細線連到一列小圓點（同頁多張顯示張數，滑過顯示頁碼），點擊跳頁；右側顯示選印張數。
 // Morphology 頁面停用標註操作；Alt 按鍵事件仍會被攔截。
 
 (function() {
@@ -1002,6 +1004,326 @@
         }
 
     }, true);
+
+    // HR Min／HR Max／HR Max sinus 清單：每張心電圖上方加入排除按鈕。
+    // 點擊後移除排序在其後、起始時間相差 ±1 分鐘內的心電圖並重新分頁；只換掉清單的分頁資料，
+    // 不修改網站原本的清單資料，重新開啟清單或按「還原」即恢復。以容器與 ng 屬性辨識，不依賴語系文字。
+    const HR_LIST_TYPES = ['minHR', 'maxHR', 'maxSinus'];
+    const HR_EXCLUDE_SECONDS = 60;
+    const HR_CARD_SELECTOR = '[ng-repeat^="currentData in af.eventDialog.currentData"]';
+    function getHRListContext(element) {
+        const dialog = element?.closest?.('#af-hr-dialog');
+        if (!dialog || !window.angular) return null;
+        let scope;
+        try { scope = window.angular.element(dialog).scope(); } catch (_) { return null; }
+        const eventDialog = scope?.af?.eventDialog;
+        const type = eventDialog?.dscp?.type;
+        if (!HR_LIST_TYPES.includes(type) || !Array.isArray(eventDialog.pageData)) return null;
+        let host = scope;
+        while (host && !Object.prototype.hasOwnProperty.call(host, 'pageChanged')) host = host.$parent;
+        if (typeof host?.pageChanged !== 'function') return null;
+        return { dialog, eventDialog, type, host };
+    }
+    function applyHRPages(context, items) {
+        const { eventDialog, type, host } = context;
+        const pagination = eventDialog.pagination;
+        const perPage = Number(pagination.itemsPerPage) || 6;
+        const pages = [];
+        for (let i = 0; i < items.length; i += perPage) pages.push(items.slice(i, i + perPage));
+        host.$apply(() => {
+            eventDialog.pageData = pages;
+            pagination.totalItems = items.length;
+            pagination.currentPage = Math.min(Math.max(1, pagination.currentPage), Math.max(1, pages.length));
+            eventDialog.indexAdjust = (pagination.currentPage - 1) * perPage;
+            host.pageChanged(type);
+        });
+    }
+    // 已按過排除的心電圖起始時間；清單重新開啟或還原時清空。
+    const hrExcludedAnchors = new Set();
+    const hrStyle = document.createElement('style');
+    hrStyle.textContent = `
+        .rc-hr-exclude { display:inline-flex; align-items:center; gap:4px; margin-left:10px; padding:0 10px 0 8px;
+            height:20px; border:1px solid #f0b4ae; border-radius:10px; background:#fff5f4; color:#c0392b;
+            font-family:inherit; font-weight:600; font-size:11px; line-height:18px; letter-spacing:.3px; cursor:pointer; vertical-align:middle;
+            box-shadow:0 1px 2px rgba(192,57,43,.12); transition:background .15s, color .15s, border-color .15s, box-shadow .15s; }
+        .rc-hr-exclude .rc-hr-icon { font-size:12px; line-height:1; }
+        .rc-hr-exclude:hover { background:#c0392b; border-color:#c0392b; color:#fff; box-shadow:0 2px 5px rgba(192,57,43,.3); }
+        .rc-hr-exclude:active { transform:translateY(1px); }
+        .rc-hr-exclude:focus-visible { outline:2px solid rgba(192,57,43,.45); outline-offset:1px; }
+        .rc-hr-exclude.is-done, .rc-hr-exclude.is-done:hover { background:#eef1f3; border-color:#cfd6db; color:#6b7780;
+            box-shadow:none; cursor:default; transform:none; }
+        .rc-hr-exclude.is-done .rc-hr-icon { color:#3c9a5f; }
+        .rc-hr-restore { display:none; align-items:center; gap:6px; height:22px; padding:0 10px 0 4px; border:0;
+            border-radius:11px; background:rgba(255,255,255,.95); color:#4f6b1a; font-family:inherit; font-weight:600; font-size:12px; line-height:22px;
+            cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,.18); transition:background .15s, box-shadow .15s; }
+        .rc-hr-restore.is-visible { display:inline-flex; }
+        .rc-hr-restore:hover { background:#fff; box-shadow:0 2px 6px rgba(0,0,0,.25); }
+        .rc-hr-restore .rc-hr-count { min-width:18px; height:16px; padding:0 5px; border-radius:8px; background:#c0392b;
+            color:#fff; font-size:11px; line-height:16px; text-align:center; }
+    `;
+    document.head.appendChild(hrStyle);
+    function excludeNearbyHRItems(card) {
+        const context = getHRListContext(card);
+        if (!context) return;
+        let item;
+        try { item = window.angular.element(card).scope(); } catch (_) { return; }
+        const time = Number(item?.currentData?.startTime);
+        if (!Number.isFinite(time) || hrExcludedAnchors.has(time)) return;
+        hrExcludedAnchors.add(time);
+        const { eventDialog } = context;
+        const position = (Number(eventDialog.indexAdjust) || 0) + item.$index;
+        const items = eventDialog.pageData.flat();
+        const kept = items.filter((value, index) => index <= position || Math.abs(Number(value) - time) > HR_EXCLUDE_SECONDS);
+        if (kept.length !== items.length) applyHRPages(context, kept);
+        else decorateHRList(); // 沒有可排除的項目時仍更新按鈕狀態。
+    }
+    function restoreHRItems(dialog) {
+        const context = getHRListContext(dialog);
+        const source = context?.eventDialog[context.type];
+        if (!Array.isArray(source?.data)) return;
+        hrExcludedAnchors.clear();
+        applyHRPages(context, source.data.flat());
+    }
+    function setExcludeButtonState(button, done) {
+        if (button.classList.contains('is-done') === done && button.childElementCount) return;
+        button.classList.toggle('is-done', done);
+        button.innerHTML = done
+            ? '<span class="rc-hr-icon">✓</span>已排除 ±1 分'
+            : '<span class="rc-hr-icon">⊘</span>排除 ±1 分';
+        button.title = done ? '已移除排序在後、±1 分鐘內的心電圖；按標題列「還原」可恢復'
+            : '移除排序在後、與此心電圖相差 ±1 分鐘內的心電圖';
+        button.setAttribute('aria-pressed', String(done));
+    }
+    function decorateHRList() {
+        if (isDisabledPage()) return;
+        const dialog = document.querySelector('#af-hr-dialog');
+        const context = getHRListContext(dialog);
+        if (!context) return;
+        const source = context.eventDialog[context.type];
+        // 網站重新開啟清單時會把分頁資料換回原始清單，此時排除紀錄已失效。
+        if (context.eventDialog.pageData === source?.data) hrExcludedAnchors.clear();
+        for (const card of dialog.querySelectorAll(HR_CARD_SELECTOR)) {
+            const header = card.querySelector('.event-blk-header');
+            if (!header) continue;
+            let button = header.querySelector('.rc-hr-exclude');
+            if (!button) {
+                button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'rc-hr-exclude';
+                button.addEventListener('click', event => {
+                    event.preventDefault(); event.stopPropagation();
+                    excludeNearbyHRItems(card);
+                });
+                header.appendChild(button);
+            }
+            // ng-repeat 以 $index 追蹤，換頁時卡片節點會沿用，因此每次依目前資料更新狀態。
+            let time = NaN;
+            try { time = Number(window.angular.element(card).scope()?.currentData?.startTime); } catch (_) { /* 略過 */ }
+            setExcludeButtonState(button, hrExcludedAnchors.has(time));
+        }
+        // 標題列顯示已排除數量與還原按鈕。
+        const originalCount = Array.isArray(source?.data) ? source.data.flat().length : 0;
+        const excluded = context.eventDialog.pageData === source?.data ? 0
+            : Math.max(0, originalCount - context.eventDialog.pageData.flat().length);
+        const toolbar = dialog.querySelector('.data-tool-blk .float-left');
+        let restore = dialog.querySelector('.rc-hr-restore');
+        if (!restore && toolbar) {
+            restore = document.createElement('button');
+            restore.type = 'button';
+            restore.className = 'rc-hr-restore';
+            restore.title = '恢復完整清單';
+            restore.innerHTML = '<span class="rc-hr-count"></span>還原';
+            restore.addEventListener('click', event => {
+                event.preventDefault(); event.stopPropagation();
+                restoreHRItems(dialog);
+            });
+            toolbar.appendChild(restore);
+        }
+        if (restore) {
+            const count = restore.querySelector('.rc-hr-count');
+            const label = `已排除 ${excluded}`;
+            if (count.textContent !== label) count.textContent = label;
+            restore.classList.toggle('is-visible', excluded > 0);
+        }
+    }
+    let hrListPending = false;
+    new MutationObserver(() => {
+        if (hrListPending) return;
+        hrListPending = true;
+        requestAnimationFrame(() => { hrListPending = false; decorateHRList(); });
+    }).observe(document.body, { childList: true, subtree: true });
+
+    // 事件清單頁碼拉條：在選印的綠色垂直線下方加入頁碼按鈕，點擊即跳到該頁，右側顯示選印數量。
+    // 直接讀取網站拉條（svg.paginationEventBar）綁定的分頁資料與選印清單，不依賴語系文字。
+    const PRINT_LINK_SPACE = 4; // 拉條下緣到圓點列的連接線高度，需與 .rc-print-panel 上內距相同
+    const printBarStyle = document.createElement('style');
+    printBarStyle.textContent = `
+        .rc-print-panel { position:relative; box-sizing:border-box; padding:4px 0 2px; }
+        .rc-print-links { position:absolute; left:0; overflow:visible; pointer-events:none; }
+        .rc-print-link { fill:none; stroke:#8fb43a; stroke-width:1; stroke-linecap:round; opacity:.75;
+            transition:stroke .12s, stroke-width .12s, opacity .12s; }
+        .rc-print-link.is-current, .rc-print-link.is-hot { stroke:#5b7d1a; stroke-width:1.6; opacity:1; }
+        .rc-print-jumps { position:relative; width:100%; height:14px; }
+        .rc-print-jump { position:absolute; top:50%; box-sizing:border-box; width:11px; height:11px; margin:0; padding:0;
+            transform:translate(-50%, -50%); border:2px solid #8fb43a; border-radius:50%; background:#fff; color:#fff;
+            font-family:inherit; font-weight:700; font-size:8px; line-height:7px; text-align:center; cursor:pointer;
+            transition:transform .12s, background .12s, border-color .12s; }
+        .rc-print-jump.has-count { width:14px; height:14px; background:#8fb43a; line-height:10px; }
+        .rc-print-jump:hover { z-index:1; transform:translate(-50%, -50%) scale(1.35); background:#5b7d1a; border-color:#5b7d1a; }
+        .rc-print-jump.is-current { background:#5b7d1a; border-color:#5b7d1a; box-shadow:0 0 0 2px rgba(91,125,26,.28); }
+        .rc-print-summary { position:absolute; left:calc(100% + 10px); top:calc(var(--rc-range-height, 20px) / -2);
+            transform:translateY(-50%); height:18px; padding:0 8px; border-radius:9px; background:#5b7d1a; color:#fff;
+            font-family:inherit; font-weight:600; font-size:11px; line-height:18px; white-space:nowrap; pointer-events:none; }
+    `;
+    document.head.appendChild(printBarStyle);
+    // 分頁資料可能是時間、[時間, …] 或含 startTime 的物件。
+    function toEventTime(value) {
+        if (Array.isArray(value)) value = value[0];
+        if (value && typeof value === 'object') value = value.startTime ?? value.tms ?? value.time;
+        const time = Number(value);
+        return Number.isFinite(time) ? time : null;
+    }
+    function getPrintPages(scope) {
+        const pages = Array.isArray(scope?.pageData) ? scope.pageData : [];
+        const events = Array.isArray(scope?.events) ? scope.events : [];
+        if (!pages.length || !events.length) return { groups: [], total: events.length };
+        const pageByTime = new Map();
+        pages.forEach((page, index) => {
+            for (const value of Array.isArray(page) ? page : [page]) {
+                const time = toEventTime(value);
+                if (time !== null && !pageByTime.has(time)) pageByTime.set(time, index + 1);
+            }
+        });
+        const groups = new Map();
+        for (const event of events) {
+            const time = toEventTime(event);
+            const page = pageByTime.get(time);
+            if (!page) continue;
+            if (!groups.has(page)) groups.set(page, []);
+            groups.get(page).push(time);
+        }
+        return { groups: [...groups].sort((a, b) => a[0] - b[0]).map(([page, times]) => ({ page, times })),
+            total: events.length, pageCount: pages.length };
+    }
+    function jumpToPage(range, page) {
+        const input = range.querySelector('input[type="range"]');
+        if (!input) return;
+        input.value = String(page);
+        // 交給網站的 ng-model 與 ng-change 處理換頁，與拖曳拉條相同。
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    function decoratePrintBars() {
+        if (isDisabledPage() || !window.angular) return;
+        for (const bar of document.querySelectorAll('.pagination-range svg.paginationEventBar')) {
+            const range = bar.closest('.pagination-range');
+            let scope;
+            try { scope = window.angular.element(bar).isolateScope(); } catch (_) { continue; }
+            if (!scope) continue;
+            const { groups, total, pageCount } = getPrintPages(scope);
+            const current = Number(scope.pageIndex);
+            const barWidth = bar.getBoundingClientRect().width;
+            const signature = JSON.stringify([groups, total, current, Math.round(barWidth)]);
+            const hasPanel = range.nextElementSibling?.classList.contains('rc-print-panel');
+            if (range.dataset.rcPrintSignature === signature && hasPanel === total > 0) continue;
+            range.dataset.rcPrintSignature = signature;
+
+            // 拉條容器為 overflow:hidden，圓點與數量放在緊接其後、同寬置中的獨立列。
+            let panel = range.nextElementSibling?.classList.contains('rc-print-panel') ? range.nextElementSibling : null;
+            if (!total) { panel?.remove(); continue; }
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.className = 'rc-print-panel';
+                panel.innerHTML = '<svg class="rc-print-links" aria-hidden="true"></svg>'
+                    + '<span class="rc-print-summary"></span><div class="rc-print-jumps"></div>';
+                range.after(panel);
+            }
+            const rangeStyle = getComputedStyle(range);
+            panel.style.width = `${range.offsetWidth}px`;
+            panel.style.marginLeft = rangeStyle.marginLeft;
+            panel.style.marginRight = rangeStyle.marginRight;
+            // 拉條本身有下邊距；以負邊距貼齊拉條，再把同樣的間距移到這一列下方。
+            const rangeGap = parseFloat(rangeStyle.marginBottom) || 0;
+            panel.style.marginTop = `${-rangeGap}px`;
+            panel.style.marginBottom = `${rangeGap}px`;
+            panel.style.setProperty('--rc-range-height', `${range.offsetHeight}px`);
+            panel.querySelector('.rc-print-summary').textContent = `選印 ${total} 張`;
+
+            // 綠線位置：優先對齊網站畫出的 rect.mark-up，找不到相近的線時才用頁序換算。
+            const scale = barWidth / (Number(bar.getAttribute('width')) || barWidth);
+            const markXs = [...bar.querySelectorAll('rect.mark-up')]
+                .map(rect => Number(rect.getAttribute('x')) * scale).filter(Number.isFinite);
+            const items = groups.map(({ page, times }) => {
+                const estimate = pageCount > 1 ? (page - 1) / pageCount * barWidth : barWidth / 2;
+                const nearest = markXs.reduce((best, value) =>
+                    Math.abs(value - estimate) < Math.abs(best - estimate) ? value : best, Infinity);
+                return { page, times, target: Math.abs(nearest - estimate) <= 8 ? nearest + 0.5 : estimate };
+            });
+            // 只排一列：相鄰圓點會重疊時合併成一組，以各自綠線的平均位置為中心左右攤開。
+            const gap = Math.max(12, Math.min(16, barWidth / items.length));
+            const clusters = [];
+            for (const item of items) {
+                let cluster = { items: [item], sum: item.target };
+                cluster.left = item.target - gap / 2;
+                while (clusters.length) {
+                    const previous = clusters[clusters.length - 1];
+                    if (previous.left + previous.items.length * gap <= cluster.left) break;
+                    clusters.pop();
+                    cluster = { items: [...previous.items, ...cluster.items], sum: previous.sum + cluster.sum };
+                    cluster.left = cluster.sum / cluster.items.length - cluster.items.length * gap / 2;
+                }
+                clusters.push(cluster);
+            }
+            // 盡量留在拉條寬度內；整列比拉條寬時置中。
+            for (const cluster of clusters) {
+                const width = cluster.items.length * gap;
+                cluster.left = width > barWidth ? (barWidth - width) / 2
+                    : Math.min(Math.max(cluster.left, 0), barWidth - width);
+                cluster.items.forEach((item, index) => { item.x = cluster.left + gap * (index + 0.5); });
+            }
+
+            // 細曲線從拉條上的綠線底部連到下方圓點。
+            const barGap = Math.max(0, range.getBoundingClientRect().bottom - bar.getBoundingClientRect().bottom);
+            const links = panel.querySelector('.rc-print-links');
+            const linkHeight = barGap + PRINT_LINK_SPACE;
+            links.setAttribute('width', String(barWidth));
+            links.setAttribute('height', String(linkHeight));
+            links.style.top = `${-barGap}px`;
+            links.innerHTML = '';
+            const strip = panel.querySelector('.rc-print-jumps');
+            strip.textContent = '';
+            for (const { page, times, target, x } of items) {
+                const link = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                link.setAttribute('d', `M${target} 0 C${target} ${linkHeight * 0.55} ${x} ${linkHeight * 0.45} ${x} ${linkHeight}`);
+                link.setAttribute('class', 'rc-print-link' + (page === current ? ' is-current' : ''));
+                links.appendChild(link);
+
+                const button = document.createElement('button');
+                button.type = 'button';
+                // 小圓點：同頁多張時顯示張數，頁碼放在滑鼠提示中。
+                button.className = 'rc-print-jump' + (times.length > 1 ? ' has-count' : '')
+                    + (page === current ? ' is-current' : '');
+                button.textContent = times.length > 1 ? String(times.length) : '';
+                button.title = `第 ${page} 頁・選印 ${times.length} 張`;
+                button.setAttribute('aria-label', button.title);
+                button.style.left = `${x}px`;
+                button.addEventListener('mouseenter', () => link.classList.add('is-hot'));
+                button.addEventListener('mouseleave', () => link.classList.remove('is-hot'));
+                button.addEventListener('click', event => {
+                    event.preventDefault(); event.stopPropagation();
+                    jumpToPage(range, page);
+                });
+                strip.appendChild(button);
+            }
+        }
+    }
+    let printBarPending = false;
+    new MutationObserver(() => {
+        if (printBarPending) return;
+        printBarPending = true;
+        requestAnimationFrame(() => { printBarPending = false; decoratePrintBars(); });
+    }).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('resize', () => requestAnimationFrame(decoratePrintBars));
 
     // 滑鼠中鍵：刪除標籤
     window.addEventListener('mousedown', async function(e) {
