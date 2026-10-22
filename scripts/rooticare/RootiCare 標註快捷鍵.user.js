@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.20.1
+// @version      1.20.2
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -40,7 +40,7 @@
  *   滑過標籤列或波形時，顯示紅色垂直對齊線
  *
  * 【清單】
- *   HR Min／Max／Max sinus  「排除 ±1 分」移除後面相近時間的心電圖，標題列可還原
+ *   HR Min／Max／Max sinus  「排除 ±1 分」移除後面相近時間的心電圖，再按一次取消；選印後保留，標題列可還原
  *   事件清單頁碼拉條        選印位置下方的圓點可點擊跳頁，右側顯示選印張數
  *
  * Morphology 頁面不提供以上功能。
@@ -1257,22 +1257,59 @@
         if (typeof host?.pageChanged !== 'function') return null;
         return { dialog, eventDialog, type, host };
     }
-    function applyHRPages(context, items) {
+    // focusTime：重新分頁後停在包含這張心電圖（或排在它前面最近一張）的頁面。
+    function applyHRPages(context, items, focusTime = null) {
         const { eventDialog, type, host } = context;
         const pagination = eventDialog.pagination;
         const perPage = Number(pagination.itemsPerPage) || 6;
         const pages = [];
         for (let i = 0; i < items.length; i += perPage) pages.push(items.slice(i, i + perPage));
+        let focusPage = null;
+        if (focusTime !== null) {
+            const index = items.findIndex(value => toEventTime(value) === focusTime);
+            if (index >= 0) focusPage = Math.floor(index / perPage) + 1;
+        }
         host.$apply(() => {
             eventDialog.pageData = pages;
             pagination.totalItems = items.length;
-            pagination.currentPage = Math.min(Math.max(1, pagination.currentPage), Math.max(1, pages.length));
+            pagination.currentPage = Math.min(Math.max(1, focusPage ?? pagination.currentPage), Math.max(1, pages.length));
             eventDialog.indexAdjust = (pagination.currentPage - 1) * perPage;
             host.pageChanged(type);
         });
+        hrExclusion.pages = eventDialog.pageData;
     }
-    // 已按過排除的心電圖起始時間；清單重新開啟或還原時清空。
-    const hrExcludedAnchors = new Set();
+    // 排除紀錄：依按下順序保存錨點心電圖的起始時間。網站把清單換回完整資料時（例如選印後）自動重新套用；
+    // 只有關閉清單、切換清單類型或按「還原」才清空。
+    const hrExclusion = { type: null, anchors: [], pages: null, focusTime: null };
+    function resetHRExclusion() {
+        hrExclusion.type = null;
+        hrExclusion.anchors = [];
+        hrExclusion.pages = null;
+        hrExclusion.focusTime = null;
+    }
+    // 依序套用每個錨點：移除排序在錨點之後、起始時間相差 ±1 分鐘內的心電圖。
+    function filterHRItems(items, anchors) {
+        let kept = items;
+        for (const anchor of anchors) {
+            const position = kept.findIndex(value => toEventTime(value) === anchor);
+            if (position < 0) continue;
+            kept = kept.filter((value, index) => index <= position || Math.abs(toEventTime(value) - anchor) > HR_EXCLUDE_SECONDS);
+        }
+        return kept;
+    }
+    function getHRSourceItems(context) {
+        const source = context.eventDialog[context.type];
+        return Array.isArray(source?.data) ? source.data.flat() : null;
+    }
+    function currentHRFocusTime(eventDialog) {
+        const page = eventDialog.pageData[(Number(eventDialog.pagination?.currentPage) || 1) - 1];
+        return toEventTime(Array.isArray(page) ? page[0] : page);
+    }
+    function reapplyHRExclusion(context, focusTime) {
+        const all = getHRSourceItems(context);
+        if (!all) return;
+        applyHRPages(context, hrExclusion.anchors.length ? filterHRItems(all, hrExclusion.anchors) : all, focusTime);
+    }
     const hrStyle = document.createElement('style');
     hrStyle.textContent = `
         .rc-hr-exclude { display:inline-flex; align-items:center; gap:4px; margin-left:10px; padding:0 10px 0 8px;
@@ -1283,9 +1320,10 @@
         .rc-hr-exclude:hover { background:#c0392b; border-color:#c0392b; color:#fff; box-shadow:0 2px 5px rgba(192,57,43,.3); }
         .rc-hr-exclude:active { transform:translateY(1px); }
         .rc-hr-exclude:focus-visible { outline:2px solid rgba(192,57,43,.45); outline-offset:1px; }
-        .rc-hr-exclude.is-done, .rc-hr-exclude.is-done:hover { background:#eef1f3; border-color:#cfd6db; color:#6b7780;
-            box-shadow:none; cursor:default; transform:none; }
+        .rc-hr-exclude.is-done { background:#eef1f3; border-color:#cfd6db; color:#6b7780; box-shadow:none; }
         .rc-hr-exclude.is-done .rc-hr-icon { color:#3c9a5f; }
+        .rc-hr-exclude.is-done:hover { background:#fff; border-color:#9aa5ad; color:#4a555d; box-shadow:0 1px 3px rgba(0,0,0,.15); }
+        .rc-hr-exclude.is-done:hover .rc-hr-icon { color:#c0392b; }
         .rc-hr-restore { display:none; align-items:center; gap:6px; height:22px; padding:0 10px 0 4px; border:0;
             border-radius:11px; background:rgba(255,255,255,.95); color:#4f6b1a; font-family:inherit; font-weight:600; font-size:12px; line-height:22px;
             cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,.18); transition:background .15s, box-shadow .15s; }
@@ -1295,27 +1333,30 @@
             color:#fff; font-size:11px; line-height:16px; text-align:center; }
     `;
     document.head.appendChild(hrStyle);
-    function excludeNearbyHRItems(card) {
+    function getHRCardTime(card) {
+        try { return toEventTime(window.angular.element(card).scope()?.currentData?.startTime); } catch (_) { return null; }
+    }
+    // 未排除時套用排除；已排除（反灰）時再按一次取消這張的排除，其他排除保持不變。
+    function toggleHRExclusion(card) {
         const context = getHRListContext(card);
-        if (!context) return;
-        let item;
-        try { item = window.angular.element(card).scope(); } catch (_) { return; }
-        const time = Number(item?.currentData?.startTime);
-        if (!Number.isFinite(time) || hrExcludedAnchors.has(time)) return;
-        hrExcludedAnchors.add(time);
-        const { eventDialog } = context;
-        const position = (Number(eventDialog.indexAdjust) || 0) + item.$index;
-        const items = eventDialog.pageData.flat();
-        const kept = items.filter((value, index) => index <= position || Math.abs(Number(value) - time) > HR_EXCLUDE_SECONDS);
-        if (kept.length !== items.length) applyHRPages(context, kept);
-        else decorateHRList(); // 沒有可排除的項目時仍更新按鈕狀態。
+        const time = getHRCardTime(card);
+        if (!context || time === null) return;
+        if (hrExclusion.type !== context.type) resetHRExclusion();
+        hrExclusion.type = context.type;
+        const index = hrExclusion.anchors.indexOf(time);
+        if (index >= 0) hrExclusion.anchors.splice(index, 1);
+        else hrExclusion.anchors.push(time);
+        reapplyHRExclusion(context, currentHRFocusTime(context.eventDialog));
+        decorateHRList();
     }
     function restoreHRItems(dialog) {
         const context = getHRListContext(dialog);
-        const source = context?.eventDialog[context.type];
-        if (!Array.isArray(source?.data)) return;
-        hrExcludedAnchors.clear();
-        applyHRPages(context, source.data.flat());
+        if (!context) return;
+        const focusTime = currentHRFocusTime(context.eventDialog);
+        hrExclusion.anchors = [];
+        reapplyHRExclusion(context, focusTime);
+        resetHRExclusion();
+        decorateHRList();
     }
     function setExcludeButtonState(button, done) {
         if (button.classList.contains('is-done') === done && button.childElementCount) return;
@@ -1323,18 +1364,48 @@
         button.innerHTML = done
             ? '<span class="rc-hr-icon">✓</span>已排除 ±1 分'
             : '<span class="rc-hr-icon">⊘</span>排除 ±1 分';
-        button.title = done ? '已移除排序在後、±1 分鐘內的心電圖；按標題列「還原」可恢復'
+        button.title = done ? '已移除排序在後、±1 分鐘內的心電圖；再按一次取消這張的排除'
             : '移除排序在後、與此心電圖相差 ±1 分鐘內的心電圖';
         button.setAttribute('aria-pressed', String(done));
     }
+    function isHRDialogShown(dialog) {
+        return !!dialog?.isConnected && dialog.getClientRects().length > 0;
+    }
+    // 清單關閉通常只改 class / style，沒有節點增減；監看清單與其祖先的屬性，關閉時清空排除紀錄。
+    let watchedHRDialog = null;
+    const hrDialogObserver = new MutationObserver(scheduleHRList);
+    function watchHRDialog(dialog) {
+        if (watchedHRDialog === dialog) return;
+        hrDialogObserver.disconnect();
+        watchedHRDialog = dialog;
+        for (let node = dialog; node && node !== document.body; node = node.parentElement) {
+            hrDialogObserver.observe(node, { attributes: true, attributeFilter: ['class', 'style'] });
+        }
+    }
+    // 網站若持續把清單換回去，短時間內重套太多次就放棄，避免無限循環。
+    const hrReapplyTimes = [];
     function decorateHRList() {
         if (isDisabledPage()) return;
         const dialog = document.querySelector('#af-hr-dialog');
+        if (dialog) watchHRDialog(dialog);
+        if (!isHRDialogShown(dialog)) { resetHRExclusion(); return; }
         const context = getHRListContext(dialog);
         if (!context) return;
-        const source = context.eventDialog[context.type];
-        // 網站重新開啟清單時會把分頁資料換回原始清單，此時排除紀錄已失效。
-        if (context.eventDialog.pageData === source?.data) hrExcludedAnchors.clear();
+        const { eventDialog } = context;
+        if (hrExclusion.type !== context.type) resetHRExclusion();
+        if (hrExclusion.anchors.length) {
+            if (eventDialog.pageData !== hrExclusion.pages) {
+                const now = Date.now();
+                while (hrReapplyTimes.length && now - hrReapplyTimes[0] > 2000) hrReapplyTimes.shift();
+                if (hrReapplyTimes.length >= 8) { resetHRExclusion(); return; }
+                hrReapplyTimes.push(now);
+                // 網站換回完整清單（例如選印後）：重新套用排除，並停在原本看的心電圖所在頁。
+                reapplyHRExclusion(context, hrExclusion.focusTime ?? currentHRFocusTime(eventDialog));
+                return; // 重新分頁會觸發下一次更新。
+            }
+            hrExclusion.focusTime = currentHRFocusTime(eventDialog);
+        }
+        const anchors = new Set(hrExclusion.anchors);
         for (const card of dialog.querySelectorAll(HR_CARD_SELECTOR)) {
             const header = card.querySelector('.event-blk-header');
             if (!header) continue;
@@ -1345,19 +1416,17 @@
                 button.className = 'rc-hr-exclude';
                 button.addEventListener('click', event => {
                     event.preventDefault(); event.stopPropagation();
-                    excludeNearbyHRItems(card);
+                    toggleHRExclusion(card);
                 });
                 header.appendChild(button);
             }
             // ng-repeat 以 $index 追蹤，換頁時卡片節點會沿用，因此每次依目前資料更新狀態。
-            let time = NaN;
-            try { time = Number(window.angular.element(card).scope()?.currentData?.startTime); } catch (_) { /* 略過 */ }
-            setExcludeButtonState(button, hrExcludedAnchors.has(time));
+            setExcludeButtonState(button, anchors.has(getHRCardTime(card)));
         }
         // 標題列顯示已排除數量與還原按鈕。
-        const originalCount = Array.isArray(source?.data) ? source.data.flat().length : 0;
-        const excluded = context.eventDialog.pageData === source?.data ? 0
-            : Math.max(0, originalCount - context.eventDialog.pageData.flat().length);
+        const all = getHRSourceItems(context);
+        const excluded = hrExclusion.anchors.length && all
+            ? Math.max(0, all.length - eventDialog.pageData.flat().length) : 0;
         const toolbar = dialog.querySelector('.data-tool-blk .float-left');
         let restore = dialog.querySelector('.rc-hr-restore');
         if (!restore && toolbar) {
@@ -1380,11 +1449,12 @@
         }
     }
     let hrListPending = false;
-    new MutationObserver(() => {
+    function scheduleHRList() {
         if (hrListPending) return;
         hrListPending = true;
         requestAnimationFrame(() => { hrListPending = false; decorateHRList(); });
-    }).observe(document.body, { childList: true, subtree: true });
+    }
+    new MutationObserver(scheduleHRList).observe(document.body, { childList: true, subtree: true });
 
     // 事件清單頁碼拉條：在選印的綠色垂直線下方加入頁碼按鈕，點擊即跳到該頁，右側顯示選印數量。
     // 直接讀取網站拉條（svg.paginationEventBar）綁定的分頁資料與選印清單，不依賴語系文字。
@@ -1482,12 +1552,17 @@
             let scope;
             try { scope = window.angular.element(bar).isolateScope(); } catch (_) { continue; }
             if (!scope) continue;
+            watchPrintRange(range);
             const { groups, total, pageCount } = getPrintPages(scope);
             const current = Number(scope.pageIndex);
             const barWidth = bar.getBoundingClientRect().width;
+            // 拉條暫時隱藏或尚未排版時不計算，避免圓點列以錯誤的位置畫出；顯示後由 ResizeObserver 觸發重畫。
+            if (!range.offsetWidth || !barWidth) continue;
             const signature = JSON.stringify([groups, total, current, Math.round(barWidth)]);
-            const hasPanel = range.nextElementSibling?.classList.contains('rc-print-panel');
-            if (range.dataset.rcPrintSignature === signature && hasPanel === total > 0) continue;
+            const existing = range.nextElementSibling?.classList.contains('rc-print-panel') ? range.nextElementSibling : null;
+            // 換頁或選印時版面可能短暫變動，圓點列沒對齊拉條就整列重畫。
+            const aligned = !existing || Math.abs(existing.getBoundingClientRect().left - range.getBoundingClientRect().left) < 1;
+            if (range.dataset.rcPrintSignature === signature && !!existing === total > 0 && aligned) continue;
             range.dataset.rcPrintSignature = signature;
 
             // 拉條容器為 overflow:hidden，圓點與數量放在緊接其後、同寬置中的獨立列。
@@ -1504,6 +1579,9 @@
             panel.style.width = `${range.offsetWidth}px`;
             panel.style.marginLeft = rangeStyle.marginLeft;
             panel.style.marginRight = rangeStyle.marginRight;
+            // 依實際位置校正，拉條以 auto 邊距或父層置中時也能對齊。
+            const offset = range.getBoundingClientRect().left - panel.getBoundingClientRect().left;
+            if (Math.abs(offset) >= 0.5) panel.style.marginLeft = `${(parseFloat(panel.style.marginLeft) || 0) + offset}px`;
             // 這一列高度為 0，畫在拉條下邊距的空白裡，不推動下方心電圖；負邊距貼齊拉條，再補回同樣的間距。
             const rangeGap = parseFloat(rangeStyle.marginBottom) || 0;
             panel.style.marginTop = `${-rangeGap}px`;
@@ -1560,12 +1638,22 @@
         }
     }
     let printBarPending = false;
-    new MutationObserver(() => {
+    function schedulePrintBars() {
         if (printBarPending) return;
         printBarPending = true;
         requestAnimationFrame(() => { printBarPending = false; decoratePrintBars(); });
-    }).observe(document.body, { childList: true, subtree: true });
-    window.addEventListener('resize', () => requestAnimationFrame(decoratePrintBars));
+    }
+    // 拉條或其父層尺寸改變（例如由隱藏變為顯示）時不一定有節點增減，另以 ResizeObserver 觸發重畫。
+    const printRangeResize = typeof ResizeObserver === 'function' ? new ResizeObserver(schedulePrintBars) : null;
+    const watchedPrintRanges = new WeakSet();
+    function watchPrintRange(range) {
+        if (!printRangeResize || watchedPrintRanges.has(range)) return;
+        watchedPrintRanges.add(range);
+        printRangeResize.observe(range);
+        if (range.parentElement) printRangeResize.observe(range.parentElement);
+    }
+    new MutationObserver(schedulePrintBars).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('resize', schedulePrintBars);
 
     // 滑鼠中鍵：刪除標籤
     window.addEventListener('mousedown', async function(e) {
