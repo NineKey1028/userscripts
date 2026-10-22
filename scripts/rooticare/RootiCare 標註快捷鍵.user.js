@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.20.0
+// @version      1.20.1
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -11,6 +11,7 @@
 // @match        https://editor.rooticare.com/rooti-care/*
 // @match        https://editoreu.rooticare.com/rooti-care/*
 // @grant        none
+// @inject-into  page
 // ==/UserScript==
 
 /*
@@ -20,10 +21,10 @@
  *
  * 【標註】
  *   1 / 2 / 3            新增或改為 V / S / N
- *   4／滑鼠中鍵          刪除標籤
+ *   4／滑鼠中鍵          刪除標籤（Mac 觸控板無中鍵，用 4）
  *   按住 4 移動          連續刪除碰到的標籤
- *   按住 Alt+1/2/3 移動  只修改碰到的既有標籤
- *   Ctrl+左鍵拖曳        左右微調標籤位置（Esc 取消）；
+ *   按住 Alt+1/2/3 移動  只修改碰到的既有標籤（Mac 為 Option）
+ *   Ctrl+左鍵拖曳        左右微調標籤位置（Esc 取消；Mac 建議用 ⌘）；
  *                        按在標籤列空白處會吸過最近的標籤
  *
  * 【區間】Shift+1/2/3 按兩次（起點、終點），可跨視窗；Esc 取消
@@ -58,6 +59,9 @@
     function isDisabledPage() {
         return /^\/rooti-care\/morphology(?:\/|$)/.test(window.location?.pathname || '');
     }
+    // Mac：⌘ 可代替 Ctrl 拖曳標籤（Mac 的 Ctrl+點擊等同右鍵）。
+    const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '');
+    const isDragModifier = event => event.ctrlKey || (IS_MAC && event.metaKey);
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     let currentMousePos = { x: 0, y: 0 };
 
@@ -254,7 +258,7 @@
     // 每次移動沿上一點到目前位置取樣，快速甩過也不漏掉中間的標籤；只處理碰到的既有標籤。
     const SWEEP_STEP = 3; // 取樣間距（像素）
     const SWEEP_MAX_SAMPLES = 200;
-    let heldSweep = null; // { key, tag, alt, last: { x, y } }
+    let heldSweep = null; // { key, code, tag, alt, last: { x, y } }
     function stopHeldSweep() { heldSweep = null; }
     function sweepTo(x, y) {
         const from = heldSweep.last;
@@ -277,7 +281,7 @@
         sweepTo(e.clientX, e.clientY);
     }, { passive: true });
     document.addEventListener('keyup', (e) => {
-        if (heldSweep && (e.key === heldSweep.key || (e.key === 'Alt' && heldSweep.alt))) stopHeldSweep();
+        if (heldSweep && (e.code === heldSweep.code || (e.key === 'Alt' && heldSweep.alt))) stopHeldSweep();
     }, true);
     window.addEventListener('blur', stopHeldSweep);
 
@@ -442,7 +446,7 @@
         #rooticare-range-hotkeys { position:fixed;left:12px;bottom:12px;z-index:2147483000;
             width:370px;max-width:calc(100vw - 24px);padding:9px 11px;box-sizing:border-box;
             border:1px solid #dce3d6;border-radius:8px;background:#fff;color:#374333;
-            box-shadow:0 3px 14px #24332118;font:12px/1.45 Arial,"Microsoft JhengHei",sans-serif; }
+            box-shadow:0 3px 14px #24332118;font:12px/1.45 Arial,"PingFang TC","Microsoft JhengHei",sans-serif; }
         #rooticare-range-hotkeys * { box-sizing:border-box; }
         #rooticare-range-hotkeys .rh-head { display:flex;align-items:center;gap:8px; }
         #rooticare-range-hotkeys [data-role=message] { flex:1;min-width:0;font-weight:600;overflow-wrap:anywhere; }
@@ -463,7 +467,7 @@
         #rooticare-range-hotkeys [data-role=help] { margin-top:6px;color:#7b8574;font-size:11px; }
         #rooticare-range-hotkeys [data-role=tabs] { margin-top:7px;display:flex;gap:2px;border-bottom:1px solid #dce3d6; }
         #rooticare-range-hotkeys [data-role=tabs] button { width:auto;height:24px;padding:0 10px;border-radius:5px 5px 0 0;
-            margin-bottom:-1px;border:1px solid transparent;font:600 12px/22px Arial,"Microsoft JhengHei",sans-serif;color:#889180; }
+            margin-bottom:-1px;border:1px solid transparent;font:600 12px/22px Arial,"PingFang TC","Microsoft JhengHei",sans-serif;color:#889180; }
         #rooticare-range-hotkeys [data-role=tabs] button[aria-selected=true] { border-color:#dce3d6;border-bottom-color:#fff;
             background:#fff;color:#4f6b1a; }
         #rooticare-range-hotkeys [data-role=fill] { margin-top:7px;color:#526047; }
@@ -858,7 +862,7 @@
         return true;
     }
     document.addEventListener('click', event => {
-        if (event.button !== 0 || event.ctrlKey || labelDrag || Date.now() < dragClickUntil || isDisabledPage()) return;
+        if (event.button !== 0 || isDragModifier(event) || labelDrag || Date.now() < dragClickUntil || isDisabledPage()) return;
         const svg = event.target.closest?.('svg.ecgRMarker');
         if (!svg || event.target.closest?.('.annoText') || !svg.closest(TARGET_BLOCK_SELECTOR)) return;
         try {
@@ -952,11 +956,11 @@
     }
     document.addEventListener('pointerdown', event => {
         const marker = event.target.closest?.('svg.ecgRMarker');
-        if (event.button === 0 && event.ctrlKey && marker?.closest(TARGET_BLOCK_SELECTOR) && !isDisabledPage()) {
+        if (event.button === 0 && isDragModifier(event) && marker?.closest(TARGET_BLOCK_SELECTOR) && !isDisabledPage()) {
             event.preventDefault(); event.stopImmediatePropagation();
             dragClickUntil = Date.now() + 400;
         }
-        if (event.button !== 0 || !event.ctrlKey || event.shiftKey || event.altKey || event.metaKey
+        if (event.button !== 0 || !isDragModifier(event) || event.shiftKey || event.altKey || (event.metaKey && !IS_MAC)
             || isDisabledPage() || rangeMode || rangeBusy || labelDrag) return;
         // 按在標籤上就拖曳該標籤；按在標籤列空白處則吸過最近的標籤，直接移到游標位置後可繼續拖曳。
         let label = event.target.closest?.('.annoText');
@@ -1010,7 +1014,7 @@
         const drag = labelDrag;
         if (!drag || event.pointerId !== drag.pointerId) return;
         event.preventDefault(); event.stopImmediatePropagation();
-        if (!event.ctrlKey || !(event.buttons & 1) || !drag.label.isConnected || isDisabledPage()) {
+        if (!isDragModifier(event) || !(event.buttons & 1) || !drag.label.isConnected || isDisabledPage()) {
             finishLabelDrag(); return;
         }
         updateLabelDragPosition(event);
@@ -1037,11 +1041,11 @@
     document.addEventListener('pointerup', event => {
         if (!labelDrag || event.pointerId !== labelDrag.pointerId) return;
         event.preventDefault(); event.stopImmediatePropagation();
-        finishLabelDrag(event.ctrlKey && event.button === 0);
+        finishLabelDrag(isDragModifier(event) && event.button === 0);
     }, true);
     for (const name of ['mousedown', 'mouseup', 'click', 'dblclick']) {
         document.addEventListener(name, event => {
-            const ctrlOnMarker = event.ctrlKey && event.button === 0 && !isDisabledPage()
+            const ctrlOnMarker = isDragModifier(event) && event.button === 0 && !isDisabledPage()
                 && event.target.closest?.('svg.ecgRMarker')?.closest(TARGET_BLOCK_SELECTOR);
             if (ctrlOnMarker || labelDrag || (Date.now() < dragClickUntil && event.button === 0)) {
                 event.preventDefault(); event.stopImmediatePropagation();
@@ -1054,9 +1058,16 @@
         if (event.key === 'Escape') finishLabelDrag();
     }, true);
     document.addEventListener('keyup', event => {
-        if (event.key === 'Control' && labelDrag) finishLabelDrag();
+        if ((event.key === 'Control' || (IS_MAC && event.key === 'Meta')) && labelDrag) finishLabelDrag();
     }, true);
     document.addEventListener('pointercancel', () => finishLabelDrag(), true);
+    // Mac 的 Ctrl+點擊會開啟右鍵選單並中斷拖曳；在標籤列上攔截。
+    document.addEventListener('contextmenu', event => {
+        if (isDisabledPage()) return;
+        if (labelDrag || (event.ctrlKey && event.target.closest?.('svg.ecgRMarker')?.closest(TARGET_BLOCK_SELECTOR))) {
+            event.preventDefault();
+        }
+    }, true);
     window.addEventListener('blur', () => finishLabelDrag());
     // 第一次快捷鍵記錄端點，第二次讀取篩選條件並套用區間；目標分類以第二次按鍵為準。
     // 執行中鎖住區間操作；完成或失敗後顯示結果，並延遲收起提示，不自動儲存報告。
@@ -1143,6 +1154,8 @@
 
         const key = e.key.toLowerCase();
         const isAltPressed = e.altKey;
+        // Mac 的 Option+數字會輸出 ¡ ™ £ 等符號，改以實體按鍵位置判斷數字鍵。
+        const labelKey = /^Digit([1-4])$/.exec(e.code || '')?.[1] || key;
         // W / S 縮放只處理無修飾鍵的按鍵，保留 Ctrl+S 等瀏覽器快捷鍵。
         if (['w', 's'].includes(key) && (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey)) return;
         // Shift + 數字的 e.key 會變成 ! @ # 等符號，改以實體按鍵位置判斷（含數字鍵盤）。
@@ -1184,9 +1197,9 @@
         if (rangeMode || rangeBusy) return;
 
         // 按住期間由滑鼠移動接手；鍵盤連發不再重複處理。
-        if (!e.ctrlKey && !e.metaKey && (key === '4' || (isAltPressed && ['1', '2', '3'].includes(key)))) {
-            if (e.repeat && heldSweep?.key === key) { e.preventDefault(); e.stopImmediatePropagation(); return; }
-            heldSweep = { key, tag: { '1': 'V', '2': 'S', '3': 'N', '4': '' }[key], alt: key !== '4',
+        if (!e.ctrlKey && !e.metaKey && (labelKey === '4' || (isAltPressed && ['1', '2', '3'].includes(labelKey)))) {
+            if (e.repeat && heldSweep?.key === labelKey) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+            heldSweep = { key: labelKey, code: e.code, tag: { '1': 'V', '2': 'S', '3': 'N', '4': '' }[labelKey], alt: labelKey !== '4',
                 last: { x: currentMousePos.x, y: currentMousePos.y } };
         }
 
@@ -1204,7 +1217,7 @@
         if (!activeBlock) return;
 
         // Ctrl / ⌘ + 數字保留給瀏覽器（如切換分頁），不視為標註鍵。
-        if (['1', '2', '3', '4'].includes(key) && !e.ctrlKey && !e.metaKey) {
+        if (['1', '2', '3', '4'].includes(labelKey) && !e.ctrlKey && !e.metaKey) {
             e.preventDefault();
             e.stopImmediatePropagation();
 
@@ -1212,9 +1225,9 @@
             const isOnLabel = targetUnderMouse && targetUnderMouse.classList.contains('annoText');
 
             const keyMap = { '1': 'V', '2': 'S', '3': 'N', '4': '' };
-            const targetTag = keyMap[key];
+            const targetTag = keyMap[labelKey];
 
-            if (isAltPressed && key !== '4') {
+            if (isAltPressed && labelKey !== '4') {
                 if (!isOnLabel) return;
                 await processCommand(targetTag);
                 return;
