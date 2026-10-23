@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.29.0
+// @version      1.30.1
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -37,7 +37,7 @@
  *
  * 【檢視】
  *   W / S   縮放（↑ / ↓）
- *   Q / E   切換時間（← / →），縮放高度保持不變
+ *   Q / E   切換時間（← / →），縮放高度保持不變；滑鼠不必停在心電圖上
  *   ch1～3 旁的眼睛  顯示／隱藏導程（重新載入恢復全開）
  *   滑過標籤列或波形時，顯示紅色垂直對齊線
  *
@@ -45,7 +45,8 @@
  *   HR Min／Max／Max sinus  「排除 ±1 分」移除後面相近時間的心電圖，再按一次取消；選印後保留，標題列可還原
  *   Max HR sinus            標題列「排除 AF 時段」（預設關）：開啟後移除與 AF 時段重疊的心電圖
  *   AF 清單 mid segment     下拉選單旁的 ◀ ▶ 切換上一個／下一個時段（編輯模式）
- *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整
+ *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整；聚焦時顯示提示 3 秒
+ *   HR 清單時間框           貼上或修改時間後，自動以該心電圖白色區段的平均 BPM 填入 HR 欄
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
  *   V / S 事件清單          「⚡ 快速選印」依規則補足選印（時段分散、相隔 1 分鐘以上）；
  *                          按「選印 N 張」開啟選印清單：上方為心電圖視窗（可改標籤並 Save），
@@ -304,6 +305,12 @@
             if (block) return block;
         }
         return null;
+    }
+
+    // 畫面上是否有可見的 ECG 區塊（不論滑鼠位置）。
+    function hasVisibleECGBlock() {
+        if (isDisabledPage()) return false;
+        return [...document.querySelectorAll(TARGET_BLOCK_SELECTOR)].some(block => block.getClientRects().length > 0);
     }
 
     // 取得當前位置的元素（優先抓取標籤文字，次之為標籤列的背景矩形）。
@@ -1274,8 +1281,9 @@
             e.stopImmediatePropagation();
             return;
         }
+        // Q / E 與 W / S 一樣不依賴滑鼠位置：畫面上有 ECG 區塊（例如總覽心電圖）即可切換時間。
         if ((key === 'q' || key === 'e') && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
-            && !e.isComposing && (rangeMode || document.querySelector('.fixed-board') || getActiveBlockUnderMouse())) {
+            && !e.isComposing && (rangeMode || document.querySelector('.fixed-board') || hasVisibleECGBlock())) {
             e.preventDefault();
             e.stopImmediatePropagation();
             installZoomPersistence();
@@ -1764,6 +1772,137 @@
         input.value = next;
         if (selectionStart !== null) input.setSelectionRange(selectionStart, selectionEnd);
         input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, true);
+
+    // 聚焦時間輸入框時，在框下方顯示快捷鍵提示 3 秒；失焦或捲動時收起。
+    // 時間輸入框：內容是完整時間，或提示文字是時間格式（例如空白的 HR 清單時間框）。
+    const TIME_HINT_MS = 3000;
+    const TIME_FORMAT_PLACEHOLDER = /^[DMY/.\-, ]+HH:mm:ss$/;
+    const timeHintStyle = document.createElement('style');
+    timeHintStyle.textContent = `
+        .rc-time-hint { position:fixed; z-index:100000; padding:3px 8px; border:1px solid #dcdcdc; border-radius:4px; background:#fff;
+            color:#888; font-size:11px; line-height:16px; white-space:nowrap; pointer-events:none; box-shadow:0 1px 3px rgba(0,0,0,.08);
+            opacity:0; transition:opacity .15s; }
+        .rc-time-hint.is-visible { opacity:1; }
+        .rc-time-hint kbd { display:inline-block; min-width:12px; margin:0 1px; padding:0 3px; border:1px solid #d6d6d6; border-radius:3px;
+            background:#f6f6f6; color:#666; font-family:inherit; font-size:10px; line-height:13px; text-align:center; }
+    `;
+    document.head.appendChild(timeHintStyle);
+    const timeHint = document.createElement('div');
+    timeHint.className = 'rc-time-hint';
+    timeHint.innerHTML = `<kbd>W</kbd><kbd>↑</kbd> 加 ${TIME_STEP_SECONDS} 秒　<kbd>S</kbd><kbd>↓</kbd> 減 ${TIME_STEP_SECONDS} 秒`;
+    let timeHintTimer = null;
+    function isTimeInput(input) {
+        if (!(input instanceof HTMLInputElement) || input.type !== 'text' || !input.hasAttribute('ng-model')) return false;
+        return TIME_FORMAT_PLACEHOLDER.test(input.placeholder || '')
+            || stepTimeText(input.value, getTimeFormats(input), 0) !== null;
+    }
+    function hideTimeHint() {
+        clearTimeout(timeHintTimer);
+        timeHintTimer = null;
+        timeHint.classList.remove('is-visible');
+    }
+    function showTimeHint(input) {
+        if (!timeHint.isConnected) document.body.appendChild(timeHint);
+        const rect = input.getBoundingClientRect();
+        const height = timeHint.offsetHeight || 24;
+        // 預設在框下方，下方空間不足時改到上方。
+        const top = rect.bottom + 6 + height > window.innerHeight ? rect.top - 6 - height : rect.bottom + 6;
+        const left = Math.min(Math.max(4, rect.left), window.innerWidth - timeHint.offsetWidth - 4);
+        timeHint.style.top = `${Math.round(top)}px`;
+        timeHint.style.left = `${Math.round(left)}px`;
+        timeHint.classList.add('is-visible');
+        clearTimeout(timeHintTimer);
+        timeHintTimer = setTimeout(hideTimeHint, TIME_HINT_MS);
+    }
+    document.addEventListener('focusin', event => {
+        if (!isDisabledPage() && isTimeInput(event.target)) showTimeHint(event.target);
+    }, true);
+    document.addEventListener('focusout', event => {
+        if (event.target instanceof HTMLInputElement) hideTimeHint();
+    }, true);
+    window.addEventListener('scroll', () => { if (timeHintTimer) hideTimeHint(); }, { capture: true, passive: true });
+
+    // HR 清單時間框：貼上或修改時間後，網站會把清單第一筆換成該時間；
+    // 等這張心電圖與標籤載入完成，再以「ECG 變動率自動標註器」相同算法
+    // （心搏 BPM 平均，排除灰色背景區段）四捨五入填入旁邊的 HR 欄。
+    const HR_TIME_INPUT = 'input[ng-model="af.hrUpdate.tms"]';
+    const HR_VALUE_INPUT = 'input[ng-model="af.hrUpdate.hr"]';
+    const HR_TMS_KEYS = { minHR: 'minTms', maxHR: 'maxTms', maxSinus: 'maxSinusTms' };
+    const HR_FILL_TIMEOUT_MS = 8000;
+    const HR_FILL_POLL_MS = 200;
+    let hrFillJob = 0;
+    function getHRListTarget(input) {
+        try {
+            const scope = window.angular.element(input).scope();
+            const key = HR_TMS_KEYS[scope?.af?.eventDialog?.dscp?.type];
+            const value = Number(scope?.af?.tmsline?.ogTagsRecord?.[key]?.[0]);
+            return Number.isFinite(value) ? value : null;
+        } catch (_) { return null; }
+    }
+    // 卡片內可讀的心搏 BPM（排除間隔過長的文字），以及灰色背景的水平範圍。
+    function readCardBeats(card) {
+        const block = card.querySelector('svg.ecgRMarker')?.parentElement;
+        if (!block) return null;
+        const gray = [...block.querySelectorAll('.ecgMask rect.mask')]
+            .filter(mask => Number(mask.getAttribute('opacity') ?? getComputedStyle(mask).opacity) > 0)
+            .map(mask => mask.getBoundingClientRect())
+            .filter(rect => rect.width > 0)
+            .map(rect => [rect.left, rect.right]);
+        const beats = [];
+        for (const text of card.querySelectorAll('.annoGroup text.annoDuration')) {
+            const interval = Number((text.childNodes[0]?.textContent || '').match(/\d+/)?.[0]);
+            const hr = Number(text.querySelector('tspan')?.textContent.match(/\d+/)?.[0]);
+            if (!Number.isFinite(interval) || interval >= 10000 || !Number.isFinite(hr)) continue;
+            const rect = text.getBoundingClientRect();
+            beats.push({ hr, center: rect.left + rect.width / 2 });
+        }
+        return { gray, beats };
+    }
+    function averageWhiteBPM({ gray, beats }) {
+        const rates = beats.filter(({ center }) => !gray.some(([left, right]) => center >= left && center < right))
+            .map(({ hr }) => hr);
+        return rates.length ? rates.reduce((sum, hr) => sum + hr, 0) / rates.length : null;
+    }
+    function findHRCard(dialog, time) {
+        return [...dialog.querySelectorAll(HR_CARD_SELECTOR)].find(card => getHRCardTime(card) === time) || null;
+    }
+    // 標籤內容連續兩次相同才計算，避免讀到換頁前沿用節點的舊標籤。
+    function fillHRFromCard(input, target) {
+        const job = ++hrFillJob;
+        const started = Date.now();
+        let lastSignature = null;
+        const poll = () => {
+            if (job !== hrFillJob || !input.isConnected) return;
+            if (Date.now() - started > HR_FILL_TIMEOUT_MS) return;
+            const dialog = input.closest('#af-hr-dialog');
+            const card = dialog && findHRCard(dialog, target);
+            const data = card && readCardBeats(card);
+            const loaded = data?.beats.length
+                && window.angular.element(card).scope()?.currentData?.ecgData?.length;
+            const signature = loaded ? data.beats.map(beat => `${beat.hr}@${Math.round(beat.center)}`).join(',') : null;
+            if (!signature || signature !== lastSignature) {
+                lastSignature = signature;
+                setTimeout(poll, HR_FILL_POLL_MS);
+                return;
+            }
+            const average = averageWhiteBPM(data);
+            const hrInput = dialog.querySelector(HR_VALUE_INPUT);
+            if (average === null || !hrInput) return;
+            hrInput.value = String(Math.round(average));
+            hrInput.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        setTimeout(poll, HR_FILL_POLL_MS);
+    }
+    // 捕獲階段先記下修改前的時間，網站處理完後清單第一筆有變才計算（時間無效或超出範圍時網站不會更新）。
+    document.addEventListener('input', event => {
+        const input = event.target;
+        if (isDisabledPage() || !input?.matches?.(HR_TIME_INPUT)) return;
+        const before = getHRListTarget(input);
+        setTimeout(() => {
+            const target = getHRListTarget(input);
+            if (target !== null && target !== before) fillHRFromCard(input, target);
+        }, 0);
     }, true);
 
     // 事件清單頁碼拉條：在選印的綠色／橘色（強制選印）垂直線下方加入頁碼按鈕，點擊即跳到該頁，右側顯示選印數量。
