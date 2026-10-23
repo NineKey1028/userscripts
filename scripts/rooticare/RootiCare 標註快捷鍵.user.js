@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.27.0
+// @version      1.29.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -43,8 +43,10 @@
  *
  * 【清單】
  *   HR Min／Max／Max sinus  「排除 ±1 分」移除後面相近時間的心電圖，再按一次取消；選印後保留，標題列可還原
- *   Max HR sinus            自動排除與 AF 時段重疊的心電圖，標題列可切換
- *   事件清單頁碼拉條        選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
+ *   Max HR sinus            標題列「排除 AF 時段」（預設關）：開啟後移除與 AF 時段重疊的心電圖
+ *   AF 清單 mid segment     下拉選單旁的 ◀ ▶ 切換上一個／下一個時段（編輯模式）
+ *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整
+ *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
  *   V / S 事件清單          「⚡ 快速選印」依規則補足選印（時段分散、相隔 1 分鐘以上）；
  *                          按「選印 N 張」開啟選印清單：上方為心電圖視窗（可改標籤並 Save），
  *                          下方為縮圖列（A／D 切換），可「取消選印」「換一個」或「加選一個」
@@ -1377,44 +1379,65 @@
     }
     // 排除紀錄：依按下順序保存錨點心電圖的起始時間。網站把清單換回完整資料時（例如選印後）自動重新套用；
     // 只有關閉清單、切換清單類型或按「還原」才清空。
-    // afOff：Max HR sinus 清單的 AF 時段自動排除被手動關閉（預設開啟）。
-    const hrExclusion = { type: null, anchors: [], pages: null, focusTime: null, afOff: false };
+    const hrExclusion = { type: null, anchors: [], pages: null, focusTime: null };
     function resetHRExclusion() {
         hrExclusion.type = null;
         hrExclusion.anchors = [];
         hrExclusion.pages = null;
         hrExclusion.focusTime = null;
-        hrExclusion.afOff = false;
     }
+    // Max HR sinus 的 AF 時段排除開關：預設關閉，開啟後保留到重新整理頁面。
+    let hrAFExcludeOn = false;
     // 網站的 Max HR sinus 清單直接複製 Max HR 清單，會包含 AF 期間的心電圖。
-    // 目前 AF 時段取自時間軸的 tmsAFs（已含 AF 修改），每筆代表該秒起 60 秒；
-    // 10 秒心電圖與任一 AF 區塊重疊即排除。
+    // AF 時段取自時間軸的 tmsAFs（已含 AF 修改，每筆代表該秒起 60 秒），
+    // 再加上 AF 編輯中尚未儲存的區段，合併成不重疊的區段。10 秒心電圖與任一區段重疊即排除。
     const HR_STRIP_SECONDS = 10;
     const AF_BLOCK_SECONDS = 60;
-    function getAFMinutes(af) {
-        const list = af?.tmsline?.tagsRecord?.tmsAFs;
-        if (!Array.isArray(list)) return [];
-        return list.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    function mergeRanges(ranges) {
+        const sorted = ranges.filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+            .sort((a, b) => a[0] - b[0]);
+        const merged = [];
+        for (const [start, end] of sorted) {
+            const last = merged[merged.length - 1];
+            if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+            else merged.push([start, end]);
+        }
+        return merged;
     }
-    function excludeAFItems(items, afMinutes) {
-        if (!afMinutes.length) return items;
+    function getAFRanges(af) {
+        const ranges = [];
+        const blocks = af?.tmsline?.tagsRecord?.tmsAFs;
+        if (Array.isArray(blocks)) {
+            for (const value of blocks) {
+                const start = Number(value);
+                ranges.push([start, start + AF_BLOCK_SECONDS]);
+            }
+        }
+        const edited = af?.afEditing?.data;
+        if (Array.isArray(edited)) {
+            for (const range of edited) ranges.push([Number(range?.start), Number(range?.end)]);
+        }
+        return mergeRanges(ranges);
+    }
+    function excludeAFItems(items, afRanges) {
+        if (!afRanges.length) return items;
         return items.filter(value => {
             const start = toEventTime(value);
             if (start === null) return true;
-            // 找第一個結束時間晚於心電圖起點的 AF 區塊，再看它是否早於心電圖終點開始。
-            let low = 0, high = afMinutes.length;
+            // 找第一個結束時間晚於心電圖起點的區段，再看它是否早於心電圖終點開始。
+            let low = 0, high = afRanges.length;
             while (low < high) {
                 const mid = (low + high) >> 1;
-                if (afMinutes[mid] + AF_BLOCK_SECONDS <= start) low = mid + 1; else high = mid;
+                if (afRanges[mid][1] <= start) low = mid + 1; else high = mid;
             }
-            return !(low < afMinutes.length && afMinutes[low] < start + HR_STRIP_SECONDS);
+            return !(low < afRanges.length && afRanges[low][0] < start + HR_STRIP_SECONDS);
         });
     }
-    function getHRAFMinutes(context) {
-        return context.type === 'maxSinus' && !hrExclusion.afOff ? getAFMinutes(context.af) : [];
+    function getHRAFRanges(context) {
+        return context.type === 'maxSinus' && hrAFExcludeOn ? getAFRanges(context.af) : [];
     }
     function isHRFilterActive(context) {
-        return hrExclusion.anchors.length > 0 || getHRAFMinutes(context).length > 0;
+        return hrExclusion.anchors.length > 0 || getHRAFRanges(context).length > 0;
     }
     // 依序套用每個錨點：移除排序在錨點之後、起始時間相差 ±1 分鐘內的心電圖。
     function filterHRItems(items, anchors) {
@@ -1436,7 +1459,7 @@
     }
     // 先排除 AF 時段，再依序套用 ±1 分錨點。
     function getHRFilteredItems(context, all) {
-        const sinus = excludeAFItems(all, getHRAFMinutes(context));
+        const sinus = excludeAFItems(all, getHRAFRanges(context));
         return { sinus, kept: hrExclusion.anchors.length ? filterHRItems(sinus, hrExclusion.anchors) : sinus };
     }
     function reapplyHRExclusion(context, focusTime) {
@@ -1502,7 +1525,7 @@
         const context = getHRListContext(dialog);
         if (!context) return;
         hrExclusion.type = context.type;
-        hrExclusion.afOff = !hrExclusion.afOff;
+        hrAFExcludeOn = !hrAFExcludeOn;
         reapplyHRExclusion(context, currentHRFocusTime(context.eventDialog));
         decorateHRList();
     }
@@ -1547,7 +1570,7 @@
             if (eventDialog.pageData !== hrExclusion.pages) {
                 const now = Date.now();
                 while (hrReapplyTimes.length && now - hrReapplyTimes[0] > 2000) hrReapplyTimes.shift();
-                if (hrReapplyTimes.length >= 8) { resetHRExclusion(); return; }
+                if (hrReapplyTimes.length >= 8) { resetHRExclusion(); hrAFExcludeOn = false; return; }
                 hrReapplyTimes.push(now);
                 // 網站換回完整清單（例如選印後）：重新套用排除，並停在原本看的心電圖所在頁。
                 // 沒有任何排除時不再接手，交還網站自己的分頁。
@@ -1594,13 +1617,13 @@
             toolbar.appendChild(afToggle);
         }
         if (afToggle) {
-            const hasAF = context.type === 'maxSinus' && getAFMinutes(context.af).length > 0;
-            const on = hasAF && !hrExclusion.afOff;
+            const hasAF = context.type === 'maxSinus' && getAFRanges(context.af).length > 0;
+            const on = hasAF && hrAFExcludeOn;
             const html = on
                 ? `<span class="rc-hr-icon">⊘</span>已排除 AF 時段<span class="rc-hr-count">${all.length - sinus.length}</span>`
-                : '<span class="rc-hr-icon">○</span>未排除 AF 時段';
+                : '<span class="rc-hr-icon">○</span>排除 AF 時段';
             if (afToggle.innerHTML !== html) afToggle.innerHTML = html;
-            afToggle.title = on ? '已自動排除與 AF 時段重疊的心電圖；按下改為顯示' : '按下排除與 AF 時段重疊的心電圖';
+            afToggle.title = on ? '已排除與 AF 時段重疊的心電圖；按下關閉' : '按下排除與 AF 時段重疊的心電圖';
             afToggle.setAttribute('aria-pressed', String(on));
             afToggle.classList.toggle('is-on', on);
             afToggle.classList.toggle('is-visible', hasAF);
@@ -1632,6 +1655,116 @@
         requestAnimationFrame(() => { hrListPending = false; decorateHRList(); });
     }
     new MutationObserver(scheduleHRList).observe(document.body, { childList: true, subtree: true });
+
+    // AF 事件清單編輯模式：mid segment 下拉選單旁加入 ◀ ▶，依選單順序切換上一個／下一個時段。
+    // 透過 change 事件交給網站原本的 adjustAFTime 處理（網站會延遲 500 毫秒再載入心電圖）。
+    const AF_SEGMENT_SELECT = 'select[ng-model="af.adjustAF[$index]"]';
+    const afStepStyle = document.createElement('style');
+    afStepStyle.textContent = `
+        .rc-af-step { display:inline-flex; align-items:center; gap:2px; margin:0 0 5px -6px; vertical-align:middle; white-space:nowrap; }
+        .rc-af-step button { width:22px; height:25px; padding:0; border:1px solid #767676; border-radius:3px; background:#fff;
+            color:#5b7d1a; font-family:inherit; font-size:10px; line-height:23px; cursor:pointer; }
+        .rc-af-step button:hover:not(:disabled) { background:#8fb43a; border-color:#8fb43a; color:#fff; }
+        .rc-af-step button:disabled { color:#c4c4c4; border-color:#d6d6d6; cursor:default; }
+        .rc-af-step .rc-af-pos { color:#848484; font-size:11px; text-align:center; }
+    `;
+    document.head.appendChild(afStepStyle);
+    function stepAFSegment(select, delta) {
+        const index = select.selectedIndex + delta;
+        if (!select.isConnected || index < 0 || index >= select.options.length) return;
+        select.selectedIndex = index;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    function createAFStep() {
+        const nav = document.createElement('span');
+        nav.className = 'rc-af-step';
+        nav.innerHTML = '<button type="button" data-step="-1" title="上一個時段">◀</button>'
+            + '<span class="rc-af-pos"></span><button type="button" data-step="1" title="下一個時段">▶</button>';
+        nav.addEventListener('click', event => {
+            const button = event.target.closest('button[data-step]');
+            if (!button) return;
+            event.preventDefault(); event.stopPropagation();
+            // ng-if 重建選單時按鈕列會留在原位，因此每次點擊都找緊鄰在前的選單。
+            const select = nav.previousElementSibling;
+            if (select?.matches(AF_SEGMENT_SELECT)) stepAFSegment(select, Number(button.dataset.step));
+        });
+        return nav;
+    }
+    function decorateAFSegmentSelects() {
+        // 選單被移除後留下的按鈕列一併清除。
+        for (const nav of document.querySelectorAll('.rc-af-step')) {
+            if (!nav.previousElementSibling?.matches(AF_SEGMENT_SELECT)) nav.remove();
+        }
+        if (isDisabledPage()) return;
+        for (const select of document.querySelectorAll(AF_SEGMENT_SELECT)) {
+            let nav = select.nextElementSibling;
+            if (!nav?.classList.contains('rc-af-step')) {
+                nav = createAFStep();
+                select.after(nav);
+            }
+            const index = select.selectedIndex;
+            const total = select.options.length;
+            const [prev, next] = nav.querySelectorAll('button');
+            prev.disabled = index <= 0;
+            next.disabled = index < 0 || index >= total - 1;
+            const label = total ? `${index + 1}/${total}` : '';
+            const pos = nav.querySelector('.rc-af-pos');
+            if (pos.textContent !== label) pos.textContent = label;
+        }
+    }
+    let afStepPending = false;
+    function scheduleAFStep() {
+        if (afStepPending) return;
+        afStepPending = true;
+        requestAnimationFrame(() => { afStepPending = false; decorateAFSegmentSelects(); });
+    }
+    new MutationObserver(scheduleAFStep).observe(document.body, { childList: true, subtree: true });
+    document.addEventListener('change', event => {
+        if (event.target?.matches?.(AF_SEGMENT_SELECT)) scheduleAFStep();
+    }, true);
+
+    // 時間輸入框：聚焦且內容是完整時間時，W／↑ 加 2 秒、S／↓ 減 2 秒（可按住連續調整）。
+    // 依網站的日期格式解析（另接受輸入框提示的「日期, 時間」寫法），以原本的寫法寫回，
+    // 再送出 input 事件交給網站原本的 ng-change 處理。
+    const TIME_STEP_SECONDS = 2;
+    const DEFAULT_TIME_FORMAT = 'YYYY/MM/DD HH:mm:ss';
+    function getTimeFormats(input) {
+        let site = DEFAULT_TIME_FORMAT;
+        try {
+            const format = window.angular?.element(input).scope()?.getAdjustFormat?.(DEFAULT_TIME_FORMAT);
+            if (typeof format === 'string' && format) site = format;
+        } catch (_) { /* 沒有網站格式時改用預設 */ }
+        const formats = [site, site.replace(' ', ', ')];
+        // 提示文字本身是時間格式（例如 DD/MM/YYYY, HH:mm:ss）時一併接受。
+        if (/^[DMY/.\-, ]+HH:mm:ss$/.test(input.placeholder || '')) formats.push(input.placeholder);
+        return [...new Set(formats)];
+    }
+    function stepTimeText(value, formats, seconds) {
+        const moment = window.moment;
+        if (typeof moment?.utc !== 'function') return null;
+        for (const format of formats) {
+            const time = moment.utc(String(value).trim(), format, true);
+            if (time.isValid()) return time.add(seconds, 'seconds').format(format);
+        }
+        return null;
+    }
+    window.addEventListener('keydown', event => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || input.type !== 'text' || !input.hasAttribute('ng-model')) return;
+        if (isDisabledPage() || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+        const key = event.key;
+        const direction = key === 'ArrowUp' || key === 'w' || key === 'W' ? 1
+            : key === 'ArrowDown' || key === 's' || key === 'S' ? -1 : 0;
+        if (!direction) return;
+        const next = stepTimeText(input.value, getTimeFormats(input), direction * TIME_STEP_SECONDS);
+        if (next === null) return; // 不是完整時間（例如正在輸入）時保留原本按鍵行為。
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const { selectionStart, selectionEnd } = input;
+        input.value = next;
+        if (selectionStart !== null) input.setSelectionRange(selectionStart, selectionEnd);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, true);
 
     // 事件清單頁碼拉條：在選印的綠色／橘色（強制選印）垂直線下方加入頁碼按鈕，點擊即跳到該頁，右側顯示選印數量。
     // 直接讀取網站拉條（svg.paginationEventBar）綁定的分頁資料與選印清單，不依賴語系文字。
