@@ -26,4 +26,14 @@ assert.deepEqual([...filterHRItems(all, [5000])], [1000, 1030, 5000, 1050, 9000,
 assert.deepEqual([...filterHRItems(all, [1030])], [1000, 1030, 5000, 5040, 9000, 1200, 5100]);
 // 錨點不在清單中時略過。
 assert.deepEqual([...filterHRItems(all, [7777])], all);
+
+// AF 時段排除：每個 AF 區塊涵蓋起點後 60 秒，10 秒心電圖與其重疊即排除。
+const excludeAFItems = vm.runInNewContext(`const HR_STRIP_SECONDS = 10; const AF_BLOCK_SECONDS = 60;
+${grab('toEventTime')}${grab('excludeAFItems')}excludeAFItems`);
+const afMinutes = [2000, 2060, 4000];
+const strips = [1980, 1989, 1990, 1991, 2050, 2119, 2120, 2125, 3995, 4059, 4060, 9000];
+// 1990 起的 10 秒剛好結束於 2000（不重疊）；1991 起才碰到 2000。2120 起剛好在 2060 區塊結束時。
+assert.deepEqual([...excludeAFItems(strips, afMinutes)], [1980, 1989, 1990, 2120, 2125, 4060, 9000]);
+assert.deepEqual([...excludeAFItems(strips, [])], strips);
+assert.deepEqual([...excludeAFItems([{ startTime: 2010 }, { startTime: 3000 }], afMinutes)].map(v => v.startTime), [3000]);
 console.log('PASS: HR exclusion filter');
