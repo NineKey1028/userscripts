@@ -2,3 +2,9 @@
 Thumbs.db
 *.log
 
+
+# 測試檔只留在本機，不進 git
+tests/
+*-test.cjs
+*.test.js
+*測試版*
