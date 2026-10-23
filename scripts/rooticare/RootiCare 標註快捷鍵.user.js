@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.30.1
+// @version      1.33.2
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -43,14 +43,18 @@
  *
  * 【清單】
  *   HR Min／Max／Max sinus  「排除 ±1 分」移除後面相近時間的心電圖，再按一次取消；選印後保留，標題列可還原
- *   Max HR sinus            標題列「排除 AF 時段」（預設關）：開啟後移除與 AF 時段重疊的心電圖
+ *   Max HR sinus            標題列「排除 AF 時段」（預設關）：開啟後移除與 AF 時段重疊的心電圖；
+ *                          「排除高於 Max HR」（預設關）：開啟後移除平均 HR 高於 Max HR 方塊數值的心電圖；
+ *                          「排除含 V／S」（預設關）：開啟後移除 10 秒內有 V 或 S 標籤的心電圖
  *   AF 清單 mid segment     下拉選單旁的 ◀ ▶ 切換上一個／下一個時段（編輯模式）
  *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整；聚焦時顯示提示 3 秒
  *   HR 清單時間框           貼上或修改時間後，自動以該心電圖白色區段的平均 BPM 填入 HR 欄
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
  *   V / S 事件清單          「⚡ 快速選印」依規則補足選印（時段分散、相隔 1 分鐘以上）；
  *                          按「選印 N 張」開啟選印清單：上方為心電圖視窗（可改標籤並 Save），
- *                          下方為縮圖列（A／D 切換），可「取消選印」「換一個」或「加選一個」
+ *                          下方為縮圖列（A／D 切換），可「取消選印」「換一個」或「加選一個」；
+ *                          心電圖視窗上也有「取消選印」「換一個」（作用於目前這張）；
+ *                          「Group」先儲存標籤修改再執行 Group All，完成後重新開啟清單
  *                          快速選印與換一個會先依目前標籤（含未儲存修改）驗證是否仍符合清單類型
  *
  * Morphology 頁面不提供以上功能。
@@ -1444,8 +1448,99 @@
     function getHRAFRanges(context) {
         return context.type === 'maxSinus' && hrAFExcludeOn ? getAFRanges(context.af) : [];
     }
+    // Max HR sinus 的「排除高於 Max HR」開關：預設關閉，開啟後保留到重新整理頁面。
+    // 上限讀取 Max HR 方塊目前的數值（含手動修改）；每張心電圖的平均 HR 取自網站 Max HR 清單的 [時間, HR]。
+    let hrAboveMaxExcludeOn = false;
+    function getMaxHRLimit(af) {
+        const value = Number(af?.record?.maxHR?.record);
+        return Number.isFinite(value) && value > 0 ? value : null;
+    }
+    // 網站各 HR 清單的 [時間, 平均 HR]；同一時間以第一筆為準（與未排除時卡片顯示的相同）。
+    const HR_VALUE_LISTS = { minHR: ['slowAvgHR'], maxHR: ['fastAvgHR'], maxSinus: ['maxSinusHR', 'fastAvgHR'] };
+    function getHRValueMap(af, type = 'maxSinus') {
+        const map = new Map();
+        for (const key of HR_VALUE_LISTS[type] || []) {
+            const list = af?.maxMinAvgHR?.[key];
+            if (!Array.isArray(list)) continue;
+            for (const entry of list) {
+                const time = Number(Array.isArray(entry) ? entry[0] : NaN);
+                const hr = Number(Array.isArray(entry) ? entry[1] : NaN);
+                if (Number.isFinite(time) && Number.isFinite(hr) && !map.has(time)) map.set(time, hr);
+            }
+        }
+        return map;
+    }
+    // 平均 HR 高於上限的心電圖排除（等於上限保留）；讀不到 HR 的保留。
+    function excludeAboveHR(items, limit, hrByTime) {
+        if (limit === null) return items;
+        return items.filter(value => {
+            const hr = hrByTime.get(toEventTime(value));
+            return hr === undefined || hr <= limit;
+        });
+    }
+    function getHRAboveLimit(context) {
+        return context.type === 'maxSinus' && hrAboveMaxExcludeOn ? getMaxHRLimit(context.af) : null;
+    }
+    // Max HR sinus 的「排除含 V／S」開關：預設關閉，開啟後保留到重新整理頁面。
+    // 網站時間軸的 V／S 時間（tmsPVC、VEBAPos 等）要 Group 後才更新，會留著已改為 N 的舊標籤，
+    // 因此開啟時逐張向伺服器讀取 10 秒心電圖的標籤（最多同時 QUICK_FETCH_CONCURRENCY 張，結果快取），
+    // 並套用未儲存的標籤修改。起點起 10 秒內含任一 V 或 S（A 視為 S）即排除；讀取失敗的保留。
+    let hrEctopicExcludeOn = false;
+    const ectopicStripCache = new Map(); // `${measureId}|${時間}` → 心電圖資料（失敗為 null）
+    const ectopicCheck = { running: false, done: 0, total: 0 };
+    function ectopicStripKey(af, time) {
+        return `${af?._measureId}|${time}`;
+    }
+    function stripHasEctopic(data, modifiedData, start) {
+        return effectiveEventBeats(data, modifiedData, start)
+            .some(beat => beat.type !== 'N' && beat.offset >= 0 && beat.offset < HR_STRIP_SECONDS);
+    }
+    // 已確認含 V／S 的心電圖時間；尚未讀取的不列入（保留），並在背景開始讀取。
+    function getHREctopicSet(context) {
+        if (context.type !== 'maxSinus' || !hrEctopicExcludeOn) return null;
+        const all = getHRSourceItems(context) || [];
+        const found = new Set();
+        const missing = [];
+        for (const value of all) {
+            const time = toEventTime(value);
+            if (time === null) continue;
+            const key = ectopicStripKey(context.af, time);
+            if (!ectopicStripCache.has(key)) { missing.push(time); continue; }
+            const data = ectopicStripCache.get(key);
+            if (data && stripHasEctopic(data, context.af.ecgAnno?.modifiedData, time)) found.add(time);
+        }
+        if (missing.length) checkEctopicStrips(context.af, missing);
+        return found;
+    }
+    async function checkEctopicStrips(af, times) {
+        if (ectopicCheck.running) return;
+        const pending = [...new Set(times)];
+        ectopicCheck.running = true;
+        ectopicCheck.done = 0;
+        ectopicCheck.total = pending.length;
+        scheduleHRList();
+        try {
+            await runLimited(pending, QUICK_FETCH_CONCURRENCY, async time => {
+                let data = null;
+                try { data = await fetchEventECG(af, time, 0, HR_STRIP_SECONDS); } catch (_) { /* 讀取失敗的保留 */ }
+                ectopicStripCache.set(ectopicStripKey(af, time), data);
+            }, done => { ectopicCheck.done = done; scheduleHRList(); });
+        } finally {
+            ectopicCheck.running = false;
+        }
+        // 讀完後依目前清單重新套用排除。
+        const dialog = document.querySelector('#af-hr-dialog');
+        const context = dialog && isHRDialogShown(dialog) ? getHRListContext(dialog) : null;
+        if (context && hrEctopicExcludeOn) reapplyHRExclusion(context, currentHRFocusTime(context.eventDialog));
+        scheduleHRList();
+    }
+    function excludeEctopicItems(items, ectopicSet) {
+        if (!ectopicSet?.size) return items;
+        return items.filter(value => !ectopicSet.has(toEventTime(value)));
+    }
     function isHRFilterActive(context) {
-        return hrExclusion.anchors.length > 0 || getHRAFRanges(context).length > 0;
+        return hrExclusion.anchors.length > 0 || getHRAFRanges(context).length > 0 || getHRAboveLimit(context) !== null
+            || (getHREctopicSet(context)?.size || 0) > 0;
     }
     // 依序套用每個錨點：移除排序在錨點之後、起始時間相差 ±1 分鐘內的心電圖。
     function filterHRItems(items, anchors) {
@@ -1465,10 +1560,12 @@
         const page = eventDialog.pageData[(Number(eventDialog.pagination?.currentPage) || 1) - 1];
         return toEventTime(Array.isArray(page) ? page[0] : page);
     }
-    // 先排除 AF 時段，再依序套用 ±1 分錨點。
+    // 依序排除 AF 時段、高於 Max HR、含 V／S，最後套用 ±1 分錨點；保留各階段結果供標題列計數。
     function getHRFilteredItems(context, all) {
-        const sinus = excludeAFItems(all, getHRAFRanges(context));
-        return { sinus, kept: hrExclusion.anchors.length ? filterHRItems(sinus, hrExclusion.anchors) : sinus };
+        const afKept = excludeAFItems(all, getHRAFRanges(context));
+        const belowMax = excludeAboveHR(afKept, getHRAboveLimit(context), getHRValueMap(context.af));
+        const sinus = excludeEctopicItems(belowMax, getHREctopicSet(context));
+        return { afKept, belowMax, sinus, kept: hrExclusion.anchors.length ? filterHRItems(sinus, hrExclusion.anchors) : sinus };
     }
     function reapplyHRExclusion(context, focusTime) {
         const all = getHRSourceItems(context);
@@ -1537,6 +1634,24 @@
         reapplyHRExclusion(context, currentHRFocusTime(context.eventDialog));
         decorateHRList();
     }
+    function toggleHRAboveMaxExclusion(dialog) {
+        const context = getHRListContext(dialog);
+        if (!context) return;
+        hrExclusion.type = context.type;
+        hrAboveMaxExcludeOn = !hrAboveMaxExcludeOn;
+        reapplyHRExclusion(context, currentHRFocusTime(context.eventDialog));
+        decorateHRList();
+    }
+    function toggleHREctopicExclusion(dialog) {
+        const context = getHRListContext(dialog);
+        if (!context) return;
+        hrExclusion.type = context.type;
+        hrEctopicExcludeOn = !hrEctopicExcludeOn;
+        // 每次開啟都重新讀取，反映上次之後已儲存的標籤修改。
+        if (hrEctopicExcludeOn && !ectopicCheck.running) ectopicStripCache.clear();
+        reapplyHRExclusion(context, currentHRFocusTime(context.eventDialog));
+        decorateHRList();
+    }
     function setExcludeButtonState(button, done) {
         if (button.classList.contains('is-done') === done && button.childElementCount) return;
         button.classList.toggle('is-done', done);
@@ -1578,7 +1693,13 @@
             if (eventDialog.pageData !== hrExclusion.pages) {
                 const now = Date.now();
                 while (hrReapplyTimes.length && now - hrReapplyTimes[0] > 2000) hrReapplyTimes.shift();
-                if (hrReapplyTimes.length >= 8) { resetHRExclusion(); hrAFExcludeOn = false; return; }
+                if (hrReapplyTimes.length >= 8) {
+                    resetHRExclusion();
+                    hrAFExcludeOn = false;
+                    hrAboveMaxExcludeOn = false;
+                    hrEctopicExcludeOn = false;
+                    return;
+                }
                 hrReapplyTimes.push(now);
                 // 網站換回完整清單（例如選印後）：重新套用排除，並停在原本看的心電圖所在頁。
                 // 沒有任何排除時不再接手，交還網站自己的分頁。
@@ -1591,9 +1712,30 @@
             hrExclusion.focusTime = currentHRFocusTime(eventDialog);
         }
         const anchors = new Set(hrExclusion.anchors);
+        // 網站卡片的「HR:」依清單位置讀取（maxMinAvgHR.*[indexAdjust + $index]），排除後位置對不上；
+        // 清單由腳本重新分頁時，改依心電圖時間顯示正確的 HR，並隱藏網站的數值。
+        const filteredPages = !!hrExclusion.pages && eventDialog.pageData === hrExclusion.pages;
+        const cardHR = filteredPages ? getHRValueMap(context.af, context.type) : null;
         for (const card of dialog.querySelectorAll(HR_CARD_SELECTOR)) {
             const header = card.querySelector('.event-blk-header');
             if (!header) continue;
+            const siteHR = header.querySelector('.event-infor-blk .stat-result b');
+            let fixedHR = header.querySelector('.rc-hr-true');
+            const hr = cardHR?.get(getHRCardTime(card));
+            if (siteHR && hr !== undefined) {
+                if (!fixedHR || fixedHR.previousElementSibling !== siteHR) {
+                    fixedHR?.remove();
+                    fixedHR = document.createElement('b');
+                    fixedHR.className = 'rc-hr-true';
+                    siteHR.after(fixedHR);
+                }
+                const text = `${hr}bpm`;
+                if (fixedHR.textContent !== text) fixedHR.textContent = text;
+                siteHR.style.display = 'none';
+            } else {
+                fixedHR?.remove();
+                if (siteHR?.style.display) siteHR.style.display = '';
+            }
             let button = header.querySelector('.rc-hr-exclude');
             if (!button) {
                 button = document.createElement('button');
@@ -1610,10 +1752,10 @@
         }
         // 標題列：AF 時段排除開關（僅 Max HR sinus）、±1 分排除數量與還原按鈕。
         const all = getHRSourceItems(context) || [];
-        const { sinus, kept } = getHRFilteredItems(context, all);
+        const { afKept, belowMax, sinus, kept } = getHRFilteredItems(context, all);
         const excluded = hrExclusion.anchors.length ? Math.max(0, sinus.length - kept.length) : 0;
         const toolbar = dialog.querySelector('.data-tool-blk .float-left');
-        let afToggle = dialog.querySelector('.rc-hr-af');
+        let afToggle = dialog.querySelector('.rc-hr-af:not(.rc-hr-above-max):not(.rc-hr-ectopic)');
         if (!afToggle && toolbar) {
             afToggle = document.createElement('button');
             afToggle.type = 'button';
@@ -1628,13 +1770,66 @@
             const hasAF = context.type === 'maxSinus' && getAFRanges(context.af).length > 0;
             const on = hasAF && hrAFExcludeOn;
             const html = on
-                ? `<span class="rc-hr-icon">⊘</span>已排除 AF 時段<span class="rc-hr-count">${all.length - sinus.length}</span>`
+                ? `<span class="rc-hr-icon">⊘</span>已排除 AF 時段<span class="rc-hr-count">${all.length - afKept.length}</span>`
                 : '<span class="rc-hr-icon">○</span>排除 AF 時段';
             if (afToggle.innerHTML !== html) afToggle.innerHTML = html;
             afToggle.title = on ? '已排除與 AF 時段重疊的心電圖；按下關閉' : '按下排除與 AF 時段重疊的心電圖';
             afToggle.setAttribute('aria-pressed', String(on));
             afToggle.classList.toggle('is-on', on);
             afToggle.classList.toggle('is-visible', hasAF);
+        }
+        // 排除高於 Max HR：與 AF 開關同樣式，只在 Max HR sinus 清單且讀得到 Max HR 時顯示。
+        let maxToggle = dialog.querySelector('.rc-hr-above-max');
+        if (!maxToggle && toolbar) {
+            maxToggle = document.createElement('button');
+            maxToggle.type = 'button';
+            maxToggle.className = 'rc-hr-af rc-hr-above-max';
+            maxToggle.addEventListener('click', event => {
+                event.preventDefault(); event.stopPropagation();
+                toggleHRAboveMaxExclusion(dialog);
+            });
+            (afToggle?.nextSibling ? toolbar.insertBefore(maxToggle, afToggle.nextSibling) : toolbar.appendChild(maxToggle));
+        }
+        if (maxToggle) {
+            const limit = context.type === 'maxSinus' ? getMaxHRLimit(context.af) : null;
+            const on = limit !== null && hrAboveMaxExcludeOn;
+            const html = on
+                ? `<span class="rc-hr-icon">⊘</span>已排除高於 Max HR ${limit}<span class="rc-hr-count">${afKept.length - belowMax.length}</span>`
+                : `<span class="rc-hr-icon">○</span>排除高於 Max HR${limit !== null ? ` ${limit}` : ''}`;
+            if (maxToggle.innerHTML !== html) maxToggle.innerHTML = html;
+            maxToggle.title = on ? `已排除平均 HR 高於 Max HR（${limit} bpm）的心電圖；按下關閉`
+                : '按下排除平均 HR 高於 Max HR 的心電圖';
+            maxToggle.setAttribute('aria-pressed', String(on));
+            maxToggle.classList.toggle('is-on', on);
+            maxToggle.classList.toggle('is-visible', limit !== null);
+        }
+        // 排除含 V／S：與其他開關同樣式，只在 Max HR sinus 清單且有 V／S 資料時顯示。
+        let ectopicToggle = dialog.querySelector('.rc-hr-ectopic');
+        if (!ectopicToggle && toolbar) {
+            ectopicToggle = document.createElement('button');
+            ectopicToggle.type = 'button';
+            ectopicToggle.className = 'rc-hr-af rc-hr-ectopic';
+            ectopicToggle.addEventListener('click', event => {
+                event.preventDefault(); event.stopPropagation();
+                toggleHREctopicExclusion(dialog);
+            });
+            const after = maxToggle || afToggle;
+            (after?.nextSibling ? toolbar.insertBefore(ectopicToggle, after.nextSibling) : toolbar.appendChild(ectopicToggle));
+        }
+        if (ectopicToggle) {
+            const visible = context.type === 'maxSinus';
+            const on = visible && hrEctopicExcludeOn;
+            const checking = on && ectopicCheck.running;
+            const html = checking
+                ? `<span class="rc-hr-icon">⋯</span>檢查 V／S 中 ${ectopicCheck.done}/${ectopicCheck.total}`
+                : on ? `<span class="rc-hr-icon">⊘</span>已排除含 V／S<span class="rc-hr-count">${belowMax.length - sinus.length}</span>`
+                    : '<span class="rc-hr-icon">○</span>排除含 V／S';
+            if (ectopicToggle.innerHTML !== html) ectopicToggle.innerHTML = html;
+            ectopicToggle.title = on ? '已排除 10 秒內有 V 或 S 標籤的心電圖（含未儲存的標籤修改）；按下關閉'
+                : '按下排除 10 秒內有 V 或 S 標籤的心電圖（逐張讀取標籤，含未儲存的修改）';
+            ectopicToggle.setAttribute('aria-pressed', String(on));
+            ectopicToggle.classList.toggle('is-on', on);
+            ectopicToggle.classList.toggle('is-visible', visible);
         }
         let restore = dialog.querySelector('.rc-hr-restore');
         if (!restore && toolbar) {
@@ -2034,8 +2229,9 @@
     }
     function decoratePrintBars() {
         if (isDisabledPage() || !window.angular) return;
-        if (review && !review.anchor.isConnected) closePrintReview();
+        if (review && !review.anchor.isConnected && !review.grouping) closePrintReview();
         recheckReviewCards();
+        decorateReviewDialog();
         for (const bar of document.querySelectorAll('.pagination-range svg.paginationEventBar')) {
             const range = bar.closest('.pagination-range');
             let scope;
@@ -2525,7 +2721,8 @@
             return { time, score: [bpm], info: bpm ? `平均 ${Math.round(bpm)} bpm` : '無法計算 BPM' };
         }, onProgress);
     }
-    // 透過網站的選印函式加入／移除（與點擊印表機圖示相同，會立即儲存），並同步目前頁面的勾選狀態。
+    // 透過網站的選印函式加入／移除（與點擊印表機圖示相同），並同步目前頁面的勾選狀態。
+    // 網站只改記憶體中的選印，關閉事件清單時才上傳（postPDFSelectedEvents）；Group 前需先上傳。
     function setQuickPrint(ctx, time, on) {
         ctx.host.$apply(() => {
             ctx.host.selectPrintedEvent({ startTime: time, selectedEvent: on });
@@ -2739,8 +2936,10 @@
         if (review.onResize) window.removeEventListener('resize', review.onResize);
         review.bar.remove();
         review = null;
+        decorateReviewDialog();
     }
-    function openPrintReview(anchor) {
+    // focusTime：開啟後顯示這張選印（仍在清單中時），否則顯示第一張。
+    function openPrintReview(anchor, focusTime = null) {
         const ctx = getQuickContext(anchor);
         if (!ctx) return;
         closePrintReview();
@@ -2750,6 +2949,7 @@
         bar.innerHTML = '<div class="rc-review-head"><span class="rc-review-title"></span><span class="rc-review-count"></span>'
             + '<span class="rc-review-hint"></span>'
             + '<button type="button" class="rc-review-add" title="依快速選印的規則再多選一張（時段分散、相隔 1 分鐘以上）">＋ 加選一個</button>'
+            + '<button type="button" class="rc-review-group" title="儲存標籤修改後執行 Group All，重新分類事件並重整清單">Group</button>'
             + '<button type="button" class="rc-review-close" title="關閉選印清單" aria-label="關閉">×</button></div>'
             + '<div class="rc-review-strip"><button type="button" class="rc-review-scroll is-prev" title="往前捲動" aria-label="往前捲動">◀</button>'
             + '<div class="rc-review-list"></div>'
@@ -2757,6 +2957,7 @@
         review = { bar, ctx, anchor, cards: new Map(), items: [], active: null, switching: false, busy: false };
         bar.querySelector('.rc-review-close').addEventListener('click', closePrintReview);
         bar.querySelector('.rc-review-add').addEventListener('click', addReviewPrint);
+        bar.querySelector('.rc-review-group').addEventListener('click', groupReview);
         // 縮圖超出畫面時：下方捲軸、滑鼠滾輪左右捲動、兩側 ◀ ▶ 一次捲動約一個畫面寬。
         const list = bar.querySelector('.rc-review-list');
         list.addEventListener('wheel', event => {
@@ -2775,7 +2976,7 @@
         window.addEventListener('resize', review.onResize);
         document.body.appendChild(bar);
         refreshPrintReview();
-        if (review.items.length) showReviewTime(review.items[0]);
+        if (review.items.length) showReviewTime(review.items.includes(focusTime) ? focusTime : review.items[0]);
     }
     // ◀ ▶ 只在該方向還有縮圖時顯示。
     function updateReviewScroll() {
@@ -2839,7 +3040,10 @@
             empty.textContent = '目前沒有選印的心電圖';
             list.appendChild(empty);
         } else if (all.length && empty) empty.remove();
+        const group = bar.querySelector('.rc-review-group');
+        if (!review.grouping) group.disabled = review.busy;
         updateReviewCount();
+        decorateReviewDialog();
         requestAnimationFrame(updateReviewScroll);
     }
     function createReviewCard(time) {
@@ -2856,8 +3060,8 @@
             if (event.target.closest('button')) return;
             showReviewTime(time);
         });
-        card.querySelector('.is-cancel').addEventListener('click', () => cancelReviewPrint(time, card));
-        card.querySelector('.is-swap').addEventListener('click', () => swapReviewPrint(time, card));
+        card.querySelector('.is-cancel').addEventListener('click', event => cancelReviewPrint(time, event.currentTarget));
+        card.querySelector('.is-swap').addEventListener('click', event => swapReviewPrint(time, event.currentTarget));
         return card;
     }
     function formatQuickTime(ctx, time) {
@@ -2890,6 +3094,7 @@
             }
         }
         updateReviewCount();
+        decorateReviewDialog();
     }
     function waitFor(check, timeout) {
         return new Promise(resolve => {
@@ -3063,25 +3268,26 @@
         refreshPrintReview();
     }
     // 取消選印：目前顯示的是這張時，改顯示相鄰的下一張（沒有則上一張）。
-    function cancelReviewPrint(time, card) {
+    // button 為按下的按鈕（縮圖卡片或心電圖視窗上的），用來顯示提示。
+    function cancelReviewPrint(time, button) {
         if (!review || review.busy) return;
         const items = review.items;
         const index = items.indexOf(time);
         const neighbor = review.active === time ? (items[index + 1] ?? items[index - 1] ?? null) : null;
+        const anchor = review.cards.get(neighbor ?? time) || review.bar;
         try {
             setQuickPrint(review.ctx, time, false);
-            quickToast(card.querySelector('.is-cancel'), `已取消選印 ${formatQuickTime(review.ctx, time)}`);
+            quickToast(button?.isConnected ? button : anchor, `已取消選印 ${formatQuickTime(review.ctx, time)}`);
         } catch (error) {
-            quickToast(card.querySelector('.is-cancel'), `取消選印失敗：${error?.message || error}`, true);
+            quickToast(button?.isConnected ? button : anchor, `取消選印失敗：${error?.message || error}`, true);
             return;
         }
         refreshPrintReview();
         if (neighbor !== null) showReviewTime(neighbor);
     }
-    async function swapReviewPrint(time, card) {
+    async function swapReviewPrint(time, button) {
         if (!review || review.busy) return;
         const ctx = review.ctx;
-        const button = card.querySelector('.is-swap');
         setReviewBusy(true);
         button.textContent = '尋找中…';
         try {
@@ -3153,6 +3359,170 @@
         } finally {
             if (button.isConnected) { button.textContent = '＋ 加選一個'; button.disabled = false; }
             setReviewBusy(false);
+        }
+    }
+
+    // 選印清單開啟時，在網站心電圖視窗的「Mesurer／Imprimer」旁加入「取消選印」「換一個」，作用於目前顯示的選印。
+    const reviewDialogStyle = document.createElement('style');
+    reviewDialogStyle.textContent = `
+        .rc-review-dialog-actions { display:inline-flex; align-items:center; gap:6px; margin-right:10px; vertical-align:top; height:44px; }
+        .rc-review-dialog-actions .rc-review-btn { flex:0 0 auto; height:26px; padding:0 12px; border-radius:13px; font-size:12px; }
+        .rc-review-group { height:22px; padding:0 10px; border:1px solid #fff; border-radius:11px; background:transparent; color:#fff;
+            font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; }
+        .rc-review-group:hover:not(:disabled) { background:#fff; color:#5b7d1a; }
+        .rc-review-group:disabled { cursor:progress; opacity:.7; }
+    `;
+    document.head.appendChild(reviewDialogStyle);
+    function getReviewECGDialog() {
+        return document.querySelector('.ngdialog.ecg-dialog #af-ecg-dialog-v2');
+    }
+    function decorateReviewDialog() {
+        let actions = document.querySelector('.rc-review-dialog-actions');
+        const time = review?.active ?? null;
+        const tools = getReviewECGDialog()?.querySelector('.dialog-content .tool-btns');
+        if (!review || time === null || !review.items.includes(time) || !tools) { actions?.remove(); return; }
+        if (!actions || actions.parentElement !== tools) {
+            actions?.remove();
+            actions = document.createElement('div');
+            actions.className = 'rc-review-dialog-actions';
+            actions.innerHTML = '<button type="button" class="rc-review-btn is-cancel">取消選印</button>'
+                + '<button type="button" class="rc-review-btn is-swap">換一個</button>';
+            // 按下時才讀取目前顯示的選印，切換到其他張後也作用在正確的心電圖上。
+            actions.querySelector('.is-cancel').addEventListener('click', event => {
+                if (review?.active != null) cancelReviewPrint(review.active, event.currentTarget);
+            });
+            actions.querySelector('.is-swap').addEventListener('click', event => {
+                if (review?.active != null) swapReviewPrint(review.active, event.currentTarget);
+            });
+            tools.prepend(actions);
+        }
+        const forced = !!review.cards.get(time)?.classList.contains('is-forced');
+        for (const button of actions.querySelectorAll('button')) {
+            button.disabled = forced || review.busy || review.grouping;
+            button.title = forced ? '橘色強制選印由網站決定，無法在此取消或替換' : '';
+        }
+    }
+
+    // Group：先儲存未儲存的標籤修改（與心電圖視窗的 Save 相同），等上傳完成後執行網站的 Group All
+    // （伺服器重新分類事件並重新載入資料），載入完成後重新開啟同類型的事件清單與選印清單。
+    const GROUP_SAVE_TIMEOUT_MS = 30000;
+    const GROUP_RELOAD_TIMEOUT_MS = 90000;
+    function waitMs(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+    // 每 100 毫秒檢查一次；check 連續成立 stableMs 才算完成。
+    async function waitStable(check, stableMs, timeout) {
+        const started = Date.now();
+        let since = null;
+        while (Date.now() - started < timeout) {
+            let ok = false;
+            try { ok = !!check(); } catch (_) {}
+            if (!ok) since = null;
+            else if (since === null) since = Date.now();
+            else if (Date.now() - since >= stableMs) return true;
+            await waitMs(100);
+        }
+        return false;
+    }
+    function getAFHost() {
+        const element = document.querySelector('[ng-controller="RootiCareDashboardAFCtrl"]');
+        if (!element || !window.angular) return null;
+        let scope;
+        try { scope = window.angular.element(element).scope(); } catch (_) { return null; }
+        while (scope && typeof scope.classifyType !== 'function') scope = scope.$parent;
+        return scope || null;
+    }
+    function isSiteLoading(host) {
+        try {
+            return !!host.rooticare?.loading || (typeof host.checkIsLoading === 'function' && host.checkIsLoading(host.af));
+        } catch (_) { return true; }
+    }
+    // 上傳尚未儲存的選印：與網站關閉事件清單時的 postPDFSelectedEvents 相同，內容沒變就不上傳。
+    // Group All 會從伺服器重新載入選印，清單開著時選的（含快速選印）若沒先上傳就會被覆蓋。
+    async function uploadPrintSelections(af) {
+        const printDialog = af?.printDialog;
+        if (!printDialog?.selectedEvents) return;
+        if (JSON.stringify(printDialog.tmpSelectedEvents) === JSON.stringify(printDialog.selectedEvents)) return;
+        const manager = window.angular.element(document.body).injector().get('WppManager');
+        const snapshot = window.angular.copy(printDialog.selectedEvents);
+        await manager.Af.postPDFSelectedEvents(af._vendorId, af._idNumber, af._measureId, printDialog.selectedEvents);
+        printDialog.tmpSelectedEvents = snapshot;
+    }
+    function findPrintReviewAnchor(type) {
+        for (const summary of document.querySelectorAll('.rc-print-summary.is-link')) {
+            const ctx = getQuickContext(summary);
+            if (ctx?.type === type) return summary;
+        }
+        return null;
+    }
+    async function groupReview() {
+        if (!review || review.busy || review.grouping) return;
+        const { ctx } = review;
+        const type = ctx.type;
+        const button = review.bar.querySelector('.rc-review-group');
+        const host = getAFHost();
+        if (!host) { quickToast(button, '找不到網站的 Group All 功能', true); return; }
+        if (!ctx.af.editingSwitch) { quickToast(button, '請先進入編輯模式（點計時器）再 Group', true); return; }
+        review.grouping = true;
+        setReviewBusy(true);
+        const setText = text => { if (button.isConnected) button.textContent = text; };
+        try {
+            // 1. 儲存：網站的 Save 會上傳修改並關閉心電圖視窗；沒有開著心電圖視窗時先開一張，避免關到事件清單。
+            if (ctx.af.ecgAnno?.modifiedData?.length) {
+                setText('儲存中…');
+                if (!getReviewECGDialog() && review.items.length) await showReviewTime(review.active ?? review.items[0]);
+                if (!getReviewECGDialog()) throw new Error('無法開啟心電圖視窗以儲存修改');
+                ctx.host.$apply(() => ctx.host.saveCurrentModifiedData());
+                const saved = await waitStable(() => !ctx.af.loading?.modified, 300, GROUP_SAVE_TIMEOUT_MS);
+                if (!saved) throw new Error('儲存逾時');
+                // 網站在上傳後 2.5 秒會重新整理清單的心電圖，等它跑完再 Group。
+                await waitMs(2700);
+            }
+            // 2. 先上傳選印（含快速選印），否則 Group All 重新載入時會被伺服器上的舊選印覆蓋。
+            setText('儲存選印…');
+            await uploadPrintSelections(host.af);
+            // 記下目前畫面：清單頁碼與正在看的選印，重新載入後回到同一處。
+            const restorePage = Number(ctx.dialog.pagination?.currentPage) || 1;
+            const restoreTime = review.active;
+            // 3. Group All：伺服器重新分類後網站會重新載入整份資料（AF 區塊可能重建，開著的清單會被關掉）。
+            //    每次都重新取得目前的 AF scope，等它不再載入、這個類型的清單資料就緒且穩定 1.5 秒。
+            setText('Group 中…');
+            host.$apply(() => host.classifyType('all'));
+            await waitStable(() => { const h = getAFHost(); return !h || h !== host || isSiteLoading(h); }, 0, 5000);
+            const loaded = await waitStable(() => {
+                const h = getAFHost();
+                return h && !isSiteLoading(h) && Array.isArray(h.af?.eventDialog?.[type]?.data);
+            }, 1500, GROUP_RELOAD_TIMEOUT_MS);
+            if (!loaded) throw new Error('重新載入逾時');
+            // 4. 回到原本的畫面：同類型清單、同一頁、選印清單並開啟原本那張心電圖。
+            setText('重整中…');
+            closePrintReview();
+            const ngDialog = window.angular.element(document.body).injector().get('ngDialog');
+            for (const dialog of document.querySelectorAll('.ngdialog.ecg-dialog, .ngdialog.event-dialog')) {
+                if (dialog.id) ngDialog.close(dialog.id);
+            }
+            await waitFor(() => !document.querySelector('.ngdialog.ecg-dialog, .ngdialog.event-dialog'), 3000);
+            const freshHost = getAFHost();
+            if (!freshHost?.af?.eventDialog?.[type]?.itemsLength) {
+                quickToast(null, 'Group 完成；這個類型目前沒有事件，未重新開啟清單');
+                return;
+            }
+            freshHost.$apply(() => freshHost.openEventBasicList(type));
+            await waitFor(() => !!findPrintReviewAnchor(type), 15000);
+            const anchor = findPrintReviewAnchor(type);
+            if (!anchor) { quickToast(null, 'Group 完成，但無法重新開啟選印清單'); return; }
+            const range = anchor.closest('.ngdialog')?.querySelector('.pagination-range');
+            const pageCount = Number(freshHost.af.eventDialog.pagination?.pageCount)
+                || Math.ceil(freshHost.af.eventDialog[type].itemsLength / (Number(freshHost.af.eventDialog.pagination?.itemsPerPage) || 1));
+            if (restorePage > 1 && range) jumpToPage(range, Math.min(restorePage, pageCount || restorePage));
+            openPrintReview(anchor, restoreTime);
+            quickToast(review?.bar.querySelector('.rc-review-group') || null, 'Group 完成，已重新整理清單');
+        } catch (error) {
+            quickToast(button, `Group 失敗：${error?.message || error}`, true);
+        } finally {
+            if (review?.grouping) {
+                review.grouping = false;
+                setText('Group');
+                setReviewBusy(false);
+            }
         }
     }
 

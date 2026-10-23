@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.6
+// @version      1.6.1
 // @description  在 MP 分頁邊界以 Q / E 切換相鄰 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -17,7 +17,7 @@
 // 第一頁按 Q：切換至上一個 type；最後一頁按 E：切換至下一個 type。
 // Ctrl + E：與網頁原生功能協作，快速往下選中 type。
 // 切換 type 後會將目標捲入畫面，聚焦右側清單並點選第一張 ECG 縮圖；
-// 若下一個按鍵是 1 / 2 / 3，則改為對左側剛選中的 type 生效（按其他鍵或點滑鼠後恢復原本行為）。
+// 若下一個按鍵是 1 / 2 / 3 / 4，則改為對左側剛選中的 type 生效（按其他鍵或點滑鼠後恢復原本行為）。
 // 右側跨頁合計選取多張縮圖時，腳本不切換 type；在輸入框中打字、開著 Morphology Player 等彈出視窗
 // 或資料載入中時不處理快捷鍵。首尾頁以 MP 縮圖清單的分頁判斷，切換 type 後不再讓網站同時換頁。
 // 剛換頁、該頁波形還沒載入完成時按首尾頁的 Q / E，會在載入完成後自動切換 type。
@@ -209,11 +209,11 @@
     }
     document.addEventListener('mousedown', () => { pendingSwitch = null; leftDigitAfterSwitch = false; }, true);
 
-    // 切換 type 後焦點在右側（第一張縮圖）；若緊接著按 1 / 2 / 3，改為對左側剛選中的 type 生效。
-    // 網站的 1 / 2 / 3 依 morphology.state.focus 決定改右側縮圖或左側 type，按鍵處理在 document.onkeydown，
+    // 切換 type 後焦點在右側（第一張縮圖）；若緊接著按 1 / 2 / 3 / 4，改為對左側剛選中的 type 生效。
+    // 網站的 1 / 2 / 3 / 4 依 morphology.state.focus 決定改右側縮圖或左側 type，按鍵處理在 document.onkeydown，
     // 這裡在捕獲階段先呼叫網站的 focusLeft()，再交回網站處理。按其他鍵或點滑鼠即取消。
     let leftDigitAfterSwitch = false;
-    const LEFT_DIGIT_CODES = /^(?:Digit|Numpad)[123]$/;
+    const LEFT_DIGIT_CODES = /^(?:Digit|Numpad)[1-4]$/;
     document.addEventListener('keydown', function(e) {
         if (!leftDigitAfterSwitch || ['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
         leftDigitAfterSwitch = false;
