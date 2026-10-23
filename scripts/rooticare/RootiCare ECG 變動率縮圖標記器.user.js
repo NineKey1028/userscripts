@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.19.1
+// @version      1.19.2
 // @description  依變動率、BPM、彩色波形高度／寬度、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -2099,25 +2099,63 @@
         const cacheKey = `${ids.vendorId}|${ids.idNumber}|${ids.measureId}|${ids.afId}`;
         if (!force && printContext?.cacheKey === cacheKey) return printContext;
         const manager = window.angular.element(document.body).injector().get('WppManager');
-        const [tags, subCategories] = await Promise.all([
+        const [tags, subCategories, annoModified] = await Promise.all([
             manager.Af.getTagTms(ids.vendorId, ids.idNumber, ids.afId),
             manager.Af.getSubCategoryRecord(ids.vendorId, ids.idNumber, ids.measureId).catch(() => null),
+            manager.Af.getAnnoModifiedData(ids.vendorId, ids.idNumber, ids.measureId).catch(() => null),
         ]);
         const record = Object.assign({}, plainData(tags) || {}, plainData(subCategories) || {});
+        // 早搏清單（posPVC／posSVEB）是原始分析結果，儲存的標籤修改不會反映在裡面；
+        // 依修改紀錄把改成 V／S 的心搏加入、從 V／S 改掉的移出，改過標籤的心搏才找得到時間。
+        const beatSets = mergeLabelEdits({
+            V: pairBeats(record[PRINT_CATEGORIES.V.list], record[PRINT_CATEGORIES.V.pos]),
+            S: pairBeats(record[PRINT_CATEGORIES.S.list], record[PRINT_CATEGORIES.S.pos]),
+        }, plainData(annoModified));
         const lists = {};
         for (const [label, config] of Object.entries(PRINT_CATEGORIES)) {
-            const times = (record[config.list] || []).map(Number);
-            const positions = (record[config.pos] || []).map(Number);
-            const indexByPos = new Map(positions.map((pos, index) => [pos, index]));
-            const firstIndexByTime = new Map();
-            times.forEach((time, index) => { if (!firstIndexByTime.has(time)) firstIndexByTime.set(time, index); });
             const groups = config.groups.map(group => ({ ...group,
                 starts: [...new Set((record[group.record] || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b) }));
-            lists[label] = { times, positions, indexByPos, firstIndexByTime, groups, fallback: config.fallback };
+            lists[label] = { groups, fallback: config.fallback };
+            setListBeats(lists[label], beatSets[label]);
         }
         const sampleRate = Number(readStoredId('_sampleRate')) || 250;
         printContext = { cacheKey, ids, manager, lists, sampleRate };
         return printContext;
+    }
+    // 時間與位置清單配成 Map（位置 → 時間）。
+    function pairBeats(times, positions) {
+        const beats = new Map();
+        const list = Array.isArray(positions) ? positions : [];
+        list.forEach((pos, index) => {
+            const position = Number(pos);
+            const time = Number(times?.[index]);
+            if (Number.isFinite(position) && Number.isFinite(time)) beats.set(position, time);
+        });
+        return beats;
+    }
+    // 套用標籤修改紀錄（[時間, 位置, 新標籤, 原標籤, 1]）：新標籤為 V 加入 V、S／A 加入 S，其他（N、X 等）兩邊都移除。
+    function mergeLabelEdits(beatSets, edits) {
+        for (const item of Array.isArray(edits) ? edits : []) {
+            if (!Array.isArray(item) || !item[4]) continue;
+            const time = Number(item[0]);
+            const position = Number(item[1]);
+            if (!Number.isFinite(position)) continue;
+            beatSets.V.delete(position);
+            beatSets.S.delete(position);
+            const kind = item[2] === 'V' ? 'V' : item[2] === 'S' || item[2] === 'A' ? 'S' : null;
+            if (kind && Number.isFinite(time)) beatSets[kind].set(position, time);
+        }
+        return beatSets;
+    }
+    // 依位置排序寫入清單，並重建查詢用的索引。
+    function setListBeats(list, beats) {
+        const sorted = [...beats].sort((a, b) => a[0] - b[0]);
+        list.beats = beats;
+        list.positions = sorted.map(([position]) => position);
+        list.times = sorted.map(([, time]) => time);
+        list.indexByPos = new Map(list.positions.map((position, index) => [position, index]));
+        list.firstIndexByTime = new Map();
+        list.times.forEach((time, index) => { if (!list.firstIndexByTime.has(time)) list.firstIndexByTime.set(time, index); });
     }
     // 第一個不早於 time 的位置（二分搜尋）。
     function lowerBound(values, time) {
@@ -2164,14 +2202,29 @@
         }
         return { key: list.fallback.key, name: list.fallback.name, time };
     }
-    function findBeat(context, segment, label) {
+    // 依縮圖目前的標籤（Morphology 未儲存的改標 modifiedLabel 優先）決定 V 或 S：
+    // 心搏還在另一份清單（S↔V 改標後清單未更新）時移到正確的清單，避免選印到錯誤的分類；
+    // allowInsert：重新讀取後仍找不到時，以縮圖本身的時間把這顆心搏加入對應清單。改成 N 等非早搏時不選印。
+    function findBeat(context, segment, label, allowInsert = false) {
         const position = Number(segment.absoluteIndex);
-        // 先查目前分頁的清單；縮圖已改分類但未儲存時再查另一份。
-        for (const kind of [label, label === 'V' ? 'S' : 'V']) {
-            const index = context.lists[kind].indexByPos.get(position);
-            if (index !== undefined) return { list: context.lists[kind], index };
+        const current = segment.modifiedLabel || segment.label || label;
+        const kind = current === 'V' ? 'V' : current === 'S' || current === 'A' ? 'S' : null;
+        if (!kind || !Number.isFinite(position)) return null;
+        const list = context.lists[kind];
+        const other = context.lists[kind === 'V' ? 'S' : 'V'];
+        const index = list.indexByPos.get(position);
+        if (index !== undefined) return { list, index };
+        let time = other.beats.get(position);
+        if (time !== undefined) {
+            other.beats.delete(position);
+            setListBeats(other, other.beats);
+        } else {
+            time = Number(segment.timestamp);
+            if (!allowInsert || !Number.isFinite(time)) return null;
         }
-        return null;
+        list.beats.set(position, time);
+        setListBeats(list, list.beats);
+        return { list, index: list.indexByPos.get(position) };
     }
     function selectedPrintSegments(scope) {
         const selected = scope?.morphology?.state?.selectedSegments || [];
@@ -2224,7 +2277,7 @@
             let beats = segments.map(segment => findBeat(context, segment, label));
             if (beats.some(beat => !beat)) {
                 context = await loadPrintContext(true);
-                beats = segments.map(segment => findBeat(context, segment, label));
+                beats = segments.map(segment => findBeat(context, segment, label, true));
             }
             const missing = beats.filter(beat => !beat).length;
             const targets = new Map();
