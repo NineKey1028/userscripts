@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.4
+// @version      1.5
 // @description  在 MP 分頁邊界以 Q / E 切換相鄰 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -19,6 +19,9 @@
 // 切換 type 後會將目標捲入畫面，聚焦右側清單並點選第一張 ECG 縮圖。
 // 右側跨頁合計選取多張縮圖時，腳本不切換 type；在輸入框中打字、開著 Morphology Player 等彈出視窗
 // 或資料載入中時不處理快捷鍵。首尾頁以 MP 縮圖清單的分頁判斷，切換 type 後不再讓網站同時換頁。
+// 剛換頁、該頁波形還沒載入完成時按首尾頁的 Q / E，會在載入完成後自動切換 type。
+// 網站快速連續換頁時，下一次換頁會等上一頁載入完成才執行，避免網站讀錯資料而卡住。
+// 若仍發生（例如載入中點選左側 type），腳本會自動重新載入目前頁，未儲存的修改會保留。
 // 左側多選 type 時，隱藏右側灰色遮罩與虛線提示框的外觀，保留原生操作攔截。
 
 (function() {
@@ -77,15 +80,151 @@
             || button.classList.contains('ng-hide') || getComputedStyle(button).pointerEvents === 'none';
     }
 
+    // 網站換頁時會先換縮圖清單，波形與標籤稍後才從快取讀回；讀回時以當下清單長度填入資料，
+    // 若這段期間切換 type 讓清單變長，網站會讀到不存在的資料而報錯（reading 'waveformData'）。
+    // Morphology 縮圖標籤以絕對取樣索引為鍵，每張縮圖的標籤都含有該 segment 的索引時才算載入完成。
+    // 模型不可用時視為已載入，沿用原本的判斷。
+    function pageDataReady(scope) {
+        const segments = scope?.morphology?.state?.currentSegments;
+        const labels = scope?.morphology?.ecgEnlargedChart?.annoData;
+        if (!Array.isArray(segments) || !Array.isArray(labels)) return true;
+        return segments.every((segment, i) => {
+            const label = labels[i];
+            if (Array.isArray(label)) return true;
+            return Boolean(label) && typeof label === 'object'
+                && Object.prototype.hasOwnProperty.call(label, segment?.absoluteIndex);
+        });
+    }
+
+    // 等這一頁資料載入完成後呼叫 done(true)；逾時或離開 MP 時呼叫 done(false)。一律非同步執行。
+    const PAGE_WAIT_MS = 3000;
+    function whenPageReady(scope, timeout, done) {
+        const start = Date.now();
+        const tick = () => {
+            if (!scope || scope.$$destroyed) return done(false);
+            if (pageDataReady(scope)) return done(true);
+            if (Date.now() - start >= timeout) return done(false);
+            setTimeout(tick, 20);
+        };
+        setTimeout(tick, 0);
+    }
+
+    // pageChanged 定義在 MP 控制器的 scope 上，子 scope 只是繼承；包裝時要改在擁有它的那一層。
+    function pageOwner(scope) {
+        let owner = scope;
+        while (owner && !Object.prototype.hasOwnProperty.call(owner, 'pageChanged')) owner = Object.getPrototypeOf(owner);
+        return typeof owner?.pageChanged === 'function' ? owner : null;
+    }
+
+    // 網站所有 MP 換頁（原生 Q / E、分頁按鈕、拉桿）都呼叫 pageChanged()。上一頁還沒載入完成時先排隊，
+    // 載入後才執行，並以當下頁碼為準，所以連續換頁只會執行最後一次；最多等 PAGE_WAIT_MS，逾時照常換頁。
+    let pageChangeQueued = false;
+    function installPageGuard(scope) {
+        const owner = pageOwner(scope);
+        if (!owner || owner.pageChanged.mpQuickSwitchOriginal) return;
+        const original = owner.pageChanged;
+        const guarded = function() {
+            if (pageDataReady(owner)) return original.apply(this, arguments);
+            if (pageChangeQueued) return;
+            pageChangeQueued = true;
+            whenPageReady(owner, PAGE_WAIT_MS, () => {
+                pageChangeQueued = false;
+                if (!owner.$$destroyed) owner.$apply(() => original.call(owner));
+            });
+        };
+        guarded.mpQuickSwitchOriginal = original;
+        owner.pageChanged = guarded;
+    }
+
+    // 補救：載入中點選左側 type 等腳本攔不到的操作仍會讓網站報錯，畫面留下上一頁的波形、其餘縮圖空白，
+    // 且載入旗標卡住。網站第一次讀錯會交給自己的重試、不會報錯；重試又讀錯時才報錯，之後不再重試。
+    // 報錯後延後 RECOVER_DELAY_MS 檢查（連續報錯會重新計時），畫面確實對不上時，
+    // 以網站原本的換頁流程重新載入目前頁，載入完成後解除卡住的旗標。
+    // 未儲存的修改記在 segment 與編輯紀錄上，網站換頁時會重新套用，這裡不碰這些資料。
+    const RECOVER_DELAY_MS = 200;
+    const RECOVER_LIMIT = 3;
+    const recoverState = { timer: null, times: [] };
+    function scheduleRecover() {
+        clearTimeout(recoverState.timer);
+        recoverState.timer = setTimeout(recoverPage, RECOVER_DELAY_MS);
+    }
+    function recoverPage() {
+        const owner = pageOwner(morphologyScope());
+        if (!owner || pageDataReady(owner)) return;
+        const now = Date.now();
+        recoverState.times = recoverState.times.filter(time => now - time < 10000);
+        if (recoverState.times.length >= RECOVER_LIMIT) return;
+        recoverState.times.push(now);
+        const reload = owner.pageChanged.mpQuickSwitchOriginal || owner.pageChanged;
+        owner.$apply(() => reload.call(owner));
+        whenPageReady(owner, 5000, ready => {
+            if (ready && owner.morphology?.loading?.segments) owner.$apply(() => { owner.morphology.loading.segments = false; });
+        });
+    }
+
+    // 網站的錯誤會經過 Angular 的 $log.error；只觀察訊息，原樣交回網站。
+    function installErrorWatch() {
+        let log;
+        try { log = window.angular?.element(document.body)?.injector?.()?.get?.('$log'); } catch (_) { return; }
+        if (!log || typeof log.error !== 'function' || log.error.mpQuickSwitchWatch) return;
+        const original = log.error;
+        const watched = function(...args) {
+            try {
+                if (args.some(arg => /waveformData/.test(String(arg?.message || arg)))) scheduleRecover();
+            } catch (_) { /* 只觀察 */ }
+            return original.apply(this, args);
+        };
+        watched.mpQuickSwitchWatch = true;
+        log.error = watched;
+    }
+
+    // 進入 MP 時才有控制器 scope，換頁面後 scope 會重建，所以定期檢查並補上包裝。
+    function installGuards() {
+        const scope = morphologyScope();
+        if (!scope) return;
+        installPageGuard(scope);
+        installErrorWatch();
+    }
+    setInterval(installGuards, 500);
+
+    // 首尾頁按 Q / E 時若這一頁還在載入，先記下來，載入完成後自動切換 type。
+    // 等待期間按其他鍵、點滑鼠、換頁或換 type 就取消；最多等 PAGE_WAIT_MS。
+    let pendingSwitch = null;
+    function switchSnapshot(scope) {
+        const state = scope?.morphology?.state;
+        return `${state?.label}|${state?.type}|${scope?.morphology?.pagination?.currentPage}`;
+    }
+    function queueSwitch(scope, direction) {
+        const token = { snapshot: switchSnapshot(scope) };
+        pendingSwitch = token;
+        whenPageReady(scope, PAGE_WAIT_MS, ready => {
+            if (pendingSwitch !== token) return;
+            pendingSwitch = null;
+            if (!ready || scope !== morphologyScope() || switchSnapshot(scope) !== token.snapshot) return;
+            if (document.querySelector('.ngdialog') || !pageEdge(scope, direction)) return;
+            try { if (typeof scope.loading === 'function' && scope.loading()) return; } catch (_) { return; }
+            switchType(direction);
+        });
+    }
+    document.addEventListener('mousedown', () => { pendingSwitch = null; }, true);
+
     // 按下 Q / E 時檢查分頁邊界；只在第一頁按 Q、最後一頁按 E 時接手切換 type。
     // Ctrl + E 仍與網站原生按鍵流程協作。
     document.addEventListener('keydown', function(e) {
+        if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) pendingSwitch = null;
         const key = e.key.toUpperCase();
         if (key !== 'Q' && key !== 'E') return;
         const scope = morphologyScope();
+        installGuards();
         if (shouldIgnoreKey(e, scope)) return;
         const direction = key === 'E' ? 'next' : 'prev';
         if (!pageEdge(scope, direction)) return;
+        if (!pageDataReady(scope)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            queueSwitch(scope, direction);
+            return;
+        }
         // 已切換 type 時攔下同一次按鍵，避免網站接著在新 type 的清單上再換頁。
         if (switchType(direction)) {
             e.preventDefault();
