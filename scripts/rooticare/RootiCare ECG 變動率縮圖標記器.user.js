@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.19.2
-// @description  依變動率、BPM、彩色波形高度／寬度、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
+// @version      1.20.0
+// @description  依變動率、BPM、彩色波形高度／寬度、與前一跳比較（高矮寬窄快慢）、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -24,6 +24,7 @@
  *   高度        mV，以平坦基準線為 0，向下為負
  *   寬度        ms，主峰兩側回到基準線的距離
  *   前一個點    = / ≠ 指定分類（A 視為 S；沒有前一搏時不命中）
+ *   比前一跳    還 高／矮／寬／窄／快／慢（以原始波形量這一跳與前一跳後比較；量不到時不命中）
  *   波形方向    向上或向下，同時標示左側相符的 type（僅縮圖）
  *   雜訊判斷    = / ≠ 雜訊（測試版，僅縮圖；滑過選取數可看轉折次數）
  *
@@ -232,7 +233,11 @@
     // 只出現在縮圖清單的條件；不加入播放器，也不參與兩處同步。
     const THUMBNAIL_ONLY_LABELS = { direction: '波形方向', noise: '雜訊判斷(測試版)' };
     // 只屬於單一面板的條件：前一搏分類僅在播放器，波形方向與雜訊判斷僅在縮圖清單。
-    const isLocalCondition = condition => ['previous', 'direction', 'noise'].includes(condition.kind);
+    const isLocalCondition = condition => ['previous', 'relative', 'direction', 'noise'].includes(condition.kind);
+    // 比前一跳：與前一跳比較振幅（高／矮）、寬度（寬／窄）與 R-R 間距（快／慢）；可加多列，兩處各自設定。
+    const RELATIVE_LABELS = { taller: '高', shorter: '矮', wider: '寬', narrower: '窄', faster: '快', slower: '慢' };
+    // 每列各有一個比較選項的條件（前一個點、比前一跳）。
+    const MULTI_ROW_KINDS = { previous: ['=', '!='], relative: Object.keys(RELATIVE_LABELS) };
     let sharedConditions = [];
     let playerPreviousConditions = [];
     let thumbnailLocalConditions = [];
@@ -245,10 +250,10 @@
         const settings = readConditions(source.parentElement);
         const editorConditions = settings.editorConditions || settings.conditions;
         if (source.dataset?.allowPrevious === 'true') {
-            playerPreviousConditions = settings.conditions.filter(condition => condition.kind === 'previous')
+            playerPreviousConditions = settings.conditions.filter(condition => ['previous', 'relative'].includes(condition.kind))
                 .map(condition => ({ ...condition }));
         } else {
-            thumbnailLocalConditions = editorConditions.filter(condition => condition.kind in THUMBNAIL_ONLY_LABELS || condition.kind === 'previous')
+            thumbnailLocalConditions = editorConditions.filter(condition => condition.kind in THUMBNAIL_ONLY_LABELS || ['previous', 'relative'].includes(condition.kind))
                 .map(condition => ({ ...condition }));
         }
         sharedConditions = editorConditions.filter(condition => !isLocalCondition(condition))
@@ -273,7 +278,7 @@
         const editor = document.createElement('span');
         editor.className = 'rc-condition-editor';
         editor.dataset.allowPrevious = String(allowPrevious);
-        editor.innerHTML = `<span data-role="conditions"></span><button type="button" data-role="condition-add" aria-label="新增條件" title="新增條件">＋</button><select data-role="condition-menu" aria-label="選擇新增條件" hidden>${Object.entries(CONDITION_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}<option value="previous">前一個點</option>${allowPrevious ? '' : Object.entries(THUMBNAIL_ONLY_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}</select>`;
+        editor.innerHTML = `<span data-role="conditions"></span><button type="button" data-role="condition-add" aria-label="新增條件" title="新增條件">＋</button><select data-role="condition-menu" aria-label="選擇新增條件" hidden>${Object.entries(CONDITION_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}<option value="previous">前一個點</option><option value="relative">比前一跳</option>${allowPrevious ? '' : Object.entries(THUMBNAIL_ONLY_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join('')}</select>`;
         const rows = editor.querySelector('[data-role="conditions"]');
         const statusKind = allowPrevious ? 'player' : 'thumbnail';
         const clearBoundsNotice = () => {
@@ -322,16 +327,18 @@
             for (const option of menu.options) {
                 if (!option.value) continue;
                 const [kind] = option.value.split(':');
-                // 前一個點只有一個選單項目；= 與 ≠ 都已加入時才停用。
-                option.disabled = kind === 'previous' ? used(kind, '=') && used(kind, '!=')
+                // 前一個點、比前一跳只有一個選單項目；每種比較都已加入時才停用。
+                option.disabled = kind in MULTI_ROW_KINDS ? MULTI_ROW_KINDS[kind].every(operator => used(kind, operator))
                     : Boolean(rows.querySelector(`[data-group-kind="${kind}"]`));
             }
-            const previousRows = rows.querySelectorAll('.rc-condition[data-kind="previous"]');
-            for (const row of previousRows) {
-                const select = row.querySelector('[data-role="condition-operator"]');
-                for (const option of select.options) option.disabled = used(row.dataset.kind, option.value, row);
-                // 只有一列時由卡片標題的移除鈕整張移除。
-                row.querySelector('[data-role="condition-remove"]').hidden = previousRows.length < 2;
+            for (const kind of Object.keys(MULTI_ROW_KINDS)) {
+                const kindRows = rows.querySelectorAll(`.rc-condition[data-kind="${kind}"]`);
+                for (const row of kindRows) {
+                    const select = row.querySelector('[data-role="condition-operator"]');
+                    for (const option of select.options) option.disabled = used(row.dataset.kind, option.value, row);
+                    // 只有一列時由卡片標題的移除鈕整張移除。
+                    row.querySelector('[data-role="condition-remove"]').hidden = kindRows.length < 2;
+                }
             }
             addButton.disabled = [...menu.options].filter(option => option.value).every(option => option.disabled);
             if (addButton.disabled) menu.hidden = true;
@@ -348,7 +355,7 @@
                 group = document.createElement('span');
                 group.className = 'rc-condition-group';
                 group.dataset.groupKind = condition.kind;
-                group.innerHTML = `<span class="rc-condition-heading"><button type="button" data-role="condition-remove" aria-label="移除此指標">×</button>${CONDITION_LABELS[condition.kind] || THUMBNAIL_ONLY_LABELS[condition.kind] || '前一個點'}</span>`;
+                group.innerHTML = `<span class="rc-condition-heading"><button type="button" data-role="condition-remove" aria-label="移除此指標">×</button>${CONDITION_LABELS[condition.kind] || THUMBNAIL_ONLY_LABELS[condition.kind] || (condition.kind === 'relative' ? '比前一跳' : '前一個點')}</span>`;
                 const removable = group;
                 group.querySelector('[data-role="condition-remove"]').addEventListener('click', () => {
                     clearBoundsNotice(); removable.remove(); refreshAvailability(); refreshNumericBounds(); notify();
@@ -360,6 +367,13 @@
                 row.innerHTML = '<select data-role="condition-operator" aria-label="比較方式"><option value="=">=</option><option value="!=">≠</option></select>'
                     + '<select data-role="condition-value" aria-label="前一搏分類"><option>V</option><option>S</option><option>N</option></select>'
                     + '<button type="button" data-role="condition-remove" aria-label="移除此條件" title="移除此條件">×</button>';
+            } else if (condition.kind === 'relative') {
+                row.innerHTML = '<span>還</span><select data-role="condition-operator" aria-label="與前一跳比較">'
+                    + Object.entries(RELATIVE_LABELS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')
+                    + '</select><input type="hidden" data-role="condition-value">'
+                    + '<button type="button" data-role="condition-remove" aria-label="移除此條件" title="移除此條件">×</button>';
+                row.title = '以原始波形量這一跳與前一跳後比較；量不到時不命中。\n'
+                    + '高／矮：主峰高度（mV，向上為正、向下為負，與心搏高度相同）\n寬／窄：主峰兩側回到基準線的時間\n快／慢：R-R 間距（較短為快）';
             } else if (condition.kind === 'noise') {
                 // 找不到平坦基準線（寬高無法量測）即視為雜訊；= 只留雜訊，≠ 排除雜訊。
                 row.innerHTML = '<select data-role="condition-operator" aria-label="雜訊判斷" title="找不到平坦基準線、紅色心搏後 ST-T 段大幅來回擺動 2 次以上，或紅點旁緊接著另一個 QRS，視為雜訊"><option value="=">= 雜訊</option><option value="!=">≠ 雜訊</option></select><input type="hidden" data-role="condition-value">';
@@ -448,6 +462,7 @@
             const value = kind === 'rate' ? 12 : kind === 'bpm' ? 100 : kind === 'previous' ? 'V' : 0;
             // 前一個點預設 =，已有 = 時改加 ≠；比較方式可在該列切換。
             if (kind === 'previous') add({ kind, operator: used(kind, '=') ? '!=' : '=', value });
+            else if (kind === 'relative') add({ kind, operator: MULTI_ROW_KINDS.relative.find(operator => !used(kind, operator)), value: 'previous-beat' });
             // 新增波形方向時預設勾選向上，可再改為向下或取消勾選。
             else if (kind === 'direction') add({ kind, operator: '=', value: 'up' });
             else if (kind === 'noise') add({ kind, operator: '=', value: 'noise' });
@@ -486,7 +501,7 @@
             return {
                 kind: row.dataset.kind,
                 // 波形方向未勾選任何一側時視為停用；前一搏分類永遠啟用。
-                enabled: row.dataset.kind === 'direction' ? text !== '' : ['previous', 'noise'].includes(row.dataset.kind)
+                enabled: row.dataset.kind === 'direction' ? text !== '' : ['previous', 'relative', 'noise'].includes(row.dataset.kind)
                     || row.querySelector('[data-role="condition-enabled"]')?.checked !== false,
                 operator: row.querySelector('[data-role="condition-operator"]').value,
                 value: local ? text : text.trim() === '' ? NaN : Number(text),
@@ -499,6 +514,7 @@
     function validConditions(settings) {
         return settings?.conditions?.length > 0 && settings.conditions.every(condition =>
             condition.kind === 'previous' ? ['V', 'S', 'N'].includes(condition.value) && ['=', '!='].includes(condition.operator)
+                : condition.kind === 'relative' ? condition.operator in RELATIVE_LABELS && condition.value === 'previous-beat'
                 : condition.kind === 'direction' ? condition.operator === '=' && ['up', 'down'].includes(condition.value)
                 : condition.kind === 'noise' ? ['=', '!='].includes(condition.operator) && condition.value === 'noise'
                 : ['rate', 'bpm', 'height', 'width'].includes(condition.kind) && ['>=', '<='].includes(condition.operator)
@@ -519,6 +535,7 @@
             return condition.operator === '!=' ? metrics.previousClassification !== condition.value
                 : metrics.previousClassification === condition.value;
         }
+        if (condition.kind === 'relative') return relativeMatches(metrics.relative, condition.operator);
         if (condition.kind === 'direction') {
             // 主峰偏離基準線最大的一側；雜訊縮圖由備援基準提供方向，否則依高度正負。
             const height = metrics.height;
@@ -914,8 +931,18 @@
             shape = readColoredWaveShape(position.wave, true);
             if (['V', 'A'].includes(beats[index].type) && !shape) return null;
         }
+        // 比前一跳：以這筆的原始取樣量測；目標位於波形中央（或依 posInfo 的起點換算）。
+        let relative = null;
+        if (readPlayerSettings()?.conditions.some(condition => condition.kind === 'relative')) {
+            const v = item.ecgData.map(Number);
+            const start = Number(item.posInfo?.idxRange?.[0]);
+            const origin = Number.isFinite(start) && target >= start && target < start + v.length
+                ? start : target - Math.round(v.length / 2);
+            relative = relativeBeatMetrics(v, sampleRate, beats.map(beat => Number(beat.index) - origin), index);
+        }
         return { player, item, progress, target, metrics: {
             ...shape,
+            relative,
             classification: ({ N: 'N', A: 'S', V: 'V', X: 'A' })[beats[index].type],
             previousClassification: previous ? ({ N: 'N', A: 'S', V: 'V', X: 'A' })[previous.type] : null,
             rrMs: interval > 0 ? interval / sampleRate * 1000 : null,
@@ -1685,6 +1712,93 @@
         };
     }
 
+    // 比前一跳：以原始 mV 取樣量一跳的振幅與寬度。center 為心搏的取樣位置。
+    // 基準線為心搏前後 1 秒內平坦段（斜率 < 4 mV/s）的加權眾數，不受早搏前後 T 波影響；
+    // 主峰在 ±60 ms 內偏離基準線最大處，高度帶正負號（向上為正）；寬度為主峰兩側首次回到基準線容差（5% 振幅，至少 0.02 mV）的時間，
+    // 200 ms 內回不到時無法量測。
+    function flatRawBaseline(v, rate, center) {
+        const ms = value => Math.round(value * rate / 1000);
+        const bins = new Map();
+        for (let i = Math.max(1, center - ms(1000)); i < Math.min(v.length - 1, center + ms(1000)); i++) {
+            if (Math.abs(i - center) < ms(80) || !Number.isFinite(v[i])) continue;
+            const slope = Math.abs(v[i + 1] - v[i - 1]) / 2 * rate / 1000; // mV／ms
+            if (!(slope < 0.004)) continue;
+            const key = Math.round(v[i] / 0.02);
+            const weight = 1 / (1 + (slope / 0.001) ** 2);
+            const bin = bins.get(key) || { weight: 0, sum: 0 };
+            bin.weight += weight; bin.sum += v[i] * weight;
+            bins.set(key, bin);
+        }
+        const best = [...bins.values()].sort((a, b) => b.weight - a.weight)[0];
+        return best && best.weight >= 5 ? best.sum / best.weight : null;
+    }
+    function measureRawBeat(v, rate, center) {
+        const n = v.length;
+        const ms = value => Math.round(value * rate / 1000);
+        if (!Number.isInteger(center) || center < 0 || center >= n || !(rate > 0)) return null;
+        const base = flatRawBaseline(v, rate, center);
+        if (base === null) return null;
+        let at = -1;
+        for (let i = Math.max(0, center - ms(60)); i <= Math.min(n - 1, center + ms(60)); i++) {
+            if (Number.isFinite(v[i]) && (at < 0 || Math.abs(v[i] - base) > Math.abs(v[at] - base))) at = i;
+        }
+        if (at < 0) return null;
+        const amplitude = Math.abs(v[at] - base);
+        if (!(amplitude > 0)) return null;
+        const sign = Math.sign(v[at] - base);
+        const tolerance = Math.max(0.02, amplitude * 0.05);
+        const edge = direction => {
+            for (let i = at; Math.abs(i - at) <= ms(200); i += direction) {
+                if (i < 0 || i >= n || !Number.isFinite(v[i])) return null;
+                if (sign * (v[i] - base) <= tolerance) return i;
+            }
+            return null;
+        };
+        const left = edge(-1), right = edge(1);
+        return { amplitude, height: v[at] - base, width: left !== null && right !== null && right > left ? (right - left) / rate * 1000 : null };
+    }
+    // beats 為依時間排序的心搏取樣位置，index 為這一跳；回傳這一跳、前一跳的量測與兩段 R-R（取樣數）。
+    function relativeBeatMetrics(v, rate, beats, index) {
+        if (!Array.isArray(v) || index < 1 || index >= beats.length) return null;
+        return {
+            current: measureRawBeat(v, rate, beats[index]),
+            previous: measureRawBeat(v, rate, beats[index - 1]),
+            rr: beats[index] - beats[index - 1],
+            previousRr: index > 1 ? beats[index - 1] - beats[index - 2] : null,
+        };
+    }
+    function relativeMatches(relative, operator) {
+        if (!relative) return false;
+        const shape = { taller: ['height', 1], shorter: ['height', -1], wider: ['width', 1], narrower: ['width', -1] }[operator];
+        if (shape) {
+            const [key, sign] = shape;
+            const current = relative.current?.[key], previous = relative.previous?.[key];
+            if (!Number.isFinite(current) || !Number.isFinite(previous)) return false;
+            return sign > 0 ? current > previous : current < previous;
+        }
+        if (!(relative.rr > 0) || !(relative.previousRr > 0)) return false;
+        return operator === 'faster' ? relative.rr < relative.previousRr : operator === 'slower' ? relative.rr > relative.previousRr : false;
+    }
+    // 縮圖：心搏位置由圓點座標換算為原始取樣位置（與雜訊判斷相同）。
+    function readThumbnailRelative(thumb) {
+        const wave = thumb.querySelector('.ecgWave');
+        let scope;
+        try { scope = window.angular?.element(wave)?.isolateScope?.(); } catch (_) { /* 未載入 */ }
+        const samples = scope?.ecgData;
+        if (!Array.isArray(samples) || samples.length < 20) return null;
+        const v = samples.map(Number);
+        const n = v.length;
+        const seconds = Number(scope.segSec);
+        const rate = Number(scope.posInfo?.sampleRate || scope.sampleRate) || (seconds > 0 ? n / seconds : NaN);
+        const groupWidth = Number(wave.querySelector('.centerGroup')?.getAttribute('width'));
+        if (!(rate > 0) || !(groupWidth > 0)) return null;
+        const dots = [...thumb.querySelectorAll('circle.anno-dot')].map(dot => ({
+            index: Math.round(Number(dot.getAttribute('cx')) / groupWidth * n), current: dot.classList.contains('current'),
+        })).filter(dot => Number.isFinite(dot.index)).sort((a, b) => a.index - b.index);
+        const index = dots.findIndex(dot => dot.current);
+        return relativeBeatMetrics(v, rate, dots.map(dot => dot.index), index);
+    }
+
     // 縮圖畫面上的非目標心搏都畫成黑點，但網站在縮圖資料中保存了每一搏的分類；
     // 以圓點綁定的絕對取樣索引查表，網站的 N / A / V / X 對應面板的 N / S / V / A。找不到時回傳 null。
     function readPreviousClassification(thumb) {
@@ -1713,6 +1827,8 @@
             : condition.kind === 'bpm' ? findHeartRateHits(condition.value, condition.operator)
             : condition.kind === 'previous' ? new Set([...document.querySelectorAll('#right-list .ecg-trend')]
                 .filter(thumb => conditionMatches({ previousClassification: readPreviousClassification(thumb) }, condition)))
+            : condition.kind === 'relative' ? new Set([...document.querySelectorAll('#right-list .ecg-trend')]
+                .filter(thumb => conditionMatches({ relative: readThumbnailRelative(thumb) }, condition)))
                 : new Set([...shapes].filter(([, metrics]) => metrics && conditionMatches(metrics, condition))
                     .map(([thumb]) => thumb)));
         return new Set([...sets[0]].filter(thumb => sets.every(set => set.has(thumb))));
