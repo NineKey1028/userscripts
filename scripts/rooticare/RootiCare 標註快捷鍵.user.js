@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.35.1
+// @version      1.36.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -25,13 +25,12 @@
  *   滑鼠在心電圖波形上    以上按鍵與按住滑動同樣作用在該時間點的標籤（等同滑鼠在標籤列同一位置）
  *   按住 4 移動          連續刪除碰到的標籤
  *   按住 Alt+1/2/3 移動  只修改碰到的既有標籤（Mac 為 Option）
- *   Ctrl+左鍵拖曳        左右微調標籤位置（Esc 取消；Mac 建議用 ⌘）；
+ *   Alt+左鍵拖曳         左右微調標籤位置（Esc 取消；Mac 為 Option）；
  *                        按在標籤列空白處或心電圖波形上會吸過最近的標籤；
- *                        開始後可放開 Ctrl，拖曳中按 1／2／3 改為 V／S／N，放開滑鼠一併送出
+ *                        開始後可放開 Alt，拖曳中按 1／2／3 改為 V／S／N，放開滑鼠一併送出
  *
  * 【區間】Shift+1/2/3 按兩次（起點、終點），可跨視窗；Esc 取消
- *   篩選修改  依 BPM、變動率、原標籤、type（排除／限於 type 1,155）篩選後改為 V / S / N；
- *            面板開著時按住 Alt + 1/2/3 滑過標籤，只修改符合面板條件的標籤
+ *   篩選修改  依 BPM、變動率、原標籤、type（排除／限於 type 1,155）篩選後改為 V / S / N
  *   填補整理  在頭尾兩顆標籤外側各按一次，依開頭 RR 平均補滿中間心搏
  *            （頭尾不改；多刪少補，保留的維持原類型）
  *   分頁選擇保留到重新整理頁面為止。
@@ -75,9 +74,8 @@
     function isDisabledPage() {
         return /^\/rooti-care\/morphology(?:\/|$)/.test(window.location?.pathname || '');
     }
-    // Mac：⌘ 可代替 Ctrl 拖曳標籤（Mac 的 Ctrl+點擊等同右鍵）。
-    const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '');
-    const isDragModifier = event => event.ctrlKey || (IS_MAC && event.metaKey);
+    // Alt（Mac 為 Option）+ 左鍵拖曳標籤。
+    const isDragModifier = event => event.altKey;
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     let currentMousePos = { x: 0, y: 0 };
 
@@ -274,7 +272,7 @@
     // 每次移動沿上一點到目前位置取樣，快速甩過也不漏掉中間的標籤；只處理碰到的既有標籤。
     const SWEEP_STEP = 3; // 取樣間距（像素）
     const SWEEP_MAX_SAMPLES = 200;
-    let heldSweep = null; // { key, code, tag, alt, last: { x, y } }；Alt 篩選修改另有 filters、seen、changed、skipped
+    let heldSweep = null; // { key, code, tag, alt, last: { x, y } }
     function stopHeldSweep() { heldSweep = null; }
     function sweepTo(x, y) {
         const from = heldSweep.last;
@@ -288,14 +286,12 @@
             if (!el?.classList.contains('annoText') || el.textContent.trim() === heldSweep.tag) continue;
             const block = el.closest(TARGET_BLOCK_SELECTOR);
             if (!block) continue;
-            if (heldSweep.filters) queueAltFilterLabel(heldSweep, el, block);
-            else processCommand(heldSweep.tag, point, block);
+            processCommand(heldSweep.tag, point, block);
         }
     }
     window.addEventListener('mousemove', (e) => {
         if (!heldSweep) return;
-        if (isDisabledPage() || rangeBusy || labelDrag || (heldSweep.alt && !e.altKey)
-            || (heldSweep.filters ? !isAltFilterMode() : rangeMode)) {
+        if (isDisabledPage() || rangeBusy || labelDrag || rangeMode || (heldSweep.alt && !e.altKey)) {
             stopHeldSweep(); return;
         }
         sweepTo(e.clientX, e.clientY);
@@ -563,7 +559,7 @@
     // 區間分頁：filter 篩選修改、fill 填補整理。只存在本次頁面執行期，重新整理後回到篩選修改。
     let rangeTool = 'filter';
     const RANGE_HELP = {
-        filter: '在另一端按 Shift + 1→V／2→S／3→N，即套用篩選修改；或按住 Alt + 1／2／3 滑過標籤，只修改符合條件的',
+        filter: '在另一端按 Shift + 1→V／2→S／3→N，即套用篩選修改',
         fill: '在結尾之後按 Shift + 1→V／2→S／3→N，補上的標籤使用該類型'
     };
     function updateRangeTool() {
@@ -934,74 +930,6 @@
         if (!rangeBusy) rangeHint.style.display = 'none';
     }
 
-    // ── Alt + 篩選修改：區間面板（篩選修改分頁）開著時，按住 Alt + 1／2／3 碰到的標籤先依面板條件判斷，
-    // 符合才修改（條件與 Shift 區間相同，以同一個 getRangeUpdates 判斷）；區間第一端點保留，可繼續選第二端點。
-    function isAltFilterMode() {
-        return !!rangeMode?.first && !rangeBusy && rangeTool === 'filter';
-    }
-    // 每個心電圖視窗讀一次區間資料（標籤、morphologyType；需要 BPM／變動率時另讀前兩顆心搏），同一次按住期間共用。
-    const altFilterWindows = new Map();
-    function loadAltFilterWindow(context, needsIntervals) {
-        const start = Math.round(context.viewStart);
-        const end = start + Math.round(context.rate * Number(context.scope.segSec));
-        const key = [context.record, start, end].join('|');
-        if (!altFilterWindows.has(key)) {
-            const promise = (async () => {
-                const manager = window.angular.element(document.body).injector().get('WppManager');
-                const af = context.af;
-                const response = await manager.Af.getFilteredECGDataByIndexRange(
-                    af._vendorId, af._idNumber, af._measureId, start, end,
-                    context.startTime, af.record.ecgLeadMode, context.scope.channelSwitch || 1);
-                const data = response?.plain ? response.plain() : response;
-                if (!data?.anno || typeof data.anno !== 'object') throw new Error('心電圖標籤讀取失敗');
-                const base = new Map(Object.entries(data.anno).map(([index, type]) => [Number(index), type]));
-                if (needsIntervals) {
-                    const firstIndex = [...base.keys()].reduce((min, index) => Number.isFinite(index) ? Math.min(min, index) : min, Infinity);
-                    if (Number.isFinite(firstIndex)) await addPrecedingBeats(manager, af, base, context.modifiedData, firstIndex, 2);
-                }
-                return { data, base };
-            })();
-            promise.catch(() => altFilterWindows.delete(key));
-            altFilterWindows.set(key, promise);
-        }
-        return altFilterWindows.get(key);
-    }
-    // 標籤是否符合面板條件：以標籤位置換算心搏索引，取最近的心搏，套用未儲存修改後判斷。
-    async function altFilterAllows(label, tag, filters) {
-        const svg = label.closest('svg');
-        const rect = label.getBoundingClientRect();
-        const context = getRangeContext(svg, rect.left + rect.width / 2);
-        const loaded = await loadAltFilterWindow(context, filters.enabled || filters.variability?.enabled);
-        const effective = new Map(loaded.base);
-        for (const item of context.modifiedData) if (item[4]) effective.set(item[1], item[2]);
-        let index = null;
-        for (const [beat, type] of effective) {
-            if (!['N', 'S', 'A', 'V'].includes(type) || Math.abs(beat - context.index) > context.rate * 0.2) continue;
-            if (index === null || Math.abs(beat - context.index) < Math.abs(index - context.index)) index = beat;
-        }
-        // 找到的心搏需與畫面上的標籤相同（A 顯示為 S），對不上時略過，避免依錯誤的心搏判斷。
-        const normalize = type => type === 'A' ? 'S' : type;
-        if (index === null || normalize(effective.get(index)) !== normalize(label.textContent.trim())) return false;
-        return getRangeUpdates(effective, context.modifiedData, loaded.data, context, index, index, tag, filters).length > 0;
-    }
-    // 按住期間碰到的每個標籤只判斷一次；判斷完成後以一般的點擊流程修改。
-    function queueAltFilterLabel(sweep, label, block) {
-        if (sweep.seen.has(label)) return;
-        sweep.seen.add(label);
-        altFilterAllows(label, sweep.tag, sweep.filters).then(ok => {
-            if (!ok) { sweep.skipped++; return; }
-            if (isDisabledPage() || !rangeMode?.first || !label.isConnected) return;
-            const rect = label.getBoundingClientRect();
-            processCommand(sweep.tag, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, block);
-            sweep.changed++;
-        }).catch(error => {
-            sweep.failed = error?.message || (error?.status ? `資料讀取失敗（HTTP ${error.status}）` : 'Alt 篩選修改失敗');
-        }).finally(() => {
-            if (!rangeMode?.first || rangeBusy) return;
-            showRangeHint(sweep.failed ? `Alt 篩選修改失敗：${sweep.failed}`
-                : `已選第一端點 · Alt 篩選 → ${sweep.tag}：修改 ${sweep.changed} 個、略過 ${sweep.skipped} 個 · 尚未儲存`);
-        });
-    }
     // RootiCare 站內切頁不一定重載腳本；每次操作仍檢查目前路徑。
     // 路由畫面更新時也收起尚未完成的區間面板。
     let lastPagePath = window.location?.pathname;
@@ -1127,7 +1055,7 @@
             console.warn('[RootiCare 標籤位置微調] 已取消', error);
         }
     }
-    // Ctrl 拖曳的標籤列：按在標籤列上就是該列；按在心電圖波形上（包含事件清單卡片上覆蓋波形的 graphy-cover）
+    // Alt 拖曳的標籤列：按在標籤列上就是該列；按在心電圖波形上（包含事件清單卡片上覆蓋波形的 graphy-cover）
     // 則依位置找到同一區塊的標籤列，x 需落在標籤列範圍內。不在 ECG 區塊上回傳 null。
     function dragMarkerAt(event) {
         const direct = event.target?.closest?.('svg.ecgRMarker');
@@ -1157,20 +1085,20 @@
         return nearest;
     }
     document.addEventListener('pointerdown', event => {
-        // 在波形上按 Ctrl 也比照標籤列：拖曳最近的標籤，並攔下網站對波形的點擊（例如 Pause 清單切換排除類型）。
+        // 在波形上按 Alt 也比照標籤列：拖曳最近的標籤，並攔下網站對波形的點擊（例如 Pause 清單切換排除類型）。
         const marker = isDragModifier(event) ? dragMarkerAt(event) : null;
         if (event.button === 0 && isDragModifier(event) && marker && !isDisabledPage()) {
             event.preventDefault(); event.stopImmediatePropagation();
             dragClickUntil = Date.now() + 400;
         }
-        if (event.button !== 0 || !isDragModifier(event) || event.shiftKey || event.altKey || (event.metaKey && !IS_MAC)
+        if (event.button !== 0 || !isDragModifier(event) || event.shiftKey || event.ctrlKey || event.metaKey
             || isDisabledPage() || rangeMode || rangeBusy || labelDrag) return;
         // 按在標籤上就拖曳該標籤；按在標籤列空白處則吸過最近的標籤，直接移到游標位置後可繼續拖曳。
         let label = event.target.closest?.('.annoText');
         if (!label && marker) label = findNearestDraggableLabel(marker, event.clientX);
         const svg = label?.closest('svg.ecgRMarker');
         if (!svg || !label.closest(TARGET_BLOCK_SELECTOR)) return;
-        // Ctrl 點擊不送入原生循環分類，即使目前標籤不可編輯也不變更分類。
+        // Alt 點擊不送入原生循環分類，即使目前標籤不可編輯也不變更分類。
         event.preventDefault(); event.stopImmediatePropagation();
         dragClickUntil = Date.now() + 400;
         try {
@@ -1218,7 +1146,7 @@
         const drag = labelDrag;
         if (!drag || event.pointerId !== drag.pointerId) return;
         event.preventDefault(); event.stopImmediatePropagation();
-        // Ctrl 只需在開始時按住；之後放開 Ctrl 仍可繼續拖曳（方便拖曳中按數字鍵），放開滑鼠才結束。
+        // Alt 只需在開始時按住；之後放開 Alt 仍可繼續拖曳（方便拖曳中按數字鍵），放開滑鼠才結束。
         if (!(event.buttons & 1) || !drag.label.isConnected || isDisabledPage()) {
             finishLabelDrag(); return;
         }
@@ -1250,17 +1178,17 @@
     }, true);
     for (const name of ['mousedown', 'mouseup', 'click', 'dblclick']) {
         document.addEventListener(name, event => {
-            const ctrlOnMarker = isDragModifier(event) && event.button === 0 && !isDisabledPage() && dragMarkerAt(event);
+            const altOnMarker = isDragModifier(event) && event.button === 0 && !isDisabledPage() && dragMarkerAt(event);
             // 拖曳放開後只吞掉滑鼠實際產生的那一次點擊；數字鍵模擬的點擊（isTrusted 為 false）不受影響，
             // 拖完可以立刻按 1／2／3 修改。
             const afterDrag = event.isTrusted && event.button === 0 && Date.now() < dragClickUntil;
-            if (ctrlOnMarker || labelDrag || afterDrag) {
+            if (altOnMarker || labelDrag || afterDrag) {
                 event.preventDefault(); event.stopImmediatePropagation();
                 if (afterDrag && name === 'click') dragClickUntil = 0;
             }
         }, true);
     }
-    // 拖曳中：1／2／3 把這顆標籤改為 V／S／N（以實體按鍵判斷，按住 Ctrl 也可），放開滑鼠時連同新位置一起送出；Esc 取消。
+    // 拖曳中：1／2／3 把這顆標籤改為 V／S／N（以實體按鍵判斷，按住 Alt 也可），放開滑鼠時連同新位置一起送出；Esc 取消。
     const DRAG_TYPE_COLORS = { V: '#e2231a', S: '#1f6fd1', N: '#555' };
     function setLabelDragType(drag, type) {
         drag.type = type;
@@ -1278,10 +1206,10 @@
         if (digit && !event.repeat) setLabelDragType(labelDrag, { '1': 'V', '2': 'S', '3': 'N' }[digit]);
     }, true);
     document.addEventListener('pointercancel', () => finishLabelDrag(), true);
-    // Mac 的 Ctrl+點擊會開啟右鍵選單並中斷拖曳；在標籤列上攔截。
+    // 拖曳中不開啟右鍵選單。
     document.addEventListener('contextmenu', event => {
         if (isDisabledPage()) return;
-        if (labelDrag || (event.ctrlKey && dragMarkerAt(event))) {
+        if (labelDrag) {
             event.preventDefault();
         }
     }, true);
@@ -1362,27 +1290,6 @@
             cancelRange();
             rangeHint.style.display = 'none';
             return;
-        }
-        // 區間面板（篩選修改）開著時，Alt + 1／2／3 依面板條件修改碰到的標籤；面板輸入框聚焦時也可使用。
-        const altFilterDigit = /^Digit([123])$/.exec(e.code || '')?.[1];
-        if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && altFilterDigit && isAltFilterMode()) {
-            const block = getActiveBlockUnderMouse();
-            if (block) {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                if (e.repeat && heldSweep?.key === altFilterDigit) return;
-                let filters;
-                try { filters = readRangeFilters(); }
-                catch (error) { showRangeHint(error.message); return; }
-                altFilterWindows.clear(); // 每次按下重新讀取，反映剛儲存的標籤。
-                const tag = { '1': 'V', '2': 'S', '3': 'N' }[altFilterDigit];
-                heldSweep = { key: altFilterDigit, code: e.code, tag, alt: true, filters, seen: new WeakSet(),
-                    changed: 0, skipped: 0, failed: null, last: { x: currentMousePos.x, y: currentMousePos.y } };
-                const point = toLabelRowPoint(currentMousePos, block);
-                const label = getElementAtPoint(point.x, point.y);
-                if (label?.classList.contains('annoText') && label.textContent.trim() !== tag) queueAltFilterLabel(heldSweep, label, block);
-                return;
-            }
         }
         if (rangeHint.contains(e.target)) {
             if (e.key === 'Escape') { e.preventDefault(); cancelRange(); }
