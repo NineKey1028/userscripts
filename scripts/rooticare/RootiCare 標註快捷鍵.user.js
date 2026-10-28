@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.36.0
-// @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改與 W / S 心電圖縮放。
+// @version      1.39.0
+// @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -38,6 +38,8 @@
  * 【檢視】
  *   W / S   縮放（↑ / ↓）
  *   Q / E   切換時間（← / →），縮放高度保持不變；滑鼠不必停在心電圖上
+ *   A / D   以 Q / E 一半的距離切換時間（主畫面 30 秒、3 導程 10 秒、心電圖視窗 5 秒）；
+ *           選印清單開啟時仍為切換上一張／下一張選印
  *   ch1～3 旁的眼睛  顯示／隱藏導程（重新載入恢復全開）
  *   滑過標籤列或波形時，顯示紅色垂直對齊線
  *
@@ -55,8 +57,11 @@
  *                          下方為縮圖列（A／D 切換），可「取消選印」「換一個」或「加選一個」；
  *                          心電圖視窗上也有「取消選印」「換一個」（作用於目前這張）；
  *                          「Group」先儲存標籤修改再執行 Group All，完成後重新開啟清單
+ *                          已不在清單中的選印（例如改成 Couplet 等子分類後重新 Group）會自動取消並提示
  *                          快速選印與換一個會先依目前標籤（含未儲存修改）驗證是否仍符合清單類型
- *                          SVE run／SVT 超過 30 秒的心電圖改用藍色選印（區段選印）
+ *                          換掉或取消選印的心電圖（及其前後 30 秒內的）重新整理頁面前不再被選回
+ *                          Isolated S 需變動率超過 12%；前兩顆依序為 V、N 的排在最後，其他候選不足時才選
+ *                          SVE run／SVT 超過 30 秒的心電圖改用藍色選印（區段選印），橘色強制選印也會一併檢查
  *
  * Morphology 頁面不提供以上功能。
  */
@@ -82,12 +87,17 @@
     const zoomPreservingFunctions = new WeakSet();
     // 網站 selectedDataRange 的第 4 個參數控制是否重設高度；方向鍵原本即傳 false。
     // 在原控制器入口沿用此選項，不於非同步載入後覆寫使用者新調整的縮放。
-    function installZoomPersistence() {
+    // 取得網站 AF 控制器的 scope（擁有 selectedDataRange 與 adjustDisplayTime 的那一層）。
+    function getDashboardScope() {
         const host = document.querySelector('[ng-controller="RootiCareDashboardAFCtrl"]');
-        if (!host || !window.angular) return;
+        if (!host || !window.angular) return null;
         let scope;
-        try { scope = window.angular.element(host).scope?.(); } catch (_) { return; }
+        try { scope = window.angular.element(host).scope?.(); } catch (_) { return null; }
         while (scope && !Object.prototype.hasOwnProperty.call(scope, 'selectedDataRange')) scope = scope.$parent;
+        return scope || null;
+    }
+    function installZoomPersistence() {
+        const scope = getDashboardScope();
         const original = scope?.selectedDataRange;
         if (typeof original !== 'function' || zoomPreservingFunctions.has(original)) return;
         function preserveZoom(...args) {
@@ -434,6 +444,44 @@
             key: keyName, code: keyName, view: window
         };
         document.dispatchEvent(new KeyboardEvent('keydown', eventProps));
+    }
+
+    // A / D：以 Q / E 一半的距離移動心電圖時間，判斷順序與網站原生方向鍵相同。
+    // 主畫面原生一次 60 秒（3 導程模式 20 秒），心電圖視窗原生一次 10 秒；
+    // 事件清單、分頁等原生為換頁的畫面不處理。成功移動時回傳 true。
+    function halfStepECG(direction) {
+        const scope = getDashboardScope();
+        const af = scope?.af;
+        if (!af || af.loading?.ecg || !af.tmsline?.timeRange) return false;
+        const has = selector => !!document.querySelector(selector);
+        if (has('#af-pr-dialog') || has('#af-add-tag-dialog')) return false;
+        if (has('.event-tag-list') && !has('#af-ecg-dialog-v2')) return false;
+        const apply = fn => (scope.$root?.$$phase ? fn() : scope.$apply(fn));
+        if (has('#af-ecg-dialog-v2')) {
+            const dialog = af.ECGTrendDialog;
+            const chart = af.ecgChart;
+            if (af.focusBlock || !dialog || !chart || !Array.isArray(dialog.timeRange)) return false;
+            const step = 5 * direction;
+            apply(() => {
+                dialog.startTime += step;
+                chart.shiftSec = Math.min(40, Math.max(0, chart.shiftSec + step));
+                dialog.startTime = Math.min(dialog.timeRange[1] - 20, Math.max(dialog.timeRange[0], dialog.startTime));
+            });
+            return true;
+        }
+        if (has('.fixed-board') || !af.hrChart?.trendExtend) return false;
+        const chartIdx = Array.isArray(af.hrChart.hr) ? af.hrChart.hr.findIndex(item => item?.ecgSwitch) : -1;
+        const start = Number(af.ecgChart?.chartStartTms);
+        if (chartIdx < 0 || !Number.isFinite(start) || typeof scope.selectedDataRange !== 'function') return false;
+        const step = (af.record?.ecgLeadMode ? 10 : 30) * direction;
+        const range = [start + step, start + 60 + step];
+        installZoomPersistence();
+        apply(() => {
+            if (af.labelEditing) { af.labelEditing.selectedTime = [...range]; af.labelEditing.chartIdx = chartIdx; }
+            if (af.ecgAnno) { af.ecgAnno.selectedTime = [...range]; af.ecgAnno.chartIdx = chartIdx; }
+            scope.selectedDataRange(range[0], range[1], chartIdx, false);
+        });
+        return true;
     }
 
     // 計算從當前狀態切換到目標狀態需要的點擊次數
@@ -1315,7 +1363,10 @@
             }
             return;
         }
-        const movesECG = ['q', 'e', '<', '>', ',', '.', 'arrowleft', 'arrowright', 'w', 's', 'arrowup', 'arrowdown'].includes(key);
+        // A / D 以實體按鍵位置判斷（大小寫、輸入法不影響）；選印清單開啟時交給選印清單切換上一張／下一張。
+        const halfStep = !review && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && !e.isComposing
+            ? { KeyA: -1, KeyD: 1 }[e.code] : undefined;
+        const movesECG = !!halfStep || ['q', 'e', '<', '>', ',', '.', 'arrowleft', 'arrowright', 'w', 's', 'arrowup', 'arrowdown'].includes(key);
         if (rangeBusy && movesECG) {
             e.preventDefault();
             e.stopImmediatePropagation();
@@ -1328,6 +1379,11 @@
             e.stopImmediatePropagation();
             installZoomPersistence();
             triggerOriginalKey(key === 'q' ? 37 : 39, key === 'q' ? 'ArrowLeft' : 'ArrowRight');
+            return;
+        }
+        if (halfStep && halfStepECG(halfStep)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
             return;
         }
         if (rangeMode && movesECG) {
@@ -2197,7 +2253,7 @@
         const selected = new Set([...list(scope?.events), ...list(scope?.section)]
             .map(toEventTime).filter(time => time !== null));
         const events = [...new Set([...selected, ...forced])];
-        if (!pages.length || !events.length) return { groups: [], total: events.length, forced: forced.size };
+        if (!pages.length || !events.length) return { groups: [], total: events.length, forced: forced.size, missing: [] };
         const pageByTime = new Map();
         pages.forEach((page, index) => {
             for (const value of Array.isArray(page) ? page : [page]) {
@@ -2206,16 +2262,74 @@
             }
         });
         const groups = new Map();
+        // missing：有選印紀錄但已不在這個清單的心電圖（例如改成 Couplet 後重新 Group，從 Isolated 清單移走）。
+        const missing = [];
         for (const time of events) {
             const page = pageByTime.get(time);
-            if (!page) continue;
+            if (!page) { missing.push(time); continue; }
             if (!groups.has(page)) groups.set(page, { page, times: [], forced: 0 });
             const group = groups.get(page);
             group.times.push(time);
             if (forced.has(time)) group.forced++;
         }
         return { groups: [...groups.values()].sort((a, b) => a.page - b.page),
-            total: events.length, forced: forced.size, pageCount: pages.length };
+            total: events.length - missing.length, forced: [...forced].filter(time => pageByTime.has(time)).length,
+            pageCount: pages.length, missing };
+    }
+    // 已不在清單中的綠色選印：網站的 Group 不會移除原清單的選印紀錄，
+    // 這些心電圖仍會計入報告，但清單上看不到也無法取消。只回傳可用網站取消選印處理的部分。
+    // 只在拉條的頁面資料就是目前清單的完整資料時判斷，避免切換清單或載入中把別的清單當成「不在清單」。
+    function getOrphanPrints(bar, af, missing, pages) {
+        if (!missing?.length || !af?.printDialog?.selectedEvents || !window.angular) return null;
+        const key = af.eventDialog?.dscp?.printedEventType;
+        const type = af.eventDialog?.dscp?.type;
+        const selected = af.printDialog.selectedEvents[key];
+        const source = af.eventDialog?.[type];
+        if (!Array.isArray(selected) || !Array.isArray(source?.data) || !Array.isArray(pages)) return null;
+        const listTimes = source.data.flat().map(toEventTime).filter(time => time !== null);
+        const pageTimes = pages.flatMap(page => Array.isArray(page) ? page : [page]).map(toEventTime).filter(time => time !== null);
+        if (!listTimes.length || listTimes.length !== Number(source.itemsLength) || pageTimes.length !== listTimes.length) return null;
+        const inList = new Set(listTimes);
+        if (pageTimes.some(time => !inList.has(time))) return null;
+        let host;
+        try { host = window.angular.element(bar).scope(); } catch (_) { return null; }
+        while (host && typeof host.selectPrintedEvent !== 'function') host = host.$parent;
+        if (!host) return null;
+        const lost = new Set(missing.filter(time => !inList.has(time)));
+        const times = [...new Set(selected.map(toEventTime).filter(time => time !== null && lost.has(time)))].sort((a, b) => a - b);
+        return times.length ? { times, host, af, key, type, signature: `${af._measureId}|${key}|${times.join(',')}` } : null;
+    }
+    // 自動取消不在清單中的選印：同一批連續 1.5 秒都偵測到才處理，處理後以提示訊息告知，不跳確認視窗。
+    const ORPHAN_STABLE_MS = 1500;
+    const orphanState = { signature: null, since: 0, busy: false };
+    function autoClearOrphanPrints(orphans, anchor) {
+        if (!orphans || orphanState.busy || review?.grouping) {
+            if (!orphans) orphanState.signature = null;
+            return;
+        }
+        if (orphanState.signature !== orphans.signature) {
+            orphanState.signature = orphans.signature;
+            orphanState.since = Date.now();
+            setTimeout(schedulePrintBars, ORPHAN_STABLE_MS + 100);
+            return;
+        }
+        if (Date.now() - orphanState.since < ORPHAN_STABLE_MS) return;
+        orphanState.busy = true;
+        orphanState.signature = null;
+        clearOrphanPrints(orphans, anchor).finally(() => { orphanState.busy = false; schedulePrintBars(); });
+    }
+    async function clearOrphanPrints(orphans, anchor) {
+        const { times, host, af, key, type } = orphans;
+        try {
+            // 與網站點擊取消選印相同；取消前確認仍是同一個清單。
+            if (af.eventDialog?.dscp?.printedEventType !== key || af.eventDialog?.dscp?.type !== type) return;
+            host.$apply(() => { for (const time of times) host.selectPrintedEvent({ startTime: time, selectedEvent: false }); });
+            await uploadPrintSelections(af);
+            const list = times.slice(0, 3).map(time => formatQuickTime({ host }, time)).join('、') + (times.length > 3 ? ' 等' : '');
+            quickToast(anchor?.isConnected ? anchor : null, `已自動取消 ${times.length} 張已不在清單中的選印（${list}）`);
+        } catch (error) {
+            quickToast(anchor?.isConnected ? anchor : null, `取消不在清單中的選印失敗：${error?.message || error}`, true);
+        }
     }
     // 只排一列：依綠線位置（已由左到右排序）回傳每個圓點的中心 x。
     // 會重疊的圓點合併成一組，以組內綠線的平均位置為中心左右攤開；每次合併都先限制在拉條寬度內，
@@ -2275,12 +2389,15 @@
             if (!scope) continue;
             watchPrintRange(range);
             let liveForced = null;
+            let printAF = null;
             try {
                 let parent = window.angular.element(bar).scope();
                 while (parent && !parent.af) parent = parent.$parent;
-                liveForced = getLiveForcedEvents(parent?.af);
+                printAF = parent?.af || null;
+                liveForced = getLiveForcedEvents(printAF);
             } catch (_) {}
-            const { groups, total, forced, pageCount } = liveForced ? getPrintPages(scope, liveForced) : getPrintPages(scope);
+            const { groups, total, forced, pageCount, missing } = liveForced ? getPrintPages(scope, liveForced) : getPrintPages(scope);
+            autoClearOrphanPrints(getOrphanPrints(bar, printAF, missing, scope.pageData), range);
             const current = Number(scope.pageIndex);
             const barWidth = bar.getBoundingClientRect().width;
             // 拉條暫時隱藏或尚未排版時不計算，避免圓點列以錯誤的位置畫出；顯示後由 ResizeObserver 觸發重畫。
@@ -2417,6 +2534,8 @@
         psvt: { kind: 'run', beat: 'S', name: 'SVT', target: () => 6 },
     };
     const QUICK_MIN_GAP = 60; // 選印心電圖之間至少相隔（秒）
+    const QUICK_REJECT_NEAR = 30; // 淘汰過的心電圖前後這麼多秒內不再選（秒）
+    const QUICK_S_VARIABILITY = 0.12; // Isolated S 的變動率需超過此值
     const QUICK_SECTION_TYPES = ['sve', 'psvt']; // 這些清單的長事件改用藍色選印
     const QUICK_SECTION_SECONDS = 30; // 事件超過此秒數時改用藍色選印
     const QUICK_RUN_GAP = 1.2; // 連發相鄰早搏的最大間隔（秒）
@@ -2668,13 +2787,30 @@
         const anchors = beats.map((_, i) => i).filter(i => isEctopic(i) && beats[i].offset >= -1 && beats[i].offset <= 2);
         if (!anchors.length) return { ok: false, reason: `事件時間附近沒有 ${ectopic} 標籤` };
         let found = 0;
+        let variabilityReason = null;
         for (const anchor of anchors) {
             let first = anchor, last = anchor;
             while (first > 0 && isEctopic(first - 1)) first--;
             while (last < beats.length - 1 && isEctopic(last + 1)) last++;
             const length = last - first + 1;
             found = Math.max(found, length);
-            if (config.kind === 'isolated' && length === 1) return { ok: true };
+            // Isolated S：變動率需超過 12%，與「ECG 變動率自動標註器」相同算法：
+            // （前一個間隔 − 進入這顆 S 的間隔）/ 進入這顆 S 的間隔，保留正負號。
+            if (config.kind === 'isolated' && length === 1 && ectopic === 'S') {
+                const before = beats[anchor - 1], earlier = beats[anchor - 2];
+                const previousRR = before && earlier ? before.offset - earlier.offset : NaN;
+                const rr = before ? beats[anchor].offset - before.offset : NaN;
+                const rate = (previousRR - rr) / rr;
+                if (!(previousRR > 0) || !(rr > 0)) { variabilityReason = 'S 前心搏不足，無法計算變動率'; continue; }
+                if (!(rate > QUICK_S_VARIABILITY)) {
+                    variabilityReason = `變動率 ${(rate * 100).toFixed(1)}%，未超過 ${QUICK_S_VARIABILITY * 100}%`;
+                    continue;
+                }
+            }
+            // Isolated S：前兩顆依序是 V、N（V → N → S）時仍符合，但標為次要，候選不足時才選。
+            if (config.kind === 'isolated' && length === 1) {
+                return { ok: true, lowPriority: ectopic === 'S' && beats[anchor - 1]?.type === 'N' && beats[anchor - 2]?.type === 'V' };
+            }
             if (config.kind === 'average' && length === config.beats) return { ok: true };
             if (config.kind === 'run' && length >= QUICK_RUN_MIN) return { ok: true };
             if (config.kind === 'pattern' && length === 1) {
@@ -2688,6 +2824,7 @@
                 if (afterOk || beforeOk) return { ok: true };
             }
         }
+        if (variabilityReason) return { ok: false, reason: `標籤已不符合 ${config.name}（${variabilityReason}）` };
         const expected = { isolated: `單顆 ${ectopic}`, average: `${config.beats} 顆連續 ${ectopic}`,
             run: `${QUICK_RUN_MIN} 顆以上連續 ${ectopic}`, pattern: `${ectopic} 之間隔 ${(config.every || 2) - 1} 顆正常心搏` }[config.kind];
         return { ok: false, reason: `標籤已不符合 ${config.name}（需${expected}，目前 ${found} 顆連續 ${ectopic}）` };
@@ -2702,20 +2839,27 @@
         }
     }
     // 依 pick(pool, existing, need) 選出後逐張驗證，不符合的剔除再選，直到選滿或沒有候選。
+    // 驗證標為次要的（Isolated S 的 V → N → S）先保留，其他候選都用完仍不足時，才依原本選出的順序補上。
     async function pickValidated(ctx, candidates, existing, need, pick, onProgress) {
         let pool = [...candidates];
         const valid = [];
         const skipped = [];
+        const lowPriority = [];
         while (valid.length < need) {
             const picks = pick(pool, [...existing, ...valid], need - valid.length);
             if (!picks.length) break;
-            onProgress?.(valid.length + skipped.length, picks.length);
+            onProgress?.(valid.length + skipped.length + lowPriority.length, picks.length);
             const results = await runLimited(picks, 4, time => validateQuickTime(ctx, time));
-            picks.forEach((time, i) => (results[i].ok ? valid.push(time) : skipped.push(time)));
-            const used = new Set([...valid, ...skipped]);
+            picks.forEach((time, i) => (!results[i].ok ? skipped : results[i].lowPriority ? lowPriority : valid).push(time));
+            const used = new Set([...valid, ...skipped, ...lowPriority]);
             pool = pool.filter(candidate => !used.has(candidate.time));
         }
-        return { valid, skipped };
+        let usedLow = 0;
+        for (const time of lowPriority) {
+            if (valid.length >= need) break;
+            if ([...existing, ...valid].every(other => Math.abs(other - time) >= QUICK_MIN_GAP)) { valid.push(time); usedLow++; }
+        }
+        return { valid, skipped, lowPriority: usedLow };
     }
 
     // 網站的事件統計（eventTypeStat）：[秒數, 最快 HR, 平均 HR, 最慢 HR, 心搏數]；事件清單卡片顯示的 beats 即第 5 項。
@@ -2808,8 +2952,10 @@
         const times = getQuickTimes(ctx);
         const printed = new Set(getQuickPrinted(ctx, times).all);
         const excluded = getQuickExcluded(ctx);
-        const rejected = getQuickRejected(ctx);
-        const pool = times.filter(time => !printed.has(time) && !excluded.has(time) && !rejected.has(time));
+        // 淘汰過的（換掉或取消選印的）不再選回，與它相隔 30 秒內的也不選（同一段心律，畫面幾乎相同）。
+        const rejected = [...getQuickRejected(ctx)];
+        const nearRejected = time => rejected.some(other => Math.abs(other - time) <= QUICK_REJECT_NEAR);
+        const pool = times.filter(time => !printed.has(time) && !excluded.has(time) && !nearRejected(time));
         return { times, candidates: await computeQuickScores(ctx, pool, onProgress) };
     }
 
@@ -2865,10 +3011,18 @@
         schedulePrintBars();
         try {
             const times = getQuickTimes(ctx);
-            const existing = getQuickPrinted(ctx, times).all;
+            const printed = getQuickPrinted(ctx, times);
+            const existing = printed.all;
             const target = ctx.config.target(times.length);
+            // 橘色強制選印同樣檢查：SVE run／SVT 超過 30 秒、還不是藍色選印的，改為藍色選印（強制選印紀錄保留）。
+            const forcedLong = ctx.sectionHost ? [...printed.forced]
+                .filter(time => !printed.section.has(time) && needsSectionPrint(ctx.af, ctx.type, time)) : [];
+            const forcedSectioned = forcedLong.filter(time => setQuickPrint(ctx, time, true)).length;
+            const forcedText = forcedSectioned
+                ? `強制選印 ${forcedSectioned} 張超過 ${QUICK_SECTION_SECONDS} 秒，已改為藍色選印；` : '';
             if (existing.length >= target) {
-                quickToast(button, `${ctx.config.name} 已選印 ${existing.length} 張，已達 ${target} 張`);
+                quickToast(button, forcedText + `${ctx.config.name} 已選印 ${existing.length} 張，已達 ${target} 張`);
+                if (forcedSectioned) refreshPrintReview();
                 return;
             }
             const { candidates } = await getQuickCandidates(ctx, (done, total) => {
@@ -2876,22 +3030,26 @@
                 schedulePrintBars();
             });
             // 計算期間清單被關閉或切換時放棄。
-            if (getQuickContext(button)?.type !== ctx.type) return;
+            if (getQuickContext(button)?.type !== ctx.type) {
+                if (forcedSectioned) quickToast(null, forcedText.replace(/；$/, ''));
+                return;
+            }
             const now = getQuickPrinted(ctx, times).all;
             const range = getQuickRange(ctx, times);
             // 選出後逐張讀取心電圖、套用未儲存的標籤修改，驗證仍符合此清單類型；不符合的換下一張。
-            const { valid: chosen, skipped } = await pickValidated(ctx, candidates, now, target - now.length,
+            const { valid: chosen, skipped, lowPriority } = await pickValidated(ctx, candidates, now, target - now.length,
                 (pool, existing, need) => pickQuickPrints({ candidates: pool, existing, target, ...range, need,
                     spread: ctx.config.spread !== false }),
                 done => { quickState.progress = `驗證 ${done}`; schedulePrintBars(); });
             if (getQuickContext(button)?.type !== ctx.type) return;
             const sectioned = chosen.filter(time => setQuickPrint(ctx, time, true)).length;
             const total = now.length + chosen.length;
-            const skippedText = skipped.length ? `（略過 ${skipped.length} 張標籤已不符合的）` : '';
+            const skippedText = (skipped.length ? `（略過 ${skipped.length} 張標籤已不符合的）` : '')
+                + (lowPriority ? `（候選不足，其中 ${lowPriority} 張前兩顆為 V、N）` : '');
             const sectionText = sectioned ? `（其中 ${sectioned} 張超過 ${QUICK_SECTION_SECONDS} 秒，使用藍色選印）` : '';
-            quickToast(button, chosen.length
+            quickToast(button, forcedText + (chosen.length
                 ? `已快速選印 ${chosen.length} 張，${ctx.config.name} 共 ${total}／${target} 張` + (total < target ? '（符合條件的心電圖不足）' : '') + sectionText + skippedText
-                : `沒有符合條件的心電圖可選印（需相隔 1 分鐘以上）` + skippedText, !chosen.length);
+                : `沒有符合條件的心電圖可選印（需相隔 1 分鐘以上）` + skippedText), !chosen.length && !forcedSectioned);
             refreshPrintReview();
         } catch (error) {
             quickToast(button, `快速選印失敗：${error?.message || error}`, true);
@@ -3364,6 +3522,7 @@
         const anchor = review.cards.get(neighbor ?? time) || review.bar;
         try {
             setQuickPrint(review.ctx, time, false);
+            getQuickRejected(review.ctx).add(time); // 取消的也算淘汰，之後快速選印、換一個、加選不再選回
             quickToast(button?.isConnected ? button : anchor, `已取消選印 ${formatQuickTime(review.ctx, time)}`);
         } catch (error) {
             quickToast(button?.isConnected ? button : anchor, `取消選印失敗：${error?.message || error}`, true);
@@ -3384,13 +3543,13 @@
             const existing = getQuickPrinted(ctx, times).all.filter(other => other !== time);
             const range = getQuickRange(ctx, times);
             button.textContent = '驗證中…';
-            const { valid: [replacement = null], skipped } = await pickValidated(ctx, candidates, existing, 1,
+            const { valid: [replacement = null], skipped, lowPriority } = await pickValidated(ctx, candidates, existing, 1,
                 (pool, others) => [pickQuickReplacement({ candidates: pool, existing: others, removed: time,
                     target: ctx.config.target(times.length), ...range, spread: ctx.config.spread !== false })].filter(value => value !== null));
             if (!review || review.ctx !== ctx) return;
             if (replacement === null) {
                 getQuickRejected(ctx).delete(time);
-                quickToast(button, '沒有其他符合條件的心電圖（需與其他選印相隔 1 分鐘以上）'
+                quickToast(button, '沒有其他符合條件的心電圖（需與其他選印相隔 1 分鐘以上，且不選淘汰過的及其前後 30 秒）'
                     + (skipped.length ? `；${skipped.length} 張標籤已不符合` : ''), true);
                 return;
             }
@@ -3400,7 +3559,8 @@
             refreshPrintReview();
             const added = review?.cards.get(replacement);
             added?.classList.add('is-new');
-            quickToast(added?.querySelector('.is-swap') || review?.bar, `已換成 ${formatQuickTime(ctx, replacement)}` + (replacedSection ? '（超過 30 秒，藍色選印）' : ''));
+            quickToast(added?.querySelector('.is-swap') || review?.bar, `已換成 ${formatQuickTime(ctx, replacement)}` + (replacedSection ? '（超過 30 秒，藍色選印）' : '')
+                + (lowPriority ? '（沒有其他候選，使用前兩顆為 V、N 的 S）' : ''));
             showReviewTime(replacement);
         } catch (error) {
             quickToast(button, `換一個失敗：${error?.message || error}`, true);
