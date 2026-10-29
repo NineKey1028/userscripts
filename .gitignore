@@ -8,3 +8,6 @@ tests/
 *-test.cjs
 *.test.js
 *測試版*
+
+# Claude Code 專案說明只留在本機
+CLAUDE.md
