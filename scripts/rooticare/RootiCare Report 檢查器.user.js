@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.23
+// @version      2.24
 // @description  檢查 Longest R-R 間隔、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -544,8 +544,10 @@
         target = longestInECG.ecg;
         targetInterval = longestInECG.milliseconds / 1000;
         reportInterval = longestReported;
-        // 從異常 ECG 標題擷取日期時間；沒有符合格式時停用複製按鈕，仍保留跳轉功能。
-        const timestampMatch = longestInECG.title.match(/\b(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2})\b/);
+        // 從異常 ECG 標題擷取日期時間，支援 MM/DD/YYYY（或 DD/MM/YYYY）與 YYYY/MM/DD 兩種格式；
+        // 沒有符合格式時停用複製按鈕，仍保留跳轉功能。
+        const timestampMatch = longestInECG.title.match(
+            /\b((?:\d{2}\/\d{2}\/\d{4}|\d{4}\/\d{2}\/\d{2})\s+\d{2}:\d{2}:\d{2})\b/);
         targetTimestamp = timestampMatch?.[1] || '';
         indicator = ensureIndicator(CONFIG.indicatorId, true);
         indicator.querySelector('.message').textContent =
