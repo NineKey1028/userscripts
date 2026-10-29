@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.40.2
+// @version      1.41.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -37,6 +37,7 @@
  *            結尾按 1／2 把判為早搏的改為 V／S，按 3 把未判為早搏的改為 N；
  *            以近期正常心律為基準，早搏後的代償間歇與恢復期不會讓後面的心搏被連帶判為早搏
  *            Isolated、Couplet／Triplet、Bigeminy／Trigeminy、SVE run 皆適用；區間前後整段都是早搏時改用 N→N 或週期平均推算基準
+ *   面板開啟時按 1 / 2 / 3（不按 Shift）切換分頁：篩選修改／填補整理／早搏判讀。
  *   分頁選擇保留到重新整理頁面為止。
  *
  * 【檢視】
@@ -642,7 +643,7 @@
         rangeHint.querySelector('[data-role="ectopic"]').style.display = open && rangeTool === 'ectopic' ? 'block' : 'none';
         rangeHint.querySelector('[data-role="tabs"]').style.display = open ? 'flex' : 'none';
         const help = rangeHint.querySelector('[data-role="help"]');
-        help.textContent = RANGE_HELP[rangeTool];
+        help.textContent = RANGE_HELP[rangeTool] + '。按 1／2／3 切換分頁';
         help.style.display = open ? 'block' : 'none';
     }
     function updateRangeMinimized() {
@@ -662,9 +663,9 @@
                 <button type="button" data-role="minimize" aria-label="最小化" title="最小化" aria-expanded="true">−</button>
                 <button type="button" data-role="cancel" aria-label="取消區間選取" title="取消 · Esc">×</button></div>
             <div data-role="tabs" role="tablist">
-                <button type="button" role="tab" data-tool="filter">篩選修改</button>
-                <button type="button" role="tab" data-tool="fill">填補整理</button>
-                <button type="button" role="tab" data-tool="ectopic">早搏判讀</button></div>
+                <button type="button" role="tab" data-tool="filter" title="快捷鍵 1">篩選修改</button>
+                <button type="button" role="tab" data-tool="fill" title="快捷鍵 2">填補整理</button>
+                <button type="button" role="tab" data-tool="ectopic" title="快捷鍵 3">早搏判讀</button></div>
             <div data-role="ectopic">依 RR 判斷提早出現的心搏（變動率超過門檻）；早搏後的代償間歇與恢復期不當作參考，
                 避免恢復正常的心搏被連帶判為早搏。
                 <div class="rh-ectopic-options">
@@ -1524,6 +1525,18 @@
             return;
         }
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
+
+        // 區間面板開啟（已選第一端點）時，1／2／3 不標註，改為切換分頁；Shift+1/2/3 仍用來選第二端點。
+        const tabDigit = /^(?:Digit|Numpad)([123])$/.exec(e.code || '')?.[1];
+        if (tabDigit && rangeMode?.first && !rangeBusy && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (!e.repeat) {
+                rangeTool = ['filter', 'fill', 'ectopic'][tabDigit - 1];
+                updateRangeTool();
+            }
+            return;
+        }
 
         const key = e.key.toLowerCase();
         const isAltPressed = e.altKey;
