@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.39.0
-// @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、W / S 心電圖縮放與 A / D 半步切換時間。
+// @version      1.40.2
+// @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -33,6 +33,10 @@
  *   篩選修改  依 BPM、變動率、原標籤、type（排除／限於 type 1,155）篩選後改為 V / S / N
  *   填補整理  在頭尾兩顆標籤外側各按一次，依開頭 RR 平均補滿中間心搏
  *            （頭尾不改；多刪少補，保留的維持原類型）
+ *   早搏判讀  依 RR 變動率（預設超過 12%）判斷提早出現的心搏；只修改勾選的原標籤（預設 N、S）：
+ *            結尾按 1／2 把判為早搏的改為 V／S，按 3 把未判為早搏的改為 N；
+ *            以近期正常心律為基準，早搏後的代償間歇與恢復期不會讓後面的心搏被連帶判為早搏
+ *            Isolated、Couplet／Triplet、Bigeminy／Trigeminy、SVE run 皆適用；區間前後整段都是早搏時改用 N→N 或週期平均推算基準
  *   分頁選擇保留到重新整理頁面為止。
  *
  * 【檢視】
@@ -552,6 +556,8 @@
 
     let rangeMode = null;
     let rangeBusy = false;
+    // 區間修改完成後顯示的結果提示（如「已修改 N 個標籤」）；此時 Esc 交還給網頁本身處理。
+    let rangeResultShown = false;
     const rangeHint = document.createElement('div');
     rangeHint.id = 'rooticare-range-hotkeys';
     rangeHint.style.display = 'none';
@@ -587,13 +593,24 @@
         #rooticare-range-hotkeys [data-role=tabs] { margin-top:7px;display:flex;gap:2px;border-bottom:1px solid #dce3d6; }
         #rooticare-range-hotkeys [data-role=tabs] button { width:auto;height:24px;padding:0 10px;border-radius:5px 5px 0 0;
             margin-bottom:-1px;border:1px solid transparent;font:600 12px/22px Arial,"PingFang TC","Microsoft JhengHei",sans-serif;color:#889180; }
-        #rooticare-range-hotkeys [data-role=tabs] button[aria-selected=true] { border-color:#dce3d6;border-bottom-color:#fff;
-            background:#fff;color:#4f6b1a; }
+        #rooticare-range-hotkeys [data-role=tabs] button[aria-selected=true] { border-color:#dce3d6;border-bottom-color:var(--rh-bg);
+            background:var(--rh-bg);color:#4f6b1a; }
+        /* 每個分頁各用一種淺色底：篩選修改淺綠、填補整理淺藍、早搏判讀淺杏 */
+        #rooticare-range-hotkeys { --rh-bg:#fff; background:var(--rh-bg); transition:background-color .15s; }
+        #rooticare-range-hotkeys[data-tool=filter] { --rh-bg:#f3f8ec; }
+        #rooticare-range-hotkeys[data-tool=fill] { --rh-bg:#edf4fb; }
+        #rooticare-range-hotkeys[data-tool=ectopic] { --rh-bg:#fcf3ea; }
+        #rooticare-range-hotkeys [data-tool=filter]:not([aria-selected=true]) { background:#f3f8ec99; }
+        #rooticare-range-hotkeys [data-tool=fill]:not([aria-selected=true]) { background:#edf4fb99; }
+        #rooticare-range-hotkeys [data-tool=ectopic]:not([aria-selected=true]) { background:#fcf3ea99; }
         #rooticare-range-hotkeys [data-role=fill] { margin-top:7px;color:#526047; }
+        #rooticare-range-hotkeys [data-role=ectopic] { margin-top:7px;color:#526047; }
+        #rooticare-range-hotkeys .rh-ectopic-options { margin-top:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:#374333; }
         #rooticare-range-hotkeys.rh-minimized { padding:5px 9px; }
         #rooticare-range-hotkeys.rh-minimized [data-role=filters],
         #rooticare-range-hotkeys.rh-minimized [data-role=tabs],
         #rooticare-range-hotkeys.rh-minimized [data-role=fill],
+        #rooticare-range-hotkeys.rh-minimized [data-role=ectopic],
         #rooticare-range-hotkeys.rh-minimized [data-role=help] { display:none !important; }
         #rooticare-range-hotkeys.rh-minimized [data-role=message] {
             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal;
@@ -604,11 +621,12 @@
     let rangeMessage;
     let rangeControls;
     let rangeMinimized = false;
-    // 區間分頁：filter 篩選修改、fill 填補整理。只存在本次頁面執行期，重新整理後回到篩選修改。
+    // 區間分頁：filter 篩選修改、fill 填補整理、ectopic 早搏判讀。只存在本次頁面執行期，重新整理後回到篩選修改。
     let rangeTool = 'filter';
     const RANGE_HELP = {
         filter: '在另一端按 Shift + 1→V／2→S／3→N，即套用篩選修改',
-        fill: '在結尾之後按 Shift + 1→V／2→S／3→N，補上的標籤使用該類型'
+        fill: '在結尾之後按 Shift + 1→V／2→S／3→N，補上的標籤使用該類型',
+        ectopic: '在另一端按 Shift + 1→V／2→S：判為早搏的改為該類型；Shift + 3→N：未判為早搏的改為 N'
     };
     function updateRangeTool() {
         if (!rangeControls) return;
@@ -616,8 +634,12 @@
             tab.setAttribute('aria-selected', String(tab.dataset.tool === rangeTool));
         }
         const open = rangeMode?.first && !rangeBusy;
+        // 分頁開啟時才套用該分頁顏色；結果提示維持白底。
+        if (open) rangeHint.dataset.tool = rangeTool;
+        else delete rangeHint.dataset.tool;
         rangeControls.style.display = open && rangeTool === 'filter' ? 'flex' : 'none';
         rangeHint.querySelector('[data-role="fill"]').style.display = open && rangeTool === 'fill' ? 'block' : 'none';
+        rangeHint.querySelector('[data-role="ectopic"]').style.display = open && rangeTool === 'ectopic' ? 'block' : 'none';
         rangeHint.querySelector('[data-role="tabs"]').style.display = open ? 'flex' : 'none';
         const help = rangeHint.querySelector('[data-role="help"]');
         help.textContent = RANGE_HELP[rangeTool];
@@ -641,7 +663,18 @@
                 <button type="button" data-role="cancel" aria-label="取消區間選取" title="取消 · Esc">×</button></div>
             <div data-role="tabs" role="tablist">
                 <button type="button" role="tab" data-tool="filter">篩選修改</button>
-                <button type="button" role="tab" data-tool="fill">填補整理</button></div>
+                <button type="button" role="tab" data-tool="fill">填補整理</button>
+                <button type="button" role="tab" data-tool="ectopic">早搏判讀</button></div>
+            <div data-role="ectopic">依 RR 判斷提早出現的心搏（變動率超過門檻）；早搏後的代償間歇與恢復期不當作參考，
+                避免恢復正常的心搏被連帶判為早搏。
+                <div class="rh-ectopic-options">
+                <span class="rh-group" title="只修改勾選的原標籤"><span>原標籤</span>
+                <label><input type="checkbox" data-ectopic-source="N" checked> N</label>
+                <label><input type="checkbox" data-ectopic-source="S" checked> S</label>
+                <label><input type="checkbox" data-ectopic-source="V"> V</label></span>
+                <span class="rh-group" title="（參考 RR − 目前 RR）÷目前 RR 超過此值判為早搏"><span>變動率 &gt;</span>
+                <input type="number" data-role="ectopic-threshold" aria-label="早搏變動率門檻百分比" min="0.1" step="0.1" value="12"><span>%</span></span>
+                </div></div>
             <div data-role="fill">以區間內第一顆與最後一顆標籤為錨點（兩顆不修改），依開頭那顆的 RR 平均補滿中間心搏；
                 中間既有標籤靠近預期位置的保留原類型，多的刪除、缺的補上。</div>
             <div data-role="filters">
@@ -737,6 +770,7 @@
     function showRangeHint(text) {
         if (isDisabledPage()) { rangeHint.style.display = 'none'; return; }
         ensureRangeControls();
+        rangeResultShown = false;
         rangeMessage.textContent = text;
         rangeMessage.title = text;
         updateRangeTool();
@@ -926,6 +960,134 @@
         });
         return { added: plan.add.length, removed: plan.remove.length, targetRR: plan.targetRR,
             maxVariability: plan.maxVariability };
+    }
+    // ── 早搏判讀：依 RR 判斷區間內每顆心搏是否提早出現（早搏），再依結尾按鍵修改勾選的原標籤。
+    // 變動率與 Isolated S 規則相同：（參考 RR − 目前 RR）/ 目前 RR，超過門檻（預設 12%）即為早搏。
+    // 早搏後常有代償間歇（長 RR），之後可能再慢一拍才恢復；若拿這些長 RR 當參考，恢復正常的心搏
+    // 也會被判為早搏並一路連鎖下去。因此參考 RR 另以「正常心律基準」限制：
+    //   基準 = 最近 8 個乾淨 RR 的中位數；早搏本身、早搏後的間歇與再下一個 RR 都不算乾淨。
+    //   前一個 RR 乾淨時，參考 = min(前一個 RR, 基準)：必須同時比前一拍與正常心律提早。
+    //   前一顆是早搏（連發）或前一個 RR 落在早搏後的恢復期時，只與基準比較。
+    const ECTOPIC_BASELINE_COUNT = 8;
+    const ECTOPIC_BASELINE_LONG = 1.5; // 比基準長 1.5 倍以上的 RR（漏拍、雜訊）不納入基準
+    const ectopicMedian = values => {
+        const sorted = [...values].sort((a, b) => a - b);
+        const mid = sorted.length >> 1;
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    // 備用基準：區間前後已是成串的 Bigeminy／Trigeminy 等（找不到乾淨 RR）時使用，依現有標籤推算正常 RR：
+    //   1. 前後皆為 N 的 RR（Trigeminy 的 N→N）；
+    //   2. 沒有時，用「N → 早搏… → N」整個週期平均到每一拍（Bigeminy：早搏 RR 加上代償間歇約為兩個正常 RR）。
+    // 兩者都沒有（例如整段都是 SVT）時回傳 null，不判讀，避免把真正的早搏改掉。
+    function ectopicFallbackBaseline(beats) {
+        const isEctopic = type => type === 'V' || type === 'S';
+        const nn = [];
+        for (let i = 1; i < beats.length; i++) {
+            if (!isEctopic(beats[i][1]) && !isEctopic(beats[i - 1][1])) nn.push(beats[i][0] - beats[i - 1][0]);
+        }
+        if (nn.length >= 2) return ectopicMedian(nn);
+        const cycles = [];
+        let lastNormal = -1;
+        for (let i = 0; i < beats.length; i++) {
+            if (isEctopic(beats[i][1])) continue;
+            if (lastNormal >= 0 && i - lastNormal >= 2) cycles.push((beats[i][0] - beats[lastNormal][0]) / (i - lastNormal));
+            lastNormal = i;
+        }
+        return cycles.length ? ectopicMedian(cycles) : null;
+    }
+    // trace（測試頁用）：傳入陣列時，逐顆記錄判讀時使用的基準、參考 RR 與變動率。
+    function planEctopic(beats, start, end, sources, tag, threshold, trace = null) {
+        const ectopic = [];
+        const clean = []; // clean[i]：RR_i（第 i-1 顆到第 i 顆）可作為正常心律參考
+        const baselineRR = [];
+        const changes = new Map();
+        let premature = 0, unknown = 0;
+        const median = ectopicMedian;
+        let fallback; // 需要時才計算
+        for (let i = 0; i < beats.length; i++) {
+            const [index, type] = beats[i];
+            const rr = i > 0 ? index - beats[i - 1][0] : NaN;
+            let baseline = baselineRR.length ? median(baselineRR.slice(-ECTOPIC_BASELINE_COUNT)) : null;
+            if (baseline === null && index >= start) {
+                if (fallback === undefined) fallback = ectopicFallbackBaseline(beats);
+                baseline = fallback;
+            }
+            const judged = index >= start && index <= end && sources.includes(type);
+            let isEctopic = type === 'V' || type === 'S';
+            let reference = null, rate = null;
+            if (judged) {
+                if (rr > 0) {
+                    const previousClean = i >= 2 && clean[i - 1] && !ectopic[i - 1];
+                    const previousRR = i >= 2 ? beats[i - 1][0] - beats[i - 2][0] : NaN;
+                    if (previousClean && previousRR > 0) reference = baseline === null ? previousRR : Math.min(previousRR, baseline);
+                    else reference = baseline;
+                }
+                if (reference === null) {
+                    unknown++; // 沒有可信的參考 RR：不修改，也不改變後續判斷用的類型
+                } else {
+                    rate = (reference - rr) / rr;
+                    isEctopic = rate > threshold;
+                    if (isEctopic) premature++;
+                    const target = tag === 'N' ? (isEctopic ? null : 'N') : (isEctopic ? tag : null);
+                    if (target && target !== type) changes.set(index, target);
+                }
+            }
+            ectopic[i] = isEctopic;
+            clean[i] = i > 0 && rr > 0 && !isEctopic && !ectopic[i - 1] && !(i >= 2 && ectopic[i - 2])
+                && (baseline === null || rr < baseline * ECTOPIC_BASELINE_LONG);
+            if (clean[i]) baselineRR.push(rr);
+            trace?.push({ baseline, reference, rate, judged, ectopic: isEctopic, clean: clean[i] });
+        }
+        return { changes, premature, unknown };
+    }
+    function readEctopicOptions() {
+        const sources = [...rangeHint.querySelectorAll('[data-ectopic-source]:checked')].map(el => el.dataset.ectopicSource);
+        if (!sources.length) throw new Error('請至少勾選一種要修改的原標籤');
+        const input = rangeHint.querySelector('[data-role="ectopic-threshold"]');
+        const threshold = Number(input.value) / 100;
+        if (!input.value.trim() || !Number.isFinite(threshold) || threshold <= 0) throw new Error('請輸入大於 0 的變動率門檻');
+        return { sources, threshold };
+    }
+    async function applyEctopicRange(first, last, tag, options) {
+        if (first.af !== last.af || first.record !== last.record || first.modifiedData !== last.modifiedData)
+            throw new Error('兩點必須屬於同一份報告');
+        if (first.rate !== last.rate) throw new Error('兩個視窗取樣率不同，請重新選取');
+        const start = Math.min(first.index, last.index);
+        const end = Math.max(first.index, last.index);
+        const manager = window.angular.element(document.body).injector().get('WppManager');
+        const af = first.af;
+        const response = await manager.Af.getFilteredECGDataByIndexRange(
+            af._vendorId, af._idNumber, af._measureId, start, end,
+            first.startTime, af.record.ecgLeadMode, first.scope.channelSwitch || 1);
+        const data = response?.plain ? response.plain() : response;
+        if (!data?.anno || typeof data.anno !== 'object') throw new Error('區間標籤讀取失敗');
+        if (data.sampleRate && Number(data.sampleRate) !== first.rate) throw new Error('區間取樣率不一致');
+        const pending = first.modifiedData;
+        const effective = new Map(Object.entries(data.anno).map(([index, type]) => [Number(index), type]));
+        // 開頭前多讀幾顆心搏，建立正常心律基準。
+        const firstIndex = [...effective.keys()].reduce((min, index) =>
+            Number.isFinite(index) && index >= start ? Math.min(min, index) : min, Infinity);
+        if (Number.isFinite(firstIndex)) await addPrecedingBeats(manager, af, effective, pending, firstIndex, ECTOPIC_BASELINE_COUNT + 2);
+        if (isDisabledPage() || rangeMode?.cancelled || !first.parent || first.parent.$$destroyed ||
+            first.parent.af !== af || first.modifiedData !== af.ecgAnno.modifiedData)
+            throw new Error('報告已切換，取消區間修改');
+        for (const item of pending) if (item[4] && item[1] <= end) effective.set(item[1], item[2]);
+        const beats = [...effective].filter(([index, type]) => Number.isFinite(index) && index <= end && ['N', 'S', 'A', 'V'].includes(type))
+            .map(([index, type]) => [index, type === 'A' ? 'S' : type]).sort((a, b) => a[0] - b[0]);
+        const plan = planEctopic(beats, start, end, options.sources, tag, options.threshold);
+        const updates = [...plan.changes].map(([index, type]) => {
+            const existing = pending.find(item => item[4] && item[1] === index);
+            const original = existing ? existing[3] : data.anno[index] || type;
+            return [first.startTime + Math.floor((index - first.viewStart) / first.rate), index, type, original, 1];
+        });
+        first.parent.$apply(() => {
+            const indices = new Set(updates.map(item => item[1]));
+            for (let i = pending.length - 1; i >= 0; i--) {
+                if (pending[i][4] && indices.has(pending[i][1])) pending.splice(i, 1);
+            }
+            pending.push(...updates);
+        });
+        return { changed: updates.length, premature: plan.premature, unknown: plan.unknown };
     }
     // 核對兩端點屬於同一報告、同一修改陣列及相同取樣率，再讀取區間原始標籤。
     // 有間隔條件時額外取得前一至兩個有效心搏；套用前再次核對報告，最後於 Angular $apply 更新未儲存資料。
@@ -1280,6 +1442,21 @@
                 return;
             }
             const mode = rangeMode;
+            if (rangeTool === 'ectopic') {
+                let options;
+                try { options = readEctopicOptions(); }
+                catch (error) { showRangeHint(error.message); return; }
+                mode.tag = tag;
+                rangeBusy = true;
+                showRangeHint(`正在判讀早搏 → ${tag}…`);
+                const result = await applyEctopicRange(mode.first, context, tag, options);
+                rangeMode = null;
+                const notes = [`判為早搏 ${result.premature} 顆`];
+                if (result.unknown) notes.push(`${result.unknown} 顆缺少參考 RR，未判讀`);
+                showRangeHint((result.changed ? `已修改 ${result.changed} 個標籤 → ${tag}` : '沒有需要變更的標籤')
+                    + ` · ${notes.join(' · ')}` + (result.changed ? ' · 尚未儲存' : ''));
+                return;
+            }
             if (rangeTool === 'fill') {
                 mode.tag = tag;
                 rangeBusy = true;
@@ -1310,6 +1487,7 @@
         } finally {
             if (rangeBusy) {
                 rangeBusy = false;
+                if (!rangeMode) rangeResultShown = true;
                 setTimeout(() => { if (!rangeMode && !rangeBusy) rangeHint.style.display = 'none'; }, failed ? 15000 : 3500);
             }
         }
@@ -1332,6 +1510,8 @@
         }
         if (isDisabledPage()) { cancelRange(); rangeHint.style.display = 'none'; return; }
         // 提示可能沒有建立區間（例如無效端點）；Esc 也須能在輸入欄聚焦時收起。
+        // 結果提示顯示中不攔截 Esc，讓網頁原本的 Esc 功能照常運作，提示則等計時自動收起。
+        if (e.key === 'Escape' && !rangeMode && rangeResultShown && !rangeHint.contains(e.target)) return;
         if (e.key === 'Escape' && (rangeMode || rangeHint.style.display !== 'none')) {
             e.preventDefault();
             e.stopImmediatePropagation();

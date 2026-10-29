@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.40.1
+// @version      1.40.2
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -556,6 +556,8 @@
 
     let rangeMode = null;
     let rangeBusy = false;
+    // 區間修改完成後顯示的結果提示（如「已修改 N 個標籤」）；此時 Esc 交還給網頁本身處理。
+    let rangeResultShown = false;
     const rangeHint = document.createElement('div');
     rangeHint.id = 'rooticare-range-hotkeys';
     rangeHint.style.display = 'none';
@@ -591,8 +593,16 @@
         #rooticare-range-hotkeys [data-role=tabs] { margin-top:7px;display:flex;gap:2px;border-bottom:1px solid #dce3d6; }
         #rooticare-range-hotkeys [data-role=tabs] button { width:auto;height:24px;padding:0 10px;border-radius:5px 5px 0 0;
             margin-bottom:-1px;border:1px solid transparent;font:600 12px/22px Arial,"PingFang TC","Microsoft JhengHei",sans-serif;color:#889180; }
-        #rooticare-range-hotkeys [data-role=tabs] button[aria-selected=true] { border-color:#dce3d6;border-bottom-color:#fff;
-            background:#fff;color:#4f6b1a; }
+        #rooticare-range-hotkeys [data-role=tabs] button[aria-selected=true] { border-color:#dce3d6;border-bottom-color:var(--rh-bg);
+            background:var(--rh-bg);color:#4f6b1a; }
+        /* 每個分頁各用一種淺色底：篩選修改淺綠、填補整理淺藍、早搏判讀淺杏 */
+        #rooticare-range-hotkeys { --rh-bg:#fff; background:var(--rh-bg); transition:background-color .15s; }
+        #rooticare-range-hotkeys[data-tool=filter] { --rh-bg:#f3f8ec; }
+        #rooticare-range-hotkeys[data-tool=fill] { --rh-bg:#edf4fb; }
+        #rooticare-range-hotkeys[data-tool=ectopic] { --rh-bg:#fcf3ea; }
+        #rooticare-range-hotkeys [data-tool=filter]:not([aria-selected=true]) { background:#f3f8ec99; }
+        #rooticare-range-hotkeys [data-tool=fill]:not([aria-selected=true]) { background:#edf4fb99; }
+        #rooticare-range-hotkeys [data-tool=ectopic]:not([aria-selected=true]) { background:#fcf3ea99; }
         #rooticare-range-hotkeys [data-role=fill] { margin-top:7px;color:#526047; }
         #rooticare-range-hotkeys [data-role=ectopic] { margin-top:7px;color:#526047; }
         #rooticare-range-hotkeys .rh-ectopic-options { margin-top:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:#374333; }
@@ -624,6 +634,9 @@
             tab.setAttribute('aria-selected', String(tab.dataset.tool === rangeTool));
         }
         const open = rangeMode?.first && !rangeBusy;
+        // 分頁開啟時才套用該分頁顏色；結果提示維持白底。
+        if (open) rangeHint.dataset.tool = rangeTool;
+        else delete rangeHint.dataset.tool;
         rangeControls.style.display = open && rangeTool === 'filter' ? 'flex' : 'none';
         rangeHint.querySelector('[data-role="fill"]').style.display = open && rangeTool === 'fill' ? 'block' : 'none';
         rangeHint.querySelector('[data-role="ectopic"]').style.display = open && rangeTool === 'ectopic' ? 'block' : 'none';
@@ -757,6 +770,7 @@
     function showRangeHint(text) {
         if (isDisabledPage()) { rangeHint.style.display = 'none'; return; }
         ensureRangeControls();
+        rangeResultShown = false;
         rangeMessage.textContent = text;
         rangeMessage.title = text;
         updateRangeTool();
@@ -1473,6 +1487,7 @@
         } finally {
             if (rangeBusy) {
                 rangeBusy = false;
+                if (!rangeMode) rangeResultShown = true;
                 setTimeout(() => { if (!rangeMode && !rangeBusy) rangeHint.style.display = 'none'; }, failed ? 15000 : 3500);
             }
         }
@@ -1495,6 +1510,8 @@
         }
         if (isDisabledPage()) { cancelRange(); rangeHint.style.display = 'none'; return; }
         // 提示可能沒有建立區間（例如無效端點）；Esc 也須能在輸入欄聚焦時收起。
+        // 結果提示顯示中不攔截 Esc，讓網頁原本的 Esc 功能照常運作，提示則等計時自動收起。
+        if (e.key === 'Escape' && !rangeMode && rangeResultShown && !rangeHint.contains(e.target)) return;
         if (e.key === 'Escape' && (rangeMode || rangeHint.style.display !== 'none')) {
             e.preventDefault();
             e.stopImmediatePropagation();
