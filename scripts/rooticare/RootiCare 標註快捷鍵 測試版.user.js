@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.41.0
+// @version      1.42.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -54,6 +54,8 @@
  *                          「排除高於 Max HR」（預設關）：開啟後移除平均 HR 高於 Max HR 方塊數值的心電圖；
  *                          「排除含 V／S」（預設關）：開啟後移除 10 秒內有 V 或 S 標籤的心電圖
  *   AF 清單 mid segment     下拉選單旁的 ◀ ▶ 切換上一個／下一個時段（編輯模式）
+ *   Tachy／Brady 清單       網站 invert 按鈕旁的單頁「Invert」：本頁未修改的改為 artifact，
+ *                          本頁已全部是 artifact 時改回未修改；psvt／vt 不變（編輯模式）
  *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整；聚焦時顯示提示 3 秒
  *   HR 清單時間框           貼上或修改時間後，自動以該心電圖白色區段的平均 BPM 填入 HR 欄
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
@@ -2210,6 +2212,73 @@
     document.addEventListener('change', event => {
         if (event.target?.matches?.(AF_SEGMENT_SELECT)) scheduleAFStep();
     }, true);
+
+    // Tachy／Brady 事件清單：在網站的 invert（全部）按鈕前加入單頁 Invert，樣式沿用 Pause 清單的單頁 Invert。
+    // 網站點一張心電圖會依序切換狀態（Tachy：none → artifact → psvt → vt；Brady：none ↔ artifact），
+    // 這裡只在 none 與 artifact 之間切換：本頁有未修改的就全改為 artifact，全部已是 artifact 時改回 none；
+    // 手動設為 psvt／vt 的不變。每張的處理與網站點擊相同（取消該張選印、寫入未儲存修改）。
+    const PAGE_INVERT_TYPES = ['tachy', 'brady'];
+    function getPageInvertScope(dialog) {
+        let scope;
+        try { scope = window.angular?.element(dialog).scope?.(); } catch (_) { return null; }
+        const af = scope?.af;
+        if (!af || !PAGE_INVERT_TYPES.includes(af.eventDialog?.dscp?.type)) return null;
+        if (typeof scope.setEventOperationSelected !== 'function' || typeof scope.selectPrintedEvent !== 'function') return null;
+        return scope;
+    }
+    function invertEventPage(dialog) {
+        const scope = getPageInvertScope(dialog);
+        const items = scope?.af.eventDialog.currentData;
+        if (!scope || !scope.af.editingSwitch || scope.af.loading?.ecg || !Array.isArray(items) || !items.length) return;
+        const stateOf = item => item.selectedType || 'none';
+        const toArtifact = items.some(item => stateOf(item) === 'none');
+        const [from, to] = toArtifact ? ['none', 'artifact'] : ['artifact', 'none'];
+        scope.$apply(() => {
+            scope.af.ecgEnlargedChart.psSwitch = false;
+            for (const item of items) {
+                if (stateOf(item) !== from) continue;
+                item.selectedEvent = false;
+                scope.selectPrintedEvent(item);
+                item.selectedType = to;
+                item.chkDisabled = to !== 'none';
+                scope.setEventOperationSelected(item);
+            }
+        });
+    }
+    function decorateEventPageInvert() {
+        for (const button of document.querySelectorAll('.rc-page-invert')) {
+            const dialog = button.closest('#af-event-dialog');
+            if (isDisabledPage() || !dialog || !getPageInvertScope(dialog)
+                || !button.nextElementSibling?.matches('[ng-click="pausesubOperation()"]')) button.remove();
+        }
+        if (isDisabledPage()) return;
+        for (const all of document.querySelectorAll('#af-event-dialog .tool-btns > [ng-click="pausesubOperation()"]')) {
+            const dialog = all.closest('#af-event-dialog');
+            if (!getPageInvertScope(dialog)) continue;
+            let button = all.previousElementSibling;
+            if (!button?.classList.contains('rc-page-invert')) {
+                button = document.createElement('div');
+                button.className = 'tool-btn invertselect-btn rc-page-invert';
+                button.title = '單頁 Invert：本頁未修改的改為 artifact；本頁已全部是 artifact 時改回未修改（psvt／vt 不變）';
+                button.innerHTML = '<div class="invertselect-page-icon"></div><span class="smaller-font-size-11">Invert</span>';
+                button.addEventListener('click', event => {
+                    event.preventDefault(); event.stopPropagation();
+                    invertEventPage(button.closest('#af-event-dialog'));
+                });
+                all.before(button);
+            }
+            // 與網站的 invert 按鈕同時顯示（編輯模式、非 iPad 列印）。
+            const hidden = all.classList.contains('ng-hide');
+            if (button.classList.contains('ng-hide') !== hidden) button.classList.toggle('ng-hide', hidden);
+        }
+    }
+    let pageInvertPending = false;
+    function schedulePageInvert() {
+        if (pageInvertPending) return;
+        pageInvertPending = true;
+        requestAnimationFrame(() => { pageInvertPending = false; decorateEventPageInvert(); });
+    }
+    new MutationObserver(schedulePageInvert).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
 
     // 時間輸入框：聚焦且內容是完整時間時，W／↑ 加 2 秒、S／↓ 減 2 秒（可按住連續調整）。
     // 依網站的日期格式解析（另接受輸入框提示的「日期, 時間」寫法），以原本的寫法寫回，
