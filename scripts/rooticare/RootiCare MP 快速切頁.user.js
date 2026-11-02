@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.6.1
-// @description  在 MP 分頁邊界以 Q / E 切換相鄰 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
+// @version      1.7.0
+// @description  在 MP 分頁邊界以 Q / E 切換相鄰 type，A / D 直接切換上一個 / 下一個 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -15,12 +15,13 @@
 
 // 使用教學：在 MP（Morphology）頁面，以 Q / E 配合網頁原生快捷鍵瀏覽 type。
 // 第一頁按 Q：切換至上一個 type；最後一頁按 E：切換至下一個 type。
+// A / D：不論在第幾頁，直接切換至上一個 / 下一個 type。
 // Ctrl + E：與網頁原生功能協作，快速往下選中 type。
 // 切換 type 後會將目標捲入畫面，聚焦右側清單並點選第一張 ECG 縮圖；
 // 若下一個按鍵是 1 / 2 / 3 / 4，則改為對左側剛選中的 type 生效（按其他鍵或點滑鼠後恢復原本行為）。
 // 右側跨頁合計選取多張縮圖時，腳本不切換 type；在輸入框中打字、開著 Morphology Player 等彈出視窗
 // 或資料載入中時不處理快捷鍵。首尾頁以 MP 縮圖清單的分頁判斷，切換 type 後不再讓網站同時換頁。
-// 剛換頁、該頁波形還沒載入完成時按首尾頁的 Q / E，會在載入完成後自動切換 type。
+// 剛換頁、該頁波形還沒載入完成時按首尾頁的 Q / E 或 A / D，會在載入完成後自動切換 type。
 // 網站快速連續換頁時，下一次換頁會等上一頁載入完成才執行，避免網站讀錯資料而卡住。
 // 若仍發生（例如載入中點選左側 type），腳本會自動重新載入目前頁，未儲存的修改會保留。
 // 左側多選 type 時，隱藏右側灰色遮罩與虛線提示框的外觀，保留原生操作攔截。
@@ -188,21 +189,21 @@
     }
     setInterval(installGuards, 500);
 
-    // 首尾頁按 Q / E 時若這一頁還在載入，先記下來，載入完成後自動切換 type。
+    // 首尾頁按 Q / E（或任何頁按 A / D）時若這一頁還在載入，先記下來，載入完成後自動切換 type。
     // 等待期間按其他鍵、點滑鼠、換頁或換 type 就取消；最多等 PAGE_WAIT_MS。
     let pendingSwitch = null;
     function switchSnapshot(scope) {
         const state = scope?.morphology?.state;
         return `${state?.label}|${state?.type}|${scope?.morphology?.pagination?.currentPage}`;
     }
-    function queueSwitch(scope, direction) {
+    function queueSwitch(scope, direction, requireEdge) {
         const token = { snapshot: switchSnapshot(scope) };
         pendingSwitch = token;
         whenPageReady(scope, PAGE_WAIT_MS, ready => {
             if (pendingSwitch !== token) return;
             pendingSwitch = null;
             if (!ready || scope !== morphologyScope() || switchSnapshot(scope) !== token.snapshot) return;
-            if (document.querySelector('.ngdialog') || !pageEdge(scope, direction)) return;
+            if (document.querySelector('.ngdialog') || (requireEdge && !pageEdge(scope, direction))) return;
             try { if (typeof scope.loading === 'function' && scope.loading()) return; } catch (_) { return; }
             switchType(direction);
         });
@@ -225,20 +226,22 @@
     }, true);
 
     // 按下 Q / E 時檢查分頁邊界；只在第一頁按 Q、最後一頁按 E 時接手切換 type。
-    // Ctrl + E 仍與網站原生按鍵流程協作。
+    // A / D 不看分頁，直接切換上一個 / 下一個 type。Ctrl + E 仍與網站原生按鍵流程協作。
+    const TYPE_KEYS = { KeyQ: 'prev', KeyE: 'next', KeyA: 'prev', KeyD: 'next' };
     document.addEventListener('keydown', function(e) {
         if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) pendingSwitch = null;
-        const key = e.key.toUpperCase();
-        if (key !== 'Q' && key !== 'E') return;
+        const direction = TYPE_KEYS[e.code];
+        if (!direction) return;
+        const direct = e.code === 'KeyA' || e.code === 'KeyD';
+        if (direct && e.ctrlKey) return;
         const scope = morphologyScope();
         installGuards();
         if (shouldIgnoreKey(e, scope)) return;
-        const direction = key === 'E' ? 'next' : 'prev';
-        if (!pageEdge(scope, direction)) return;
+        if (!direct && !pageEdge(scope, direction)) return;
         if (!pageDataReady(scope)) {
             e.preventDefault();
             e.stopImmediatePropagation();
-            queueSwitch(scope, direction);
+            queueSwitch(scope, direction, !direct);
             return;
         }
         // 已切換 type 時攔下同一次按鍵，避免網站接著在新 type 的清單上再換頁。
