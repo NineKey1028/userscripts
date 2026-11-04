@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.45.0
+// @version      1.46.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -67,6 +67,8 @@
  *                          「Group」先儲存標籤修改再執行 Group All，完成後重新開啟清單
  *                          選印清單開著時，點心電圖波形不會再出現量測虛線；只有開啟 Mesurer 等量測功能時才有
  *                          縮圖的標籤與上方心電圖視窗同步（未儲存的修改以淡黃底標示），Save 後自動重新讀取
+ *                          在網站上點印表機圖示選印或取消時，開著的選印清單跟著更新；
+ *                          強制選印同時也是藍色選印的，標示為「強制＋藍色」
  *                          「👁 列印範圍」：縮圖改顯示報告中波形下方的 30 秒縮圖範圍（綠色為印出的 8 秒），
  *                          所有清單的選印清單都有；預設關閉，開啟後保持到重新整理頁面
  *                          心電圖視窗「取消選印」旁也有「👁 列印範圍」：在上方心電圖標出實線（印出的 8 秒）
@@ -2734,6 +2736,7 @@
     function decoratePrintBars() {
         if (isDisabledPage() || !window.angular) return;
         if (review && !review.anchor.isConnected && !review.grouping) closePrintReview();
+        syncReviewPrints();
         recheckReviewCards();
         decorateReviewDialog();
         drawTagPrintWindows(); // 網站重畫心電圖後補回選印範圍框
@@ -3545,6 +3548,8 @@
         .rc-review-time { color:#1a3fb8; font-weight:600; }
         .rc-review-tag { padding:0 6px; border-radius:8px; background:#d88f3f; color:#fff; font-size:10px; line-height:16px; }
         .rc-review-tag.is-section { background:#2c6aa0; }
+        .rc-review-tag.is-both { background:linear-gradient(90deg, #d88f3f 0 50%, #2c6aa0 50% 100%); }
+        .rc-review-card.is-both { border-color:#c9b9d9; }
         .rc-review-card.is-section { border-color:#bcd6ee; }
         .rc-review-card.is-section.is-active { border-color:#2c6aa0; background:#f2f7fc; box-shadow:0 0 0 2px rgba(44,106,160,.25); }
         .rc-review-card.is-invalid { border-color:#e3a39b; background:#fff7f6; }
@@ -3642,6 +3647,18 @@
         if (node.textContent !== text) node.textContent = text;
         node.hidden = !text;
     }
+    function reviewPrintSignature(forced, section, all) {
+        return JSON.stringify([all, [...forced].sort((a, b) => a - b), [...section].sort((a, b) => a - b)]);
+    }
+    // 選印清單開著時，在網站上點印表機圖示選印或取消（或其他方式改變選印），清單跟著更新。
+    // 由頁面變動觸發，只在選印（綠色、橘色、藍色）有變化時才重整；腳本自己操作中（busy、Group）時不處理。
+    function syncReviewPrints() {
+        if (!review || review.busy || review.grouping) return;
+        const ctx = review.ctx;
+        if (!ctx.dialog || ctx.dialog.dscp?.type !== ctx.type) return;
+        const { forced, section, all } = getQuickPrinted(ctx);
+        if (reviewPrintSignature(forced, section, all) !== review.printSignature) refreshPrintReview();
+    }
     function refreshPrintReview() {
         if (!review) return;
         const { ctx, bar, cards } = review;
@@ -3650,6 +3667,7 @@
         const { forced, section, all } = getQuickPrinted(ctx, times);
         review.items = all;
         review.section = section;
+        review.printSignature = reviewPrintSignature(forced, section, all);
         const title = `選印清單・${ctx.config.name}`;
         const titleNode = bar.querySelector('.rc-review-title');
         if (titleNode.textContent !== title) titleNode.textContent = title;
@@ -3666,9 +3684,13 @@
             let card = cards.get(time);
             if (!card) { card = createReviewCard(time); cards.set(time, card); }
             const isForced = forced.has(time);
+            // 強制選印同時也是藍色選印（例如超過 30 秒的最長 SVT）時，另外標示「強制＋藍色」。
+            const isBoth = isForced && section.has(time);
             card.classList.toggle('is-forced', isForced);
+            card.classList.toggle('is-both', isBoth);
             card.classList.toggle('is-active', time === review.active);
-            card.querySelector('.rc-review-tag').hidden = !isForced;
+            card.querySelector('.rc-review-tag.is-forced-tag').hidden = !isForced || isBoth;
+            card.querySelector('.rc-review-tag.is-both').hidden = !isBoth;
             const isSection = !isForced && section.has(time);
             card.classList.toggle('is-section', isSection);
             card.querySelector('.rc-review-tag.is-section').hidden = !isSection;
@@ -3704,7 +3726,8 @@
         card.className = 'rc-review-card';
         card.dataset.time = String(time);
         card.innerHTML = '<div class="rc-review-card-head"><span class="rc-review-time"></span>'
-            + '<span class="rc-review-tag" hidden>強制選印</span>'
+            + '<span class="rc-review-tag is-forced-tag" hidden>強制選印</span>'
+            + '<span class="rc-review-tag is-both" hidden title="網站的強制選印，同時也是藍色區段選印（報告印出 Start／Mid／End 三段）">強制＋藍色</span>'
             + '<span class="rc-review-tag is-section" hidden title="區段選印：報告印出 Start／Mid／End 三段，點選卡片開啟區段選印視窗">藍色選印</span></div>'
             + '<div class="rc-review-info"></div><div class="rc-review-warn" hidden></div><div class="rc-review-thumb">載入中…</div>'
             + '<div class="rc-review-actions"><button type="button" class="rc-review-btn is-cancel">取消選印</button>'
