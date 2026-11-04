@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.42.1
+// @version      1.42.2
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -2561,6 +2561,13 @@
         try { host = window.angular.element(bar).scope(); } catch (_) { return null; }
         while (host && typeof host.selectPrintedEvent !== 'function') host = host.$parent;
         if (!host) return null;
+        // 改過標籤、尚未重新 Group 的心搏只在 Manual 清單（af.unclassifiedGroup）裡，
+        // 不在 Isolated 等清單中；這些選印（例如 MP 按 5 選印）仍有效，不能取消。
+        const manual = af.unclassifiedGroup || {};
+        for (const value of [manual.veb, manual.sveb].flatMap(list => Array.isArray(list) ? list : [])) {
+            const time = toEventTime(value);
+            if (time !== null) inList.add(time);
+        }
         const lost = new Set(missing.filter(time => !inList.has(time)));
         const times = [...new Set(selected.map(toEventTime).filter(time => time !== null && lost.has(time)))].sort((a, b) => a - b);
         return times.length ? { times, host, af, key, type, signature: `${af._measureId}|${key}|${times.join(',')}` } : null;
