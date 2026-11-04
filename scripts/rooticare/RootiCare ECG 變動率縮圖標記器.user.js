@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.20.0
+// @version      1.20.1
 // @description  依變動率、BPM、彩色波形高度／寬度、與前一跳比較（高矮寬窄快慢）、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -37,6 +37,7 @@
  * 【快速選印】VEB / SVEB 分頁選取縮圖後按 5
  *   選印該心搏所屬清單（VT、Triplet、Couplet、Bigeminy 等）中的心電圖；
  *   都不屬於時選印 VEB / SVEB 清單；全部已選印時再按 5 取消。
+ *   改過標籤、尚未重新 Group 的心搏，依目前標籤的連續數判斷：2 顆 Couplet、3 顆 Triplet、4 顆以上 VT。
  */
 
 (() => {
@@ -2213,29 +2214,37 @@
             measureId: readStoredId('_measureId'), afId: readStoredId('_afId') };
         if (!ids.vendorId || !ids.idNumber || !ids.measureId || !ids.afId) throw new Error('找不到病患或紀錄編號');
         const cacheKey = `${ids.vendorId}|${ids.idNumber}|${ids.measureId}|${ids.afId}`;
-        if (!force && printContext?.cacheKey === cacheKey) return printContext;
         const manager = window.angular.element(document.body).injector().get('WppManager');
-        const [tags, subCategories, annoModified] = await Promise.all([
+        // 修改紀錄每次都重新讀取：之後又儲存了改標時，整份重新讀取。
+        const annoModified = await manager.Af.getAnnoModifiedData(ids.vendorId, ids.idNumber, ids.measureId)
+            .then(plainData).catch(() => null);
+        const editSignature = JSON.stringify(annoModified || null);
+        if (!force && printContext?.cacheKey === cacheKey && printContext.editSignature === editSignature) {
+            printContext.annoCache = new Map();
+            return printContext;
+        }
+        const [tags, subCategories] = await Promise.all([
             manager.Af.getTagTms(ids.vendorId, ids.idNumber, ids.afId),
             manager.Af.getSubCategoryRecord(ids.vendorId, ids.idNumber, ids.measureId).catch(() => null),
-            manager.Af.getAnnoModifiedData(ids.vendorId, ids.idNumber, ids.measureId).catch(() => null),
         ]);
         const record = Object.assign({}, plainData(tags) || {}, plainData(subCategories) || {});
         // 早搏清單（posPVC／posSVEB）是原始分析結果，儲存的標籤修改不會反映在裡面；
         // 依修改紀錄把改成 V／S 的心搏加入、從 V／S 改掉的移出，改過標籤的心搏才找得到時間。
+        const edited = new Set();
         const beatSets = mergeLabelEdits({
             V: pairBeats(record[PRINT_CATEGORIES.V.list], record[PRINT_CATEGORIES.V.pos]),
             S: pairBeats(record[PRINT_CATEGORIES.S.list], record[PRINT_CATEGORIES.S.pos]),
-        }, plainData(annoModified));
+        }, annoModified, edited);
         const lists = {};
         for (const [label, config] of Object.entries(PRINT_CATEGORIES)) {
             const groups = config.groups.map(group => ({ ...group,
                 starts: [...new Set((record[group.record] || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b) }));
-            lists[label] = { groups, fallback: config.fallback };
+            lists[label] = { kind: label, groups, fallback: config.fallback };
             setListBeats(lists[label], beatSets[label]);
         }
         const sampleRate = Number(readStoredId('_sampleRate')) || 250;
-        printContext = { cacheKey, ids, manager, lists, sampleRate };
+        printContext = { cacheKey, editSignature, ids, manager, lists, sampleRate,
+            edited: [...edited].sort((a, b) => a - b), annoCache: new Map() };
         return printContext;
     }
     // 時間與位置清單配成 Map（位置 → 時間）。
@@ -2250,12 +2259,14 @@
         return beats;
     }
     // 套用標籤修改紀錄（[時間, 位置, 新標籤, 原標籤, 1]）：新標籤為 V 加入 V、S／A 加入 S，其他（N、X 等）兩邊都移除。
-    function mergeLabelEdits(beatSets, edits) {
+    // edited：有傳入時記下改過標籤的位置，供判斷連發是否需要依實際標籤重新分類。
+    function mergeLabelEdits(beatSets, edits, edited = null) {
         for (const item of Array.isArray(edits) ? edits : []) {
             if (!Array.isArray(item) || !item[4]) continue;
             const time = Number(item[0]);
             const position = Number(item[1]);
             if (!Number.isFinite(position)) continue;
+            edited?.add(position);
             beatSets.V.delete(position);
             beatSets.S.delete(position);
             const kind = item[2] === 'V' ? 'V' : item[2] === 'S' || item[2] === 'A' ? 'S' : null;
@@ -2317,6 +2328,54 @@
             if (start !== undefined && time - start <= PRINT_STRIP_AFTER) return { key: group.key, name: group.name, time: start };
         }
         return { key: list.fallback.key, name: list.fallback.name, time };
+    }
+    // 改過標籤的心搏：網站的 Couplet／Triplet／VT 紀錄要重新 Group 才會更新，
+    // 改依心電圖目前的標籤數連續早搏：2 顆 Couplet、3 顆 Triplet、4 顆以上 VT（S 同理）。
+    const PRINT_EDIT_NEAR = 10;   // 心搏前後幾秒內有改過標籤才重新判斷（秒）
+    const PRINT_ANNO_WINDOW = 15; // 讀取心搏前後幾秒的標籤（秒）
+    const isKindLabel = (kind, label) => kind === 'V' ? label === 'V' : label === 'S' || label === 'A';
+    // anno：依位置排序的 [位置, 標籤]；回傳包含 position 的連續早搏範圍（找不到或不是早搏時為 null）。
+    function classifyRun(anno, position, kind) {
+        const index = anno.findIndex(([pos]) => pos === position);
+        if (index < 0 || !isKindLabel(kind, anno[index][1])) return null;
+        let first = index, last = index;
+        while (first > 0 && isKindLabel(kind, anno[first - 1][1])) first--;
+        while (last < anno.length - 1 && isKindLabel(kind, anno[last + 1][1])) last++;
+        return { first: anno[first][0], count: last - first + 1 };
+    }
+    function runGroupFor(list, count) {
+        return list.groups.find(group => group.run && (group.beats ? group.beats === count : count >= 4)) || null;
+    }
+    // overrides：Morphology 尚未儲存的改標（位置 → 標籤），覆蓋伺服器讀到的標籤。
+    async function resolveEditedRun(context, list, index, overrides) {
+        const position = list.positions[index];
+        const near = PRINT_EDIT_NEAR * context.sampleRate;
+        const editedNear = [...overrides.keys()].some(pos => Math.abs(pos - position) <= near)
+            || context.edited[lowerBound(context.edited, position - near)] <= position + near;
+        if (!editedNear) return null;
+        const span = Math.round(PRINT_ANNO_WINDOW * context.sampleRate);
+        const from = Math.max(0, Math.floor((position - span) / span) * span);
+        const cacheKey = `${from}`;
+        let data = context.annoCache.get(cacheKey);
+        if (!data) {
+            const { ids, manager } = context;
+            data = manager.Af.getFilteredECGDataByIndexRange(ids.vendorId, ids.idNumber, ids.measureId,
+                from, from + span * 3, list.times[index], false).then(plainData).catch(() => null);
+            context.annoCache.set(cacheKey, data);
+        }
+        const result = await data;
+        if (!result?.anno) return null;
+        const labels = new Map(Object.entries(result.anno).map(([pos, label]) => [Number(pos), label]));
+        for (const [pos, label] of overrides) if (labels.has(pos)) labels.set(pos, label);
+        const run = classifyRun([...labels].sort((a, b) => a[0] - b[0]), position, list.kind);
+        const group = run && runGroupFor(list, run.count);
+        if (!group) return null;
+        let time = list.beats.get(run.first);
+        if (time === undefined) {
+            const rate = Number(result.sampleRate) || context.sampleRate;
+            time = Math.floor(Number(result.fromTimestamp) + (run.first - Number(result.fromIndex)) / rate);
+        }
+        return Number.isFinite(time) ? { key: group.key, name: group.name, time } : null;
     }
     // 依縮圖目前的標籤（Morphology 未儲存的改標 modifiedLabel 優先）決定 V 或 S：
     // 心搏還在另一份清單（S↔V 改標後清單未更新）時移到正確的清單，避免選印到錯誤的分類；
@@ -2396,10 +2455,13 @@
                 beats = segments.map(segment => findBeat(context, segment, label, true));
             }
             const missing = beats.filter(beat => !beat).length;
+            const overrides = new Map(segments.filter(segment => segment.modifiedLabel)
+                .map(segment => [Number(segment.absoluteIndex), segment.modifiedLabel]));
             const targets = new Map();
             for (const beat of beats) {
                 if (!beat) continue;
-                const target = resolvePrintTarget(beat.list, beat.index, context.sampleRate);
+                const target = await resolveEditedRun(context, beat.list, beat.index, overrides)
+                    || resolvePrintTarget(beat.list, beat.index, context.sampleRate);
                 targets.set(`${target.key}:${target.time}`, target);
             }
             if (!targets.size) { printToast('找不到這些心搏的時間，無法選印', true); return; }
