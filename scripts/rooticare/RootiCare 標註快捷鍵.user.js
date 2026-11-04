@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.42.0
+// @version      1.42.1
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -2541,10 +2541,14 @@
     // 已不在清單中的綠色選印：網站的 Group 不會移除原清單的選印紀錄，
     // 這些心電圖仍會計入報告，但清單上看不到也無法取消。只回傳可用網站取消選印處理的部分。
     // 只在拉條的頁面資料就是目前清單的完整資料時判斷，避免切換清單或載入中把別的清單當成「不在清單」。
+    // Manual／Unclassified 清單（openUnclassifiedList，例如 modifiedS）與 Isolated 共用同一組選印紀錄，
+    // 但只列出部分心電圖，不能把不在其中的選印當成「已不在清單」。
+    const ORPHAN_SKIP_TYPE = /^(modified|unclassified)/i;
     function getOrphanPrints(bar, af, missing, pages) {
         if (!missing?.length || !af?.printDialog?.selectedEvents || !window.angular) return null;
         const key = af.eventDialog?.dscp?.printedEventType;
         const type = af.eventDialog?.dscp?.type;
+        if (typeof type !== 'string' || ORPHAN_SKIP_TYPE.test(type)) return null;
         const selected = af.printDialog.selectedEvents[key];
         const source = af.eventDialog?.[type];
         if (!Array.isArray(selected) || !Array.isArray(source?.data) || !Array.isArray(pages)) return null;
