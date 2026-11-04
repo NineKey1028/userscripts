@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.44.0
+// @version      1.45.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -67,9 +67,15 @@
  *                          「Group」先儲存標籤修改再執行 Group All，完成後重新開啟清單
  *                          選印清單開著時，點心電圖波形不會再出現量測虛線；只有開啟 Mesurer 等量測功能時才有
  *                          縮圖的標籤與上方心電圖視窗同步（未儲存的修改以淡黃底標示），Save 後自動重新讀取
+ *                          「👁 列印範圍」：縮圖改顯示報告中波形下方的 30 秒縮圖範圍（綠色為印出的 8 秒），
+ *                          所有清單的選印清單都有；預設關閉，開啟後保持到重新整理頁面
+ *                          心電圖視窗「取消選印」旁也有「👁 列印範圍」：在上方心電圖標出實線（印出的 8 秒）
+ *                          與虛線（下方 30 秒縮圖的範圍）；與縮圖的眼睛分開切換，同樣保持到重新整理頁面
  *                          已不在清單中的選印（例如改成 Couplet 等子分類後重新 Group）會自動取消並提示
  *                          快速選印與換一個會先依目前標籤（含未儲存修改）驗證是否仍符合清單類型
- *                          換掉或取消選印的心電圖（及其前後 30 秒內的）重新整理頁面前不再被選回
+ *                          換掉或取消選印的心電圖（及其前後 30 秒內的）重新整理頁面前不再被選回，
+ *                          包含在網站上直接點印表機取消的；Group 後被重新分類到其他清單的不算；
+ *                          快速選印的候選不足時，才依序用回前後 30 秒內的、取消過的本身
  *                          Isolated S 需變動率超過 12%；前兩顆依序為 V、N 的排在最後，其他候選不足時才選
  *                          SVE run／SVT 超過 30 秒的心電圖改用藍色選印（區段選印），橘色強制選印也會一併檢查
  *   Pause／Event Tag 清單  按「選印 N 張」開啟選印清單，可逐張檢視（A／D 切換）、修改標籤、取消選印；
@@ -2753,6 +2759,7 @@
             if (!range.offsetWidth || !barWidth) continue;
             // V / S 事件清單另外顯示「快速選印」，沒有選印時也保留按鈕列；Pause、Event Tag 只有選印清單。
             const quick = getQuickContext(bar, true);
+            trackCancelledPrints(quick); // 記下使用者取消的選印，快速選印時略過
             const keepPanel = total > 0 || (!!quick && !quick.config.reviewOnly);
             const signature = JSON.stringify([groups, total, current, Math.round(barWidth), quick?.type || '']);
             const existing = range.nextElementSibling?.classList.contains('rc-print-panel') ? range.nextElementSibling : null;
@@ -3309,15 +3316,38 @@
         if (!quickRejected.has(key)) quickRejected.set(key, new Set());
         return quickRejected.get(key);
     }
+    // 使用者取消的選印：清單開著時比對前後的選印（綠色與藍色），消失但心電圖仍在同一清單中的，
+    // 不論是在網站上點印表機圖示、選印清單的「取消選印」或其他方式取消，都記為淘汰。
+    // 心電圖已不在清單中的（Group 後重新分類到其他子項目、S↔V 改標後重新分類、不在清單中的選印被自動取消）不算。
+    // 使用者之後又自己選印回來的，從淘汰中移除。只保留到重新整理頁面。
+    const quickPrintSnapshots = new Map();
+    function trackCancelledPrints(ctx) {
+        if (!ctx || ctx.config.reviewOnly) return;
+        const key = `${ctx.af._measureId}|${ctx.type}`;
+        const times = getQuickTimes(ctx);
+        const inList = new Set(times);
+        const { selected, section } = getQuickPrinted(ctx, times);
+        const current = new Set([...selected, ...section]);
+        const previous = quickPrintSnapshots.get(key);
+        quickPrintSnapshots.set(key, current);
+        if (!previous) return;
+        const rejected = getQuickRejected(ctx);
+        for (const time of previous) if (!current.has(time) && inList.has(time)) rejected.add(time);
+        for (const time of current) if (!previous.has(time)) rejected.delete(time);
+    }
+    // candidates：一般候選；fallback：候選不足時才用，依序為與淘汰過的相隔 30 秒內的、淘汰過的本身。
     async function getQuickCandidates(ctx, onProgress) {
         const times = getQuickTimes(ctx);
         const printed = new Set(getQuickPrinted(ctx, times).all);
         const excluded = getQuickExcluded(ctx);
         // 淘汰過的（換掉或取消選印的）不再選回，與它相隔 30 秒內的也不選（同一段心律，畫面幾乎相同）。
-        const rejected = [...getQuickRejected(ctx)];
+        const rejectedSet = getQuickRejected(ctx);
+        const rejected = [...rejectedSet];
         const nearRejected = time => rejected.some(other => Math.abs(other - time) <= QUICK_REJECT_NEAR);
-        const pool = times.filter(time => !printed.has(time) && !excluded.has(time) && !nearRejected(time));
-        return { times, candidates: await computeQuickScores(ctx, pool, onProgress) };
+        const open = times.filter(time => !printed.has(time) && !excluded.has(time));
+        const pool = open.filter(time => !nearRejected(time));
+        const fallback = [open.filter(time => nearRejected(time) && !rejectedSet.has(time)), open.filter(time => rejectedSet.has(time))];
+        return { times, candidates: await computeQuickScores(ctx, pool, onProgress), fallback };
     }
 
     const quickState = { busy: false, progress: '' };
@@ -3386,7 +3416,7 @@
                 if (forcedSectioned) refreshPrintReview();
                 return;
             }
-            const { candidates } = await getQuickCandidates(ctx, (done, total) => {
+            const { candidates, fallback } = await getQuickCandidates(ctx, (done, total) => {
                 quickState.progress = `${done}/${total}`;
                 schedulePrintBars();
             });
@@ -3398,15 +3428,28 @@
             const now = getQuickPrinted(ctx, times).all;
             const range = getQuickRange(ctx, times);
             // 選出後逐張讀取心電圖、套用未儲存的標籤修改，驗證仍符合此清單類型；不符合的換下一張。
-            const { valid: chosen, skipped, lowPriority } = await pickValidated(ctx, candidates, now, target - now.length,
-                (pool, existing, need) => pickQuickPrints({ candidates: pool, existing, target, ...range, need,
+            const pickRound = (pool, already) => pickValidated(ctx, pool, [...now, ...already], target - now.length - already.length,
+                (list, existing, need) => pickQuickPrints({ candidates: list, existing, target, ...range, need,
                     spread: ctx.config.spread !== false }),
                 done => { quickState.progress = `驗證 ${done}`; schedulePrintBars(); });
+            const { valid: chosen, skipped, lowPriority } = await pickRound(candidates, []);
+            // 一般候選不足時，才依序使用與取消過的相隔 30 秒內的、取消過的本身。
+            let reused = 0;
+            for (const tier of fallback) {
+                if (now.length + chosen.length >= target || !tier.length) continue;
+                if (getQuickContext(button)?.type !== ctx.type) return;
+                const scored = await computeQuickScores(ctx, tier);
+                const extra = await pickRound(scored, chosen);
+                chosen.push(...extra.valid);
+                skipped.push(...extra.skipped);
+                reused += extra.valid.length;
+            }
             if (getQuickContext(button)?.type !== ctx.type) return;
             const sectioned = chosen.filter(time => setQuickPrint(ctx, time, true)).length;
             const total = now.length + chosen.length;
             const skippedText = (skipped.length ? `（略過 ${skipped.length} 張標籤已不符合的）` : '')
-                + (lowPriority ? `（候選不足，其中 ${lowPriority} 張前兩顆為 V、N）` : '');
+                + (lowPriority ? `（候選不足，其中 ${lowPriority} 張前兩顆為 V、N）` : '')
+                + (reused ? `（候選不足，其中 ${reused} 張為之前取消過的或其前後 30 秒內的）` : '');
             const sectionText = sectioned ? `（其中 ${sectioned} 張超過 ${QUICK_SECTION_SECONDS} 秒，使用藍色選印）` : '';
             quickToast(button, forcedText + (chosen.length
                 ? `已快速選印 ${chosen.length} 張，${ctx.config.name} 共 ${total}／${target} 張` + (total < target ? '（符合條件的心電圖不足）' : '') + sectionText + skippedText
@@ -3519,6 +3562,12 @@
         .rc-review-btn.is-swap { border-color:#bcd6ee; background:#eef5fc; color:#2c6aa0; }
         .rc-review-btn.is-swap:hover:not(:disabled) { border-color:#2c6aa0; background:#2c6aa0; color:#fff; }
         .rc-review-btn:disabled { cursor:not-allowed; opacity:.45; }
+        /* 眼睛：縮圖改顯示報告中波形下方 30 秒縮圖的範圍 */
+        .rc-review-eye { height:22px; padding:0 8px; border:1px solid #fff; border-radius:11px; background:transparent; color:#fff;
+            font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; opacity:.75; }
+        .rc-review-eye:hover { opacity:1; }
+        .rc-review-eye[aria-pressed="true"] { background:#fff; color:#5b7d1a; opacity:1; }
+        .rc-review-bar.is-context .rc-review-card { width:380px; }
         .rc-review-bar.is-review-only :is(.rc-review-add, .rc-review-group, .rc-review-btn.is-swap) { display:none; }
     `;
     document.head.appendChild(reviewStyle);
@@ -3542,6 +3591,7 @@
         bar.tabIndex = -1;
         bar.innerHTML = '<div class="rc-review-head"><span class="rc-review-title"></span><span class="rc-review-count"></span>'
             + '<span class="rc-review-hint"></span>'
+            + '<button type="button" class="rc-review-eye" aria-pressed="false" title="縮圖顯示報告中波形下方的 30 秒縮圖範圍（綠色為印出的 8 秒）">👁 列印範圍</button>'
             + '<button type="button" class="rc-review-add" title="依快速選印的規則再多選一張（時段分散、相隔 1 分鐘以上）">＋ 加選一個</button>'
             + '<button type="button" class="rc-review-group" title="儲存標籤修改後執行 Group All，重新分類事件並重整清單">Group</button>'
             + '<button type="button" class="rc-review-close" title="關閉選印清單" aria-label="關閉">×</button></div>'
@@ -3552,6 +3602,9 @@
             staleCards: new Set(), staleTimer: null, labelIndices: null };
         bar.querySelector('.rc-review-close').addEventListener('click', closePrintReview);
         bar.querySelector('.rc-review-add').addEventListener('click', addReviewPrint);
+        bar.querySelector('.rc-review-eye').addEventListener('click', () => setReviewContext(!reviewContextOn));
+        bar.classList.toggle('is-context', reviewContextOn);
+        bar.querySelector('.rc-review-eye').setAttribute('aria-pressed', String(reviewContextOn));
         bar.querySelector('.rc-review-group').addEventListener('click', groupReview);
         // 縮圖超出畫面時：下方捲軸、滑鼠滾輪左右捲動、兩側 ◀ ▶ 一次捲動約一個畫面寬。
         const list = bar.querySelector('.rc-review-list');
@@ -3770,34 +3823,91 @@
     }, true);
 
     // 縮圖：事件心電圖範圍（前 4 秒至後 6 秒）一列，上方標出心搏類型；依序載入，最多同時 3 張。
+    // 眼睛（列印範圍）開啟時改顯示報告中波形下方的 30 秒縮圖範圍，綠色為印出的 8 秒；只保留到重新整理頁面。
+    const PRINT_CONTEXT_BEFORE = 11; // 網站列印：下方縮圖從印出的 8 秒前 11 秒開始，共 30 秒
+    const PRINT_CONTEXT_SECONDS = 30;
+    const PRINT_SHOWN_SECONDS = 8;
+    let reviewContextOn = false;
+    // 報告中印出的 8 秒的起點：一般清單為事件前 3 秒（事件心電圖前 4 秒起，印出第 1～9 秒），
+    // Pause 為事件前 4 秒（印出第 0～8 秒），Event Tag 為選印範圍的起點；藍色區段選印的版面不同，回傳 null。
+    function reviewPrintStart(ctx, time) {
+        if (review?.section?.has(time)) return null;
+        if (ctx.config.tag) return getTagPrintWindow(ctx.af, time).start;
+        if (/^pause/.test(ctx.type)) return time - 4;
+        return time - 3;
+    }
+    function cardUsesContext(time) {
+        return reviewContextOn && !!review && reviewPrintStart(review.ctx, time) !== null;
+    }
+    // 依目前模式畫出已讀到的資料；沒有資料時回傳 false。
+    function showReviewThumb(card, time, modifiedData) {
+        const thumb = card.querySelector('.rc-review-thumb');
+        if (cardUsesContext(time)) {
+            if (!card.rcContext) return false;
+            renderReviewThumb(thumb, card.rcContext, time, modifiedData,
+                { labels: false, highlight: [PRINT_CONTEXT_BEFORE, PRINT_CONTEXT_BEFORE + PRINT_SHOWN_SECONDS] });
+        } else {
+            if (!card.rcData) return false;
+            renderReviewThumb(thumb, card.rcData, time, modifiedData);
+        }
+        return true;
+    }
     const thumbQueue = [];
     let thumbLoading = 0;
     function loadReviewThumb(card, time) {
         thumbQueue.push({ card, time });
         pumpThumbQueue();
     }
+    // 資料已過期（Save 後、Event Tag 選印時間改變）時清掉兩種縮圖資料再重新讀取。
+    function reloadReviewThumb(card, time) {
+        card.rcData = null;
+        card.rcContext = null;
+        loadReviewThumb(card, time);
+    }
     function pumpThumbQueue() {
         while (thumbLoading < 3 && thumbQueue.length) {
             const { card, time } = thumbQueue.shift();
             if (review?.cards.get(time) !== card) continue;
+            const context = cardUsesContext(time);
+            if (showReviewThumb(card, time)) { checkReviewCard(card, time); continue; }
             thumbLoading++;
-            // Event Tag 的縮圖顯示目前的 10 秒選印範圍；其他清單顯示事件前 4 秒至後 6 秒。
             let before = THUMB_BEFORE, after = THUMB_AFTER;
-            if (review.ctx.config.tag) {
+            if (context) {
+                const start = reviewPrintStart(review.ctx, time) - PRINT_CONTEXT_BEFORE;
+                before = time - start;
+                after = start + PRINT_CONTEXT_SECONDS - time;
+            } else if (review.ctx.config.tag) {
+                // Event Tag 的縮圖顯示目前的 10 秒選印範圍；其他清單顯示事件前 4 秒至後 6 秒。
                 const start = getTagPrintWindow(review.ctx.af, time).start;
                 before = time - start;
                 after = start + TAG_PRINT_SECONDS - time;
             }
             fetchReviewECG(time, before, after).then(data => {
                 if (review?.cards.get(time) !== card) return;
-                card.rcData = data;
-                renderReviewThumb(card.querySelector('.rc-review-thumb'), data, time);
+                if (context) card.rcContext = data; else card.rcData = data;
+                showReviewThumb(card, time);
                 checkReviewCard(card, time);
             }).catch(error => {
                 const thumb = card.querySelector('.rc-review-thumb');
                 if (thumb) thumb.textContent = `載入失敗：${error?.message || error?.status || error}`;
             }).finally(() => { thumbLoading--; pumpThumbQueue(); });
         }
+    }
+    function setReviewContext(on) {
+        reviewContextOn = on;
+        if (!review) return;
+        review.bar.classList.toggle('is-context', on);
+        review.bar.querySelector('.rc-review-eye').setAttribute('aria-pressed', String(on));
+        // 卡片變寬後才重畫，縮圖寬度才量得到；沒有資料的排隊讀取。
+        for (const [time, card] of review.cards) {
+            if (!showReviewThumb(card, time)) {
+                const thumb = card.querySelector('.rc-review-thumb');
+                if (thumb) thumb.textContent = '載入中…';
+                loadReviewThumb(card, time);
+            }
+        }
+        requestAnimationFrame(updateReviewScroll);
+        if (review.active !== null) setReviewActive(review.active);
     }
     // 網站讀取事件心電圖時使用的固定取樣率（125／250／500／1000 中最接近者）。
     function requestSampleRate(sampleRate) {
@@ -3835,8 +3945,10 @@
         return { labels, edited };
     }
     let thumbGradientSeq = 0; // 每張縮圖的漸層 id 不重複
-    function renderReviewThumb(container, data, eventTime, modifiedData = review?.ctx.af.ecgAnno?.modifiedData) {
+    // options.highlight：[開始秒, 結束秒]（自資料起點），以列印縮圖相同的淡綠色標示；options.labels 為 false 時不畫標籤。
+    function renderReviewThumb(container, data, eventTime, modifiedData = review?.ctx.af.ecgAnno?.modifiedData, options = {}) {
         if (!container) return;
+        if (modifiedData === undefined) modifiedData = review?.ctx.af.ecgAnno?.modifiedData;
         const width = Math.max(120, container.clientWidth || 234);
         const height = 64;
         const labelHeight = 13;
@@ -3866,6 +3978,11 @@
         let grid = '';
         for (let s = 0.2; s < seconds; s += 0.2) grid += `M${(s * pxPerSec).toFixed(1)} ${labelHeight}V${height}`;
         add('path', { d: grid, stroke: '#eee', 'stroke-width': 0.6, fill: 'none' });
+        if (options.highlight) {
+            const [from, to] = options.highlight;
+            add('rect', { x: from * pxPerSec, y: labelHeight, width: Math.max(0, (to - from) * pxPerSec), height: waveHeight,
+                fill: 'rgba(173,209,73,.41)' });
+        }
         let d = '';
         values.forEach((value, i) => {
             if (!Number.isFinite(value)) return;
@@ -3894,7 +4011,8 @@
         defs.appendChild(gradient);
         add('path', { d, stroke: `url(#${gradientId})`, 'stroke-width': 0.9, fill: 'none', 'stroke-linejoin': 'round' });
         const color = type => type === 'V' ? '#d0021b' : type === 'S' || type === 'A' ? '#2a6fdb' : '#888';
-        for (const [index, type] of labels) {
+        // 30 秒的列印範圍與報告的縮圖相同，不畫標籤（太密），心搏類型由波形顏色表示。
+        for (const [index, type] of options.labels === false ? [] : labels) {
             if (!['N', 'S', 'A', 'V'].includes(type) || !Number.isFinite(index)) continue;
             const x = (index - fromIndex) / sampleRate * pxPerSec;
             if (x < 0 || x > width) continue;
@@ -3909,8 +4027,10 @@
     }
     // 選印清單的卡片：依縮圖的心電圖與目前未儲存的標籤修改，標示已不符合清單類型的選印。
     function checkReviewCard(card, time) {
-        if (!review || !card.rcData || review.ctx.config.reviewOnly) return; // Pause、Event Tag 沒有心搏型態規則
-        const result = checkEventPattern(effectiveEventBeats(card.rcData, review.ctx.af.ecgAnno?.modifiedData, time), review.ctx.config);
+        // 一般縮圖或 30 秒列印範圍的資料都涵蓋事件前後，哪一份有就用哪一份。
+        const data = card.rcData || card.rcContext;
+        if (!review || !data || review.ctx.config.reviewOnly) return; // Pause、Event Tag 沒有心搏型態規則
+        const result = checkEventPattern(effectiveEventBeats(data, review.ctx.af.ecgAnno?.modifiedData, time), review.ctx.config);
         card.classList.toggle('is-invalid', !result.ok);
         const warn = card.querySelector('.rc-review-warn');
         const text = result.ok ? '' : `⚠ ${result.reason}`;
@@ -3935,10 +4055,11 @@
             return removed.some(index => index >= fromIndex && index <= endIndex);
         };
         for (const [time, card] of review.cards) {
-            if (!card.rcData) continue;
-            if (removed.length && covers(card.rcData)) { review.staleCards.add(card); continue; }
+            const datasets = [card.rcData, card.rcContext].filter(Boolean);
+            if (!datasets.length) continue;
+            if (removed.length && datasets.some(covers)) { review.staleCards.add(card); continue; }
             if (review.staleCards.has(card)) continue; // 等重新讀取，避免先閃回舊標籤
-            renderReviewThumb(card.querySelector('.rc-review-thumb'), card.rcData, time, pending);
+            showReviewThumb(card, time, pending);
             checkReviewCard(card, time);
         }
         if (review.staleCards.size) scheduleStaleThumbs();
@@ -3953,7 +4074,7 @@
             review.staleTimer = null;
             for (const card of review.staleCards) {
                 const time = Number(card.dataset.time);
-                if (review.cards.get(time) === card) loadReviewThumb(card, time);
+                if (review.cards.get(time) === card) reloadReviewThumb(card, time);
             }
             review.staleCards.clear();
         }, 800);
@@ -4069,12 +4190,63 @@
             font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; }
         .rc-review-group:hover:not(:disabled) { background:#fff; color:#5b7d1a; }
         .rc-review-group:disabled { cursor:progress; opacity:.7; }
+        .rc-review-btn.is-eye { border-color:#cfe0a8; background:#f6faee; color:#5b7d1a; }
+        .rc-review-btn.is-eye[aria-pressed="true"] { border-color:#5b7d1a; background:#5b7d1a; color:#fff; }
+        /* 心電圖視窗上的列印範圍：虛線為報告下方 30 秒縮圖的範圍，實線為印出的 8 秒 */
+        .rc-printrange { pointer-events:none; }
+        .rc-printrange.is-context { fill:none; stroke:#5b7d1a; stroke-width:1.5; stroke-dasharray:6 4; }
+        .rc-printrange.is-main { fill:rgba(173,209,73,.08); stroke:#5b7d1a; stroke-width:1.5; }
     `;
     document.head.appendChild(reviewDialogStyle);
+    // 心電圖視窗的「👁 列印範圍」：與縮圖的眼睛分開，預設關閉，開啟後保持到重新整理頁面。
+    let reviewDialogRangeOn = false;
+    function drawReviewPrintRange() {
+        const dialog = getReviewECGDialog();
+        const existing = document.querySelectorAll('.rc-printrange');
+        let scope = null;
+        try { scope = dialog && window.angular?.element(dialog).scope(); } catch (_) {}
+        while (scope && !scope.af) scope = scope.$parent;
+        const af = scope?.af;
+        const time = Number(af?.eventDialog?.printInfo?.dataTms);
+        const trend = af?.ECGTrendDialog;
+        const range = Array.isArray(trend?.timeRange) ? trend.timeRange.map(Number) : [];
+        const printStart = review && reviewDialogRangeOn && review.items.includes(time) && range.length === 2
+            && Number.isFinite(Number(trend.startTime)) ? reviewPrintStart(review.ctx, time) : null;
+        if (printStart === null) { existing.forEach(node => node.remove()); return; }
+        const boxes = [['context', printStart - PRINT_CONTEXT_BEFORE, PRINT_CONTEXT_SECONDS]];
+        // Event Tag 的印出範圍已有橘色選印框，只加 30 秒的範圍。
+        if (!review.ctx.config.tag) boxes.push(['main', printStart, PRINT_SHOWN_SECONDS]);
+        const strips = getTagPrintStrips({ dialog, range, viewStart: Number(trend.startTime) });
+        for (const node of existing) if (!strips.some(strip => strip.svg.contains(node))) node.remove();
+        for (const strip of strips) {
+            const width = Number(strip.svg.getAttribute('width')) || strip.svg.getBoundingClientRect().width;
+            const height = Number(strip.svg.getAttribute('height')) || strip.svg.getBoundingClientRect().height;
+            const scale = width / strip.seconds;
+            for (const [kind, start, seconds] of boxes) {
+                let rect = strip.svg.querySelector(`:scope > rect.rc-printrange.is-${kind}`);
+                if (!rect) {
+                    rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                    rect.setAttribute('class', `rc-printrange is-${kind}`);
+                    strip.svg.appendChild(rect);
+                }
+                // 範圍的邊剛好落在波形邊緣時往內縮 1px，虛線才看得到，不會被誤認為範圍還延伸到畫面外；
+                // 真的超出畫面時維持原樣（該側沒有邊線）。
+                let x0 = (start - strip.from) * scale;
+                let x1 = x0 + seconds * scale;
+                if (Math.abs(x0) <= 1.5) x0 = 1;
+                if (Math.abs(x1 - width) <= 1.5) x1 = width - 1;
+                rect.setAttribute('x', String(x0));
+                rect.setAttribute('y', '1');
+                rect.setAttribute('width', String(Math.max(0, x1 - x0)));
+                rect.setAttribute('height', String(Math.max(0, height - 2)));
+            }
+        }
+    }
     function getReviewECGDialog() {
         return document.querySelector('.ngdialog.ecg-dialog #af-ecg-dialog-v2');
     }
     function decorateReviewDialog() {
+        drawReviewPrintRange();
         let actions = document.querySelector('.rc-review-dialog-actions');
         const time = review?.active ?? null;
         const tools = (getReviewECGDialog() || document.querySelector('.ngdialog.section-dialog #af-section-dialog'))
@@ -4084,8 +4256,14 @@
             actions?.remove();
             actions = document.createElement('div');
             actions.className = 'rc-review-dialog-actions';
-            actions.innerHTML = '<button type="button" class="rc-review-btn is-cancel">取消選印</button>'
+            actions.innerHTML = '<button type="button" class="rc-review-btn is-eye" aria-pressed="false"'
+                + ' title="在心電圖上標出報告的列印範圍：實線為印出的 8 秒，虛線為下方 30 秒縮圖的範圍">👁 列印範圍</button>'
+                + '<button type="button" class="rc-review-btn is-cancel">取消選印</button>'
                 + '<button type="button" class="rc-review-btn is-swap">換一個</button>';
+            actions.querySelector('.is-eye').addEventListener('click', () => {
+                reviewDialogRangeOn = !reviewDialogRangeOn;
+                decorateReviewDialog();
+            });
             // 按下時才讀取目前顯示的選印，切換到其他張後也作用在正確的心電圖上。
             actions.querySelector('.is-cancel').addEventListener('click', event => {
                 if (review?.active != null) cancelReviewPrint(review.active, event.currentTarget);
@@ -4096,8 +4274,12 @@
             tools.prepend(actions);
         }
         actions.querySelector('.is-swap').hidden = !!review.ctx.config.reviewOnly;
+        // 列印範圍只用在一般心電圖視窗；藍色區段選印的報告版面不同，不顯示。
+        const eye = actions.querySelector('.is-eye');
+        eye.hidden = !getReviewECGDialog() || reviewPrintStart(review.ctx, time) === null;
+        eye.setAttribute('aria-pressed', String(reviewDialogRangeOn));
         const forced = !!review.cards.get(time)?.classList.contains('is-forced');
-        for (const button of actions.querySelectorAll('button')) {
+        for (const button of actions.querySelectorAll('button:not(.is-eye)')) {
             button.disabled = forced || review.busy || review.grouping;
             button.title = forced ? '橘色強制選印由網站決定，無法在此取消或替換' : '';
         }
@@ -4357,7 +4539,7 @@
         quickToast(strip.svg, `選印時間：${formatTagClock(ctx, start)}–${formatTagClock(ctx, start + TAG_PRINT_SHOWN)}`);
         // 選印清單中這張的縮圖改顯示新的選印範圍。
         const card = review?.ctx.config.tag ? review.cards.get(ctx.tagTime) : null;
-        if (card) loadReviewThumb(card, ctx.tagTime);
+        if (card) reloadReviewThumb(card, ctx.tagTime);
     }, true);
     // 選印清單開著時：網站點擊心電圖波形會切換並畫出 Mesurer 的量測虛線（未開 Mesurer 也會），
     // 只有 Mesurer 等量測功能開啟時才交給網站，否則擋下這次點擊。上方的標籤列不在波形內，改標籤不受影響。
