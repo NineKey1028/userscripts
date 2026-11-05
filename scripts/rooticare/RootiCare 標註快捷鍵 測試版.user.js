@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.46.0
+// @version      1.46.1
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -4527,7 +4527,8 @@
     }, { capture: true, passive: true });
     let tagPointerDown = null;
     document.addEventListener('mousemove', event => {
-        const inside = event.target.closest?.('.ngdialog.ecg-dialog .ecg-wave .ecgWave svg');
+        const inside = event.target.closest?.('.ngdialog.ecg-dialog .ecg-wave .ecgWave svg')
+            && !event.target.closest('.rc-lead-eye');
         if (!inside && !tagHover) return;
         const ctx = inside && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && !labelDrag
             ? getTagPrintContext() : null;
@@ -4546,6 +4547,7 @@
     document.addEventListener('click', event => {
         if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || labelDrag) return;
         if (!event.target.closest?.('.ngdialog.ecg-dialog .ecg-wave .ecgWave svg')) return;
+        if (event.target.closest('.rc-lead-eye')) return; // 導程眼睛按鈕自己處理點擊
         // 拖曳（例如選取或捲動）放開時不算點一下。
         if (tagPointerDown && Math.hypot(event.clientX - tagPointerDown.x, event.clientY - tagPointerDown.y) > 4) return;
         const ctx = getTagPrintContext();
@@ -4569,7 +4571,7 @@
     document.addEventListener('click', event => {
         if (!review || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || labelDrag) return;
         const svg = event.target.closest?.('.ngdialog.ecg-dialog .ecg-wave .ecgWave svg');
-        if (!svg || !window.angular) return;
+        if (!svg || !window.angular || event.target.closest('.rc-lead-eye')) return; // 導程眼睛按鈕不擋
         let scope;
         try { scope = window.angular.element(svg).scope(); } catch (_) { return; }
         while (scope && !scope.af) scope = scope.$parent;
