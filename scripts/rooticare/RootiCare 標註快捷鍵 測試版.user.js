@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.46.1
+// @version      1.47.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -57,6 +57,8 @@
  *   AF 清單 mid segment     下拉選單旁的 ◀ ▶ 切換上一個／下一個時段（編輯模式）
  *   Tachy／Brady 清單       網站 invert 按鈕旁的單頁「Invert」：本頁未修改的改為 artifact，
  *                          本頁已全部是 artifact 時改回未修改；psvt／vt 不變（編輯模式）
+ *   Spéc. 清單              放大鏡前的「Invert」取消本頁所有星星、「Invert all」取消整個清單的星星，
+ *                          備註與選印一併移除，按 Save 才儲存（編輯模式）
  *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整；聚焦時顯示提示 3 秒
  *   HR 清單時間框           貼上或修改時間後，自動以該心電圖白色區段的平均 BPM 填入 HR 欄
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
@@ -2351,6 +2353,80 @@
         requestAnimationFrame(() => { pageInvertPending = false; decorateEventPageInvert(); });
     }
     new MutationObserver(schedulePageInvert).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+
+    // Spéc.（specifics）清單：網站沒有 invert 按鈕，這裡在放大鏡前加入「Invert」（本頁）與「Invert all」（整個清單），
+    // 功能是取消星星（Ajouter aux spécificités）。每張都走網站點星星的 selectSpecificEvent：
+    // 同時移除備註文字與選印，寫入未儲存修改，按 Save 才會儲存（編輯模式）。
+    function getSpecificListScope(dialog) {
+        let scope;
+        try { scope = window.angular?.element(dialog).scope?.(); } catch (_) { return null; }
+        if (scope?.af?.eventDialog?.dscp?.type !== 'specifics' || typeof scope.selectSpecificEvent !== 'function') return null;
+        return scope;
+    }
+    function unstarSpecificList(dialog, all) {
+        const scope = getSpecificListScope(dialog);
+        const af = scope?.af;
+        const tms = af?.specificEvents?.modifiedData?.tms;
+        if (!scope || !af.editingSwitch || af.loading?.ecg || !Array.isArray(tms)) return;
+        const starred = time => af.specificEvents.modifiedData.tms.includes(time);
+        scope.$apply(() => {
+            // 本頁：傳入心電圖物件，網站會一併更新選印勾選狀態；星星圖示由 isSpecific 決定。
+            for (const item of af.eventDialog.currentData || []) {
+                const time = toEventTime(item);
+                if (time === null || !starred(time)) continue;
+                scope.selectSpecificEvent(item);
+                item.isSpecific = false;
+            }
+            if (!all) return;
+            // 其他頁：只取消這個清單裡的時間，傳入時間數值（網站同樣支援）。
+            const times = (af.eventDialog.specifics?.data || []).flat().map(toEventTime);
+            for (const time of new Set(times)) {
+                if (time !== null && starred(time)) scope.selectSpecificEvent(time);
+            }
+        });
+    }
+    const SPECIFIC_BUTTONS = [
+        { all: false, icon: 'invertselect-page-icon', text: 'Invert', title: '單頁 Invert：取消本頁所有星星（連同備註與選印）' },
+        { all: true, icon: 'invertselect-icon', text: 'Invert all', title: 'Invert all：取消整個 Spéc. 清單的所有星星（連同備註與選印）' },
+    ];
+    function decorateSpecificInvert() {
+        for (const button of document.querySelectorAll('.rc-specific-invert')) {
+            const dialog = button.closest('#af-event-dialog');
+            if (isDisabledPage() || !dialog || !getSpecificListScope(dialog)) button.remove();
+        }
+        if (isDisabledPage()) return;
+        for (const zoom of document.querySelectorAll('#af-event-dialog .tool-btns > .zoom-btn')) {
+            const dialog = zoom.closest('#af-event-dialog');
+            const scope = getSpecificListScope(dialog);
+            if (!scope) continue;
+            // 與網站其他清單的 invert 按鈕相同：編輯模式、非 iPad 列印才顯示。
+            let hidden = !scope.af.editingSwitch;
+            try { hidden ||= !!scope.isiPad_inPrint?.(); } catch (_) { /* 沿用編輯模式判斷 */ }
+            for (const spec of SPECIFIC_BUTTONS) {
+                let button = dialog.querySelector(`.rc-specific-invert[data-all="${spec.all}"]`);
+                if (!button) {
+                    button = document.createElement('div');
+                    button.className = 'tool-btn invertselect-btn rc-specific-invert';
+                    button.dataset.all = String(spec.all);
+                    button.title = spec.title;
+                    button.innerHTML = `<div class="${spec.icon}"></div><span class="smaller-font-size-11">${spec.text}</span>`;
+                    button.addEventListener('click', event => {
+                        event.preventDefault(); event.stopPropagation();
+                        unstarSpecificList(button.closest('#af-event-dialog'), spec.all);
+                    });
+                    zoom.before(button);
+                }
+                if (button.classList.contains('ng-hide') !== hidden) button.classList.toggle('ng-hide', hidden);
+            }
+        }
+    }
+    let specificInvertPending = false;
+    function scheduleSpecificInvert() {
+        if (specificInvertPending) return;
+        specificInvertPending = true;
+        requestAnimationFrame(() => { specificInvertPending = false; decorateSpecificInvert(); });
+    }
+    new MutationObserver(scheduleSpecificInvert).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
 
     // 時間輸入框：聚焦且內容是完整時間時，W／↑ 加 2 秒、S／↓ 減 2 秒（可按住連續調整）。
     // 依網站的日期格式解析（另接受輸入框提示的「日期, 時間」寫法），以原本的寫法寫回，
