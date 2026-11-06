@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.46.1
+// @version      1.47.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -57,6 +57,8 @@
  *   AF 清單 mid segment     下拉選單旁的 ◀ ▶ 切換上一個／下一個時段（編輯模式）
  *   Tachy／Brady 清單       網站 invert 按鈕旁的單頁「Invert」：本頁未修改的改為 artifact，
  *                          本頁已全部是 artifact 時改回未修改；psvt／vt 不變（編輯模式）
+ *   Spéc. 清單              放大鏡前的「Invert」取消本頁所有星星、「Invert all」取消整個清單的星星，
+ *                          備註與選印一併移除；再按一次可加回星星、備註與選印，按 Save 才儲存（編輯模式）
  *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整；聚焦時顯示提示 3 秒
  *   HR 清單時間框           貼上或修改時間後，自動以該心電圖白色區段的平均 BPM 填入 HR 欄
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
@@ -2351,6 +2353,213 @@
         requestAnimationFrame(() => { pageInvertPending = false; decorateEventPageInvert(); });
     }
     new MutationObserver(schedulePageInvert).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+
+    // Spéc.（specifics）清單：網站沒有 invert 按鈕，這裡在放大鏡前加入「Invert」（本頁）與「Invert all」（整個清單），
+    // 功能是取消星星（Ajouter aux spécificités）。每張都走網站點星星的 selectSpecificEvent：
+    // 同時移除備註文字與選印，寫入未儲存修改，按 Save 才會儲存（編輯模式）。
+    // 取消後若星星與選印都沒有再變動，再按一次同一個按鈕會把剛剛取消的星星、備註與選印加回來。
+    function getSpecificListScope(dialog) {
+        let scope;
+        try { scope = window.angular?.element(dialog).scope?.(); } catch (_) { return null; }
+        if (scope?.af?.eventDialog?.dscp?.type !== 'specifics' || typeof scope.selectSpecificEvent !== 'function') return null;
+        return scope;
+    }
+    // 網站備註存放的位置不明，因此取消前把星星、選印與清單相關資料做快照，
+    // 還原時只把「取消星星」與「重新加星星」改動到的欄位改回快照的值（陣列、物件就地更新，保留網站的參照）。
+    const SNAPSHOT_SKIP = Symbol('skip');
+    const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value)
+        && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+    function snapshotValue(value, depth = 0, seen = new WeakSet()) {
+        if (value === null || typeof value !== 'object') return typeof value === 'function' ? SNAPSHOT_SKIP : value;
+        if (depth > 8 || seen.has(value)) return SNAPSHOT_SKIP;
+        if (Array.isArray(value)) {
+            // 心電圖波形等大型數值陣列與星星、備註、選印無關，不做快照。
+            if (value.length > 5000) return SNAPSHOT_SKIP;
+            seen.add(value);
+            const copy = value.map(item => snapshotValue(item, depth + 1, seen));
+            seen.delete(value);
+            return copy;
+        }
+        if (!isPlainObject(value)) return SNAPSHOT_SKIP;
+        seen.add(value);
+        const copy = {};
+        for (const key of Object.keys(value)) {
+            if (key.startsWith('$$')) continue;
+            copy[key] = snapshotValue(value[key], depth + 1, seen);
+        }
+        seen.delete(value);
+        return copy;
+    }
+    const isLeafArray = value => value.every(item => item === null || typeof item !== 'object');
+    // 找出 a、b 兩份快照中不同的路徑；只含數值的陣列整個當成一個值比較。
+    function diffSnapshots(a, b, path = [], out = []) {
+        if (a === SNAPSHOT_SKIP || b === SNAPSHOT_SKIP) return out;
+        if (Array.isArray(a) && Array.isArray(b) && a.length === b.length && !(isLeafArray(a) && isLeafArray(b))) {
+            a.forEach((item, index) => diffSnapshots(item, b[index], [...path, index], out));
+        } else if (isPlainObject(a) && isPlainObject(b)) {
+            for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) diffSnapshots(a[key], b[key], [...path, key], out);
+        } else if (JSON.stringify(a) !== JSON.stringify(b)) {
+            out.push(path);
+        }
+        return out;
+    }
+    const readPath = (root, path) => path.reduce((value, key) => value?.[key], root);
+    function cloneSnapshot(value) {
+        if (Array.isArray(value)) return value.map(cloneSnapshot);
+        if (!isPlainObject(value)) return value === SNAPSHOT_SKIP ? undefined : value;
+        const copy = {};
+        for (const [key, item] of Object.entries(value)) if (item !== SNAPSHOT_SKIP) copy[key] = cloneSnapshot(item);
+        return copy;
+    }
+    function restoreSnapshotValue(target, snapshot) {
+        // 就地更新：陣列與物件保留原本的參照，網站其他地方綁定的資料才會一起更新。
+        if (Array.isArray(target) && Array.isArray(snapshot)) {
+            const items = snapshot.map((item, index) => item === SNAPSHOT_SKIP ? target[index] : cloneSnapshot(item));
+            target.splice(0, target.length, ...items);
+            return target;
+        }
+        if (isPlainObject(target) && isPlainObject(snapshot)) {
+            for (const key of Object.keys(target)) if (!key.startsWith('$$') && !(key in snapshot)) delete target[key];
+            for (const [key, value] of Object.entries(snapshot)) {
+                if (value !== SNAPSHOT_SKIP) target[key] = restoreSnapshotValue(target[key], value);
+            }
+            return target;
+        }
+        return cloneSnapshot(snapshot);
+    }
+    function restorePaths(root, before, paths) {
+        // 先處理較短的路徑；已被上層一併還原的子路徑跳過。
+        const done = [];
+        for (const path of [...paths].sort((a, b) => a.length - b.length)) {
+            if (!path.length || done.some(prefix => prefix.every((key, index) => path[index] === key))) continue;
+            const parent = readPath(root, path.slice(0, -1));
+            const key = path[path.length - 1];
+            if (!parent || typeof parent !== 'object') continue;
+            let value = before;
+            for (const step of path) value = value === undefined || value === SNAPSHOT_SKIP ? undefined : value?.[step];
+            if (value === SNAPSHOT_SKIP) continue;
+            if (value === undefined) delete parent[key];
+            else parent[key] = restoreSnapshotValue(parent[key], value);
+            done.push(path);
+        }
+    }
+    function specificSnapshotRoot(af) {
+        return {
+            specificEvents: af.specificEvents,
+            selectedEvents: af.printDialog?.selectedEvents,
+            specifics: af.eventDialog?.specifics,
+            currentData: af.eventDialog?.currentData,
+        };
+    }
+    // 判斷取消後是否有其他變動：比對星星與選印。
+    function specificSignature(af) {
+        const tms = [...(af.specificEvents?.modifiedData?.tms || [])].map(Number).sort((a, b) => a - b);
+        return JSON.stringify([tms, snapshotValue(af.printDialog?.selectedEvents)]);
+    }
+    const specificPageTimes = af => (af.eventDialog.currentData || []).map(toEventTime).join(',');
+    // 已取消、可還原的紀錄（後進先出）：先按本頁再按全部時，可依序還原。
+    const specificUndoStack = [];
+    function unstarSpecificList(dialog, all, anchor) {
+        const scope = getSpecificListScope(dialog);
+        const af = scope?.af;
+        const tms = af?.specificEvents?.modifiedData?.tms;
+        if (!scope || !af.editingSwitch || af.loading?.ecg || !Array.isArray(tms)) return;
+        const top = specificUndoStack[specificUndoStack.length - 1];
+        if (top && (top.af !== af || top.signature !== specificSignature(af))) specificUndoStack.length = 0;
+        const last = specificUndoStack[specificUndoStack.length - 1];
+        if (last && last.all === all && (all || last.pageTimes === specificPageTimes(af))) {
+            specificUndoStack.pop();
+            restoreSpecificList(scope, last, anchor);
+            return;
+        }
+        const starred = time => af.specificEvents.modifiedData.tms.includes(time);
+        const pageItems = (af.eventDialog.currentData || []).filter(item => {
+            const time = toEventTime(item);
+            return time !== null && starred(time);
+        });
+        const otherTimes = all ? [...new Set((af.eventDialog.specifics?.data || []).flat().map(toEventTime))]
+            .filter(time => time !== null && starred(time) && !pageItems.some(item => toEventTime(item) === time)) : [];
+        if (!pageItems.length && !otherTimes.length) return;
+        const before = snapshotValue(specificSnapshotRoot(af));
+        const pageTimes = specificPageTimes(af);
+        scope.$apply(() => {
+            // 本頁：傳入心電圖物件，網站會一併更新選印勾選狀態；星星圖示由 isSpecific 決定。
+            for (const item of pageItems) {
+                scope.selectSpecificEvent(item);
+                item.isSpecific = false;
+            }
+            // 其他頁：只取消這個清單裡的時間，傳入時間數值（網站同樣支援）。
+            for (const time of otherTimes) scope.selectSpecificEvent(time);
+        });
+        const after = snapshotValue(specificSnapshotRoot(af));
+        specificUndoStack.push({
+            af, all, pageTimes, before, after,
+            pageTimesRemoved: pageItems.map(toEventTime), otherTimes,
+            signature: specificSignature(af),
+        });
+        quickToast(anchor, `已取消 ${pageItems.length + otherTimes.length} 個星星，再按一次可加回星星、備註與選印`);
+    }
+    function restoreSpecificList(scope, record, anchor) {
+        const af = scope.af;
+        const times = [...record.pageTimesRemoved, ...record.otherTimes];
+        scope.$apply(() => {
+            // 先以網站點星星的方式加回（寫入未儲存修改），再把備註、選印等改回取消前的值。
+            for (const time of times) {
+                if (af.specificEvents.modifiedData.tms.includes(time)) continue;
+                const item = (af.eventDialog.currentData || []).find(entry => toEventTime(entry) === time);
+                scope.selectSpecificEvent(item || time);
+            }
+            const restarred = snapshotValue(specificSnapshotRoot(af));
+            const paths = [...diffSnapshots(record.before, record.after), ...diffSnapshots(record.after, restarred)];
+            restorePaths(specificSnapshotRoot(af), record.before, paths);
+            for (const item of af.eventDialog.currentData || []) {
+                if (times.includes(toEventTime(item))) item.isSpecific = true;
+            }
+        });
+        quickToast(anchor, `已加回 ${times.length} 個星星（含備註與選印）`);
+    }
+    const SPECIFIC_BUTTONS = [
+        { all: false, icon: 'invertselect-page-icon', text: 'Invert', title: '單頁 Invert：取消本頁所有星星（連同備註與選印），再按一次加回' },
+        { all: true, icon: 'invertselect-icon', text: 'Invert all', title: 'Invert all：取消整個 Spéc. 清單的所有星星（連同備註與選印），再按一次加回' },
+    ];
+    function decorateSpecificInvert() {
+        for (const button of document.querySelectorAll('.rc-specific-invert')) {
+            const dialog = button.closest('#af-event-dialog');
+            if (isDisabledPage() || !dialog || !getSpecificListScope(dialog)) button.remove();
+        }
+        if (isDisabledPage()) return;
+        for (const zoom of document.querySelectorAll('#af-event-dialog .tool-btns > .zoom-btn')) {
+            const dialog = zoom.closest('#af-event-dialog');
+            const scope = getSpecificListScope(dialog);
+            if (!scope) continue;
+            // 與網站其他清單的 invert 按鈕相同：編輯模式、非 iPad 列印才顯示。
+            let hidden = !scope.af.editingSwitch;
+            try { hidden ||= !!scope.isiPad_inPrint?.(); } catch (_) { /* 沿用編輯模式判斷 */ }
+            for (const spec of SPECIFIC_BUTTONS) {
+                let button = dialog.querySelector(`.rc-specific-invert[data-all="${spec.all}"]`);
+                if (!button) {
+                    button = document.createElement('div');
+                    button.className = 'tool-btn invertselect-btn rc-specific-invert';
+                    button.dataset.all = String(spec.all);
+                    button.title = spec.title;
+                    button.innerHTML = `<div class="${spec.icon}"></div><span class="smaller-font-size-11">${spec.text}</span>`;
+                    button.addEventListener('click', event => {
+                        event.preventDefault(); event.stopPropagation();
+                        unstarSpecificList(button.closest('#af-event-dialog'), spec.all, button);
+                    });
+                    zoom.before(button);
+                }
+                if (button.classList.contains('ng-hide') !== hidden) button.classList.toggle('ng-hide', hidden);
+            }
+        }
+    }
+    let specificInvertPending = false;
+    function scheduleSpecificInvert() {
+        if (specificInvertPending) return;
+        specificInvertPending = true;
+        requestAnimationFrame(() => { specificInvertPending = false; decorateSpecificInvert(); });
+    }
+    new MutationObserver(scheduleSpecificInvert).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
 
     // 時間輸入框：聚焦且內容是完整時間時，W／↑ 加 2 秒、S／↓ 減 2 秒（可按住連續調整）。
     // 依網站的日期格式解析（另接受輸入框提示的「日期, 時間」寫法），以原本的寫法寫回，
