@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率自動標註器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.1
+// @version      1.2
 // @description  依相鄰心搏間隔計算變動率，預設達 12% 時標紅並加粗；按住反引號鍵顯示各組平均心率（排除灰色背景區段）。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -17,13 +17,12 @@
 // 變動率 =（前一個有效間隔 − 目前間隔）/ 目前間隔；預設達 12% 時標紅並加粗。
 // 預設採透明度漸層；可修改 HIT_THRESHOLD、ENABLE_GRADIENT 與 TARGET_COLOR。
 // 按住反引號鍵（`）：顯示各組平均心率，灰色背景區段的 BPM 不列入；放開按鍵：隱藏平均值。
-// 在輸入框或可編輯區域中不觸發平均值快捷鍵；控制台表格由 ENABLE_LOG 控制。
+// 在輸入框或可編輯區域中不觸發平均值快捷鍵。
 
 (function() {
     'use strict';
 
     // 顯示與計算設定
-    const ENABLE_LOG = true; // 是否輸出控制台表格
     const ENABLE_GRADIENT = true; // 是否開啟漸層模式 (true: 越快越紅, false: 達標即全紅)
     const DEBOUNCE_TIME = 100; // 防抖延遲 (ms)
     const MAX_VAL_FILTER = 10000; // 數值過濾上限 (ms)
@@ -42,11 +41,9 @@
         const groups = document.querySelectorAll('.annoGroup');
         groupDataCache = []; // 清空快取
 
-        groups.forEach((group, groupIdx) => {
+        groups.forEach(group => {
             const textElements = Array.from(group.querySelectorAll('text.annoDuration'));
             let lastValidValue = null;
-            let logData = [];
-            let heartRates = []; // 用來儲存此組所有有效的心率值
             const heartRateLabels = []; // 心率與其文字節點，按鍵時用來排除灰色區段
 
             // 排除間隔達到設定上限的文字節點。
@@ -56,7 +53,7 @@
                 return val < MAX_VAL_FILTER;
             });
 
-            msElements.forEach((el, index) => {
+            msElements.forEach(el => {
                 const mainText = el.childNodes[0] ? el.childNodes[0].textContent.trim() : "";
                 const match = mainText.match(/\d+/);
                 if (!match) return;
@@ -70,7 +67,6 @@
                     const hrMatch = tspanEl.textContent.trim().match(/\d+/);
                     if (hrMatch) {
                         currentHR = parseInt(hrMatch[0], 10);
-                        heartRates.push(currentHR); // 收集心率
                         heartRateLabels.push({ hr: currentHR, element: el });
                     }
                 }
@@ -78,12 +74,10 @@
                 if (lastValidValue === null) {
                     lastValidValue = currentMS;
                     updateStyle(el, BASE_COLOR, false);
-                    if (ENABLE_LOG) pushLog(logData, index, currentMS, lastValidValue, "0.00%", "START", currentHR);
                     return;
                 }
 
                 const speedUpRate = (lastValidValue - currentMS) / currentMS;
-                const speedUpPercentage = (speedUpRate * 100).toFixed(2) + '%';
 
                 if (speedUpRate >= HIT_THRESHOLD) {
                     let finalColor = TARGET_COLOR;
@@ -95,40 +89,18 @@
                     }
 
                     updateStyle(el, finalColor, true);
-                    if (ENABLE_LOG) pushLog(logData, index, currentMS, lastValidValue, speedUpPercentage, `HIT`, currentHR);
                 } else {
                     updateStyle(el, BASE_COLOR, false);
-                    if (ENABLE_LOG) pushLog(logData, index, currentMS, lastValidValue, speedUpPercentage, "NORMAL", currentHR);
                 }
 
                 lastValidValue = currentMS;
             });
 
-            // 以本組讀到的心率值計算算術平均。
-            let avgHR = null;
-            if (heartRates.length > 0) {
-                const sum = heartRates.reduce((acc, val) => acc + val, 0);
-                avgHR = (sum / heartRates.length).toFixed(2);
-            }
-
-            // 保存容器與平均值，供按鍵顯示使用。
+            // 保存容器與心率文字，供按鍵顯示平均值使用。
             groupDataCache.push({
                 element: group,
                 heartRateLabels
             });
-
-            if (ENABLE_LOG && logData.length > 0) {
-                console.group(`[ECG Analysis] Group ${groupIdx + 1}`);
-                console.table(logData);
-
-                if (avgHR) {
-                    console.log(`%c➔ 本組平均心率: ${avgHR} bpm (計算總數: ${heartRates.length})`, "color: #007acc; font-weight: bold;");
-                } else {
-                    console.log("➔ 本組未偵測到有效心率資料");
-                }
-
-                console.groupEnd();
-            }
         });
     }
 
@@ -153,18 +125,6 @@
             g = parseInt(hex.slice(3, 5), 16),
             b = parseInt(hex.slice(5, 7), 16);
         return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    }
-
-    // 將單筆分析整理為控制台表格欄位；缺少心率時以「無」表示，不補造數值。
-    function pushLog(arr, idx, cur, last, rate, status, hr) {
-        arr.push({
-            "順序": idx + 1,
-            "數值": cur,
-            "基準": last,
-            "變化率": rate,
-            "心率": hr !== null ? hr : "無",
-            "狀態": status
-        });
     }
 
     // 平均心率浮層與快捷鍵
