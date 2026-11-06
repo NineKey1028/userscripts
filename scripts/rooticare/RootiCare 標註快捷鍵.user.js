@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.47.1
+// @version      1.47.2
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -3360,10 +3360,18 @@
     // 依清單類型檢查事件時間附近（-1～+2 秒）的早搏是否仍符合：
     // Isolated 單顆；Couplet／Triplet 剛好 2／3 顆連續；VT／SVE run／SVT 至少 4 顆連續；
     // Bigeminy／Trigeminy 為單顆早搏，與前或後一顆早搏之間剛好隔 1／2 顆正常心搏。
+    // Bigeminy／Trigeminy 一輪可能比 3 秒長（心率慢時），事件時間會落在兩顆早搏之間的正常心搏上，
+    // 因此前後各放寬到一整輪（every × 中位 RR），並由離事件時間最近的早搏開始檢查。
     function checkEventPattern(beats, config) {
         const ectopic = config.beat;
         const isEctopic = index => beats[index]?.type === ectopic;
-        const anchors = beats.map((_, i) => i).filter(i => isEctopic(i) && beats[i].offset >= -1 && beats[i].offset <= 2);
+        let before = 1, after = 2;
+        if (config.kind === 'pattern') {
+            const cycle = (config.every || 2) * median(beats.slice(1).map((beat, i) => beat.offset - beats[i].offset));
+            if (cycle > 0) { before = Math.max(before, cycle); after = Math.max(after, cycle); }
+        }
+        const anchors = beats.map((_, i) => i).filter(i => isEctopic(i) && beats[i].offset >= -before && beats[i].offset <= after)
+            .sort((a, b) => Math.abs(beats[a].offset) - Math.abs(beats[b].offset));
         if (!anchors.length) return { ok: false, reason: `事件時間附近沒有 ${ectopic} 標籤` };
         let found = 0;
         let variabilityReason = null;
