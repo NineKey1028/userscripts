@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.20.1
+// @version      1.20.2
 // @description  依變動率、BPM、彩色波形高度／寬度、與前一跳比較（高矮寬窄快慢）、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -622,7 +622,13 @@
             const page = container.querySelector('.pagination-blk');
             if (page) thumbnailLayoutObserver.observe(page);
         }
-        fitThumbnailControl();
+        scheduleFitThumbnailControl();
+    }
+    // 讀取尺寸會強制瀏覽器立即排版；網站重畫期間改到下一個畫面再量，與瀏覽器本身的排版合併。
+    let fitFrame = 0;
+    function scheduleFitThumbnailControl() {
+        if (fitFrame) return;
+        fitFrame = requestAnimationFrame(() => { fitFrame = 0; fitThumbnailControl(); });
     }
 
     // 讀取圓點的 SVG 水平座標；無效數字回傳 null，供排序前排除。
@@ -740,14 +746,26 @@
         return Math.abs(peak) < 0.05 ? null : peak > 0 ? 'up' : 'down';
     }
 
+    // type 代表波形不常變動；以資料陣列快取方向，type 很多時不必每次更新都重新排序計算。
+    const templateDirectionCache = new WeakMap();
+    function cachedTemplateDirection(samples) {
+        if (!Array.isArray(samples)) return templateDirection(samples);
+        const key = `${samples.length}:${samples[0]}:${samples[samples.length >> 1]}:${samples[samples.length - 1]}`;
+        const cached = templateDirectionCache.get(samples);
+        if (cached?.key === key) return cached.value;
+        const value = templateDirection(samples);
+        templateDirectionCache.set(samples, { key, value });
+        return value;
+    }
+
     // 依波形方向條件為左側 type 區塊上色；只切換需要變更的類別，避免觸發多餘的重畫通知。
     function refreshTypeDirection(direction) {
         let charts = [];
-        try { charts = thumbnailScope()?.morphology?.morphologyChart?.data || []; }
+        try { charts = direction ? thumbnailScope()?.morphology?.morphologyChart?.data || [] : []; }
         catch (_) { /* 無 Angular 時不標示 type。 */ }
         for (const tile of document.querySelectorAll('.morphology .type-trend[id^="type-trend-"]')) {
             const index = Number(tile.id.slice('type-trend-'.length));
-            const hit = Boolean(direction) && templateDirection(charts[index]?.data) === direction;
+            const hit = Boolean(direction) && cachedTemplateDirection(charts[index]?.data) === direction;
             if (tile.classList.contains(CONFIG.typeHitClass) !== hit) tile.classList.toggle(CONFIG.typeHitClass, hit);
         }
     }
@@ -1541,9 +1559,9 @@
         const widthEnd = player ? (offset(stops[colored + 1]) + centerOffset) / 2 : Math.min(1, centerOffset + 0.1);
         const segmentSeconds = readWaveScale(container).seconds;
         const playerSeconds = segmentSeconds > 0 && Number.isFinite(segmentSeconds) ? segmentSeconds : 10;
-        const key = `${player}:${playerSeconds}:${start}:${end}:${widthStart}:${widthEnd}:${centerOffset}:${d}`;
+        const key = `${player}:${playerSeconds}:${start}:${end}:${widthStart}:${widthEnd}:${centerOffset}`;
         const cached = shapeCache.get(path);
-        if (cached?.key === key) return cached.value;
+        if (cached?.key === key && cached.d === d) return cached.value;
         const points = sampleWavePath(d);
         let value = null;
         if (points) {
@@ -1582,7 +1600,7 @@
                 }
             }
         }
-        shapeCache.set(path, { key, value });
+        shapeCache.set(path, { key, d, value });
         return value;
     }
 
@@ -1620,8 +1638,35 @@
     const NOISE_TURN_RATIO = 0.2;
     const NOISE_TURN_LIMIT = 2;
 
+    // 雜訊與前一跳量測只依原始取樣、取樣率、繪圖寬度和圓點位置；這些都沒變時沿用上次結果。
+    // 選取縮圖、翻頁重畫或條件更新時會反覆量同一批縮圖，快取可避免每次重算整段原始資料。
+    function rawBeatCacheKey(container) {
+        const wave = container.querySelector('.ecgWave');
+        let scope;
+        try { scope = window.angular?.element(wave)?.isolateScope?.(); } catch (_) { /* 未載入 */ }
+        const samples = scope?.ecgData;
+        if (!Array.isArray(samples) || samples.length < 20) return null;
+        const dots = [...container.querySelectorAll('circle.anno-dot')]
+            .map(dot => `${dot.getAttribute('cx')}${dot.classList.contains('current') ? '*' : ''}`).join(',');
+        return { samples, key: [samples.length, samples[0], samples[samples.length >> 1], samples[samples.length - 1],
+            scope.segSec, scope.posInfo?.sampleRate, scope.sampleRate,
+            wave.querySelector('.centerGroup')?.getAttribute('width'), dots].join('|') };
+    }
+    function cachedRawBeat(cache, container, compute) {
+        const entry = rawBeatCacheKey(container);
+        if (!entry) return compute(container);
+        const cached = cache.get(entry.samples);
+        if (cached?.key === entry.key) return cached.value;
+        const value = compute(container);
+        cache.set(entry.samples, { key: entry.key, value });
+        return value;
+    }
+    const noiseCache = new WeakMap();
+    const relativeCache = new WeakMap();
+    const analyzeBeatNoise = container => cachedRawBeat(noiseCache, container, computeBeatNoise);
+
     // 以網站提供的原始 mV 取樣分析紅色心搏附近是否為雜訊；資料或正常心搏不足時回傳 null。
-    function analyzeBeatNoise(container) {
+    function computeBeatNoise(container) {
         const wave = container.querySelector('.ecgWave');
         let scope;
         try { scope = window.angular?.element(wave)?.isolateScope?.(); } catch (_) { /* 未載入 */ }
@@ -1781,7 +1826,8 @@
         return operator === 'faster' ? relative.rr < relative.previousRr : operator === 'slower' ? relative.rr > relative.previousRr : false;
     }
     // 縮圖：心搏位置由圓點座標換算為原始取樣位置（與雜訊判斷相同）。
-    function readThumbnailRelative(thumb) {
+    const readThumbnailRelative = thumb => cachedRawBeat(relativeCache, thumb, computeThumbnailRelative);
+    function computeThumbnailRelative(thumb) {
         const wave = thumb.querySelector('.ecgWave');
         let scope;
         try { scope = window.angular?.element(wave)?.isolateScope?.(); } catch (_) { /* 未載入 */ }
@@ -2042,18 +2088,22 @@
     function update() {
         ensureControl(); ensurePlayerControl();
         refreshThumbnailStatus();
-        document.querySelectorAll('#right-list .ecg-trend').forEach(thumb => thumb.classList.remove(CONFIG.hitClass, CONFIG.reclassifiedClass));
         const settings = readThumbnailSettings();
         const valid = validConditions(settings);
         // 左側 type 只依波形方向上色，不套用其他數值條件；條件設定無效時一併清除。
         refreshTypeDirection(valid ? settings.conditions.find(condition => condition.kind === 'direction')?.value : null);
-        if (!valid) return;
-        const category = getCurrentCategory();
-        thumbnailHits(settings).forEach(thumb => {
-            thumb.classList.add(CONFIG.hitClass);
-            const classification = getClassification(thumb);
-            if (category && classification && classification !== category) thumb.classList.add(CONFIG.reclassifiedClass);
-        });
+        const hits = valid ? thumbnailHits(settings) : new Set();
+        const category = valid ? getCurrentCategory() : '';
+        // 只切換結果有變的縮圖；先全部移除再加回會讓每張命中縮圖每次都重算樣式。
+        for (const thumb of document.querySelectorAll('#right-list .ecg-trend')) {
+            const hit = hits.has(thumb);
+            const classification = hit ? getClassification(thumb) : '';
+            const reclassified = hit && Boolean(category && classification && classification !== category);
+            if (thumb.classList.contains(CONFIG.hitClass) !== hit) thumb.classList.toggle(CONFIG.hitClass, hit);
+            if (thumb.classList.contains(CONFIG.reclassifiedClass) !== reclassified) {
+                thumb.classList.toggle(CONFIG.reclassifiedClass, reclassified);
+            }
+        }
     }
 
     // 以 scheduled 合併短時間多次 DOM 通知，180 ms 後統一更新縮圖標記。
@@ -2084,6 +2134,8 @@
             }
         }, true);
         observer = new MutationObserver(records => {
+            // 已排定更新時，這批變動會在同一次更新處理；網站重畫時可能一次上千筆，不必逐筆判斷。
+            if (scheduled) return;
             if (!document.querySelector('.morphology > .container')) {
                 enabled = false;
                 heartRateEnabled = false;
