@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標籤彩色化
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.0
+// @version      1.1
 // @description  自動將 V / S / N 文字套用自訂顏色與可選粗體，並移除網站頁尾。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -49,38 +49,48 @@
         }
     }
 
+    // 只在值或 !important 不同時寫入，避免重複寫入 style 屬性觸發其他腳本的 DOM 監看。
+    function setStyle(el, name, value) {
+        if (el.style.getPropertyValue(name) !== value || el.style.getPropertyPriority(name) !== 'important') {
+            el.style.setProperty(name, value, 'important');
+        }
+    }
+    function clearStyle(el, name) {
+        if (el.style.getPropertyValue(name)) el.style.removeProperty(name);
+    }
+
     // 只處理僅含單一文字節點且全文為 V / S / N 的元素，避免連帶替長句或父容器上色。
     // 同時設定 HTML color 與 SVG fill；粗體開關獨立於顏色，關閉時移除對應行內樣式。
-    function applyColoredMarkers() {
-        // 略過程式、樣式與頁尾節點，只處理可顯示的文字元素。
-        const elements = document.querySelectorAll('*:not(script):not(style):not(.rooti-care-footer)');
+    function styleElement(el) {
+        if (!el || el.childNodes.length !== 1 || el.firstChild.nodeType !== Node.TEXT_NODE) return;
+        if (el.matches('script, style, .rooti-care-footer')) return;
+        const targetColor = colorMap[el.textContent.trim()];
+        if (!targetColor) return;
 
-        elements.forEach(el => {
-            if (el.childNodes.length === 1 && el.childNodes[0].nodeType === Node.TEXT_NODE) {
-                const text = el.textContent.trim();
+        // 依設定套用或移除文字與 SVG 顏色。
+        if (config.enableColor) {
+            setStyle(el, 'color', targetColor);
+            setStyle(el, 'fill', targetColor);
+        } else {
+            clearStyle(el, 'color');
+            clearStyle(el, 'fill');
+        }
 
-                if (colorMap[text]) {
-                    const targetColor = colorMap[text];
+        // 依設定套用或移除字重。
+        if (config.enableBold) setStyle(el, 'font-weight', config.fontWeight);
+        else clearStyle(el, 'font-weight');
+    }
 
-                    // 依設定套用或移除文字與 SVG 顏色。
-                    if (config.enableColor) {
-                        el.style.setProperty('color', targetColor, 'important');
-                        el.style.setProperty('fill', targetColor, 'important');
-                    } else {
-                        el.style.removeProperty('color');
-                        el.style.removeProperty('fill');
-                    }
-
-                    // 依設定套用或移除字重。
-                    if (config.enableBold) {
-                        // 採用設定的 fontWeight。
-                        el.style.setProperty('font-weight', config.fontWeight, 'important');
-                    } else {
-                        el.style.removeProperty('font-weight');
-                    }
-                }
-            }
-        });
+    // 只走訪文字節點（比逐一檢查所有元素快很多，波形 SVG 的 path 不含文字），處理其父元素。
+    function applyColoredMarkers(root = document.body) {
+        if (!root) return;
+        if (root.nodeType === Node.TEXT_NODE) { styleElement(root.parentElement); return; }
+        if (root.nodeType !== Node.ELEMENT_NODE) return;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            // V / S / N 去除空白後只有 1 個字，長文字直接略過。
+            if (node.data.length <= 8) styleElement(node.parentElement);
+        }
     }
 
     // 每次更新先移除頁尾，再套用標籤樣式。
@@ -90,15 +100,31 @@
         applyColoredMarkers();
     }
 
-    // 監看 DOM 變動並重新套用樣式。
-    // DOM 子節點增刪時重新上色；不監看腳本自己寫入的 style，避免樣式更新再觸發自身。
-    const observer = new MutationObserver(() => runAllTasks());
-    observer.observe(document.body, { childList: true, subtree: true });
+    // 監看 DOM 變動，只重新處理新增或文字改變的節點；同一畫面內的多次變動合併成一次處理。
+    // 不監看腳本自己寫入的 style，避免樣式更新再觸發自身。
+    const pendingRoots = new Set();
+    let pendingFrame = 0;
+    function flushPending() {
+        pendingFrame = 0;
+        removeFooter();
+        for (const root of pendingRoots) {
+            if (root.isConnected) applyColoredMarkers(root);
+        }
+        pendingRoots.clear();
+    }
+    const observer = new MutationObserver(records => {
+        for (const record of records) {
+            if (record.type === 'characterData') pendingRoots.add(record.target);
+            else for (const node of record.addedNodes) pendingRoots.add(node);
+        }
+        if (pendingRoots.size && !pendingFrame) pendingFrame = requestAnimationFrame(flushPending);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 
     // 初始化時立即處理目前畫面。
     runAllTasks();
 
-    // 每 2 秒補掃一次，處理非同步出現的內容。
-    setInterval(runAllTasks, 2000);
+    // 每 5 秒補掃一次，處理漏掉的內容；只寫入有變動的樣式，不會觸發其他腳本重算。
+    setInterval(runAllTasks, 5000);
 
 })();
