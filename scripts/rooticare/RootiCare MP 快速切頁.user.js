@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.7.0
+// @version      1.7.1
 // @description  在 MP 分頁邊界以 Q / E 切換相鄰 type，A / D 直接切換上一個 / 下一個 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -22,7 +22,8 @@
 // 右側跨頁合計選取多張縮圖時，腳本不切換 type；在輸入框中打字、開著 Morphology Player 等彈出視窗
 // 或資料載入中時不處理快捷鍵。首尾頁以 MP 縮圖清單的分頁判斷，切換 type 後不再讓網站同時換頁。
 // 剛換頁、該頁波形還沒載入完成時按首尾頁的 Q / E 或 A / D，會在載入完成後自動切換 type。
-// 網站快速連續換頁時，下一次換頁會等上一頁載入完成才執行，避免網站讀錯資料而卡住。
+// 網站快速連續換頁時，下一次換頁會等上一頁載入完成才執行（最多 0.8 秒），避免網站讀錯資料而卡住；
+// 換頁被延後時，F12 Console 會顯示「[MP 快速切頁]」紀錄，包含等待時間與哪張縮圖未載入。
 // 若仍發生（例如載入中點選左側 type），腳本會自動重新載入目前頁，未儲存的修改會保留。
 // 左側多選 type 時，隱藏右側灰色遮罩與虛線提示框的外觀，保留原生操作攔截。
 
@@ -87,15 +88,29 @@
     // Morphology 縮圖標籤以絕對取樣索引為鍵，每張縮圖的標籤都含有該 segment 的索引時才算載入完成。
     // 模型不可用時視為已載入，沿用原本的判斷。
     function pageDataReady(scope) {
+        return !pageDataProblem(scope);
+    }
+    // 回傳第一張未載入縮圖的說明（供診斷紀錄）；全部載入完成時回傳空字串。
+    function pageDataProblem(scope) {
         const segments = scope?.morphology?.state?.currentSegments;
         const labels = scope?.morphology?.ecgEnlargedChart?.annoData;
-        if (!Array.isArray(segments) || !Array.isArray(labels)) return true;
-        return segments.every((segment, i) => {
+        if (!Array.isArray(segments) || !Array.isArray(labels)) return '';
+        for (let i = 0; i < segments.length; i++) {
             const label = labels[i];
-            if (Array.isArray(label)) return true;
-            return Boolean(label) && typeof label === 'object'
-                && Object.prototype.hasOwnProperty.call(label, segment?.absoluteIndex);
-        });
+            if (Array.isArray(label)) continue;
+            if (!label || typeof label !== 'object') {
+                return `第 ${i + 1}/${segments.length} 張縮圖沒有標籤資料（標籤共 ${labels.length} 筆）`;
+            }
+            if (!Object.prototype.hasOwnProperty.call(label, segments[i]?.absoluteIndex)) {
+                return `第 ${i + 1}/${segments.length} 張縮圖的標籤不含心搏位置 ${segments[i]?.absoluteIndex}`;
+            }
+        }
+        return '';
+    }
+
+    // 換頁被延後時在 Console 記下等待時間與原因，方便確認是否誤判為未載入。
+    function logPageWait(message) {
+        try { console.info(`[MP 快速切頁] ${message}`); } catch (_) { /* 沒有 console 時略過 */ }
     }
 
     // 等這一頁資料載入完成後呼叫 done(true)；逾時或離開 MP 時呼叫 done(false)。一律非同步執行。
@@ -119,18 +134,25 @@
     }
 
     // 網站所有 MP 換頁（原生 Q / E、分頁按鈕、拉桿）都呼叫 pageChanged()。上一頁還沒載入完成時先排隊，
-    // 載入後才執行，並以當下頁碼為準，所以連續換頁只會執行最後一次；最多等 PAGE_WAIT_MS，逾時照常換頁。
+    // 載入後才執行，並以當下頁碼為準，所以連續換頁只會執行最後一次；最多等 PAGE_GUARD_WAIT_MS，逾時照常換頁。
+    // 等待上限較短：資料格式特殊時可能一直判為未載入，避免每次換頁都白等。
+    const PAGE_GUARD_WAIT_MS = 800;
     let pageChangeQueued = false;
     function installPageGuard(scope) {
         const owner = pageOwner(scope);
         if (!owner || owner.pageChanged.mpQuickSwitchOriginal) return;
         const original = owner.pageChanged;
         const guarded = function() {
-            if (pageDataReady(owner)) return original.apply(this, arguments);
+            const problem = pageDataProblem(owner);
+            if (!problem) return original.apply(this, arguments);
             if (pageChangeQueued) return;
             pageChangeQueued = true;
-            whenPageReady(owner, PAGE_WAIT_MS, () => {
+            const start = Date.now();
+            whenPageReady(owner, PAGE_GUARD_WAIT_MS, ready => {
                 pageChangeQueued = false;
+                const waited = Date.now() - start;
+                logPageWait(ready ? `換頁延後 ${waited} ms，等上一頁載入完成（${problem}）`
+                    : `換頁等待逾時 ${waited} ms，照常換頁；仍未通過：${pageDataProblem(owner) || problem}`);
                 if (!owner.$$destroyed) owner.$apply(() => original.call(owner));
             });
         };
