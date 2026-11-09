@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.47.2
+// @version      1.48.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -46,6 +46,7 @@
  *   Q / E   切換時間（← / →），縮放高度保持不變；滑鼠不必停在心電圖上
  *   A / D   以 Q / E 一半的距離切換時間（主畫面 30 秒、3 導程 10 秒、心電圖視窗 5 秒）；
  *           選印清單開啟時仍為切換上一張／下一張選印
+ *   B       隱藏心電圖上的 AF 圖示（重新整理頁面前不再出現）
  *   ch1～3 旁的眼睛  顯示／隱藏導程（重新載入恢復全開）
  *   滑過標籤列或波形時，顯示紅色垂直對齊線
  *
@@ -1570,6 +1571,15 @@
         }
     }
 
+    // 以樣式規則隱藏 AF 圖示，網站重繪後新產生的圖示也一併隱藏；重新整理頁面後恢復。
+    function hideAFIcons() {
+        if (document.getElementById('rc-hide-af-icon')) return;
+        const style = document.createElement('style');
+        style.id = 'rc-hide-af-icon';
+        style.textContent = 'image.af-icon, image[*|href*="icon_AFibMark"] { display: none !important; }';
+        document.head.appendChild(style);
+    }
+
     /**
      * 分派標註、區間選取與縮放快捷鍵。
      */
@@ -1601,6 +1611,14 @@
             return;
         }
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
+
+        // B 隱藏 AF 圖示；以實體按鍵位置判斷，輸入法不影響。
+        if (e.code === 'KeyB' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && !e.isComposing) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (!e.repeat) hideAFIcons();
+            return;
+        }
 
         // 區間面板開啟（已選第一端點）時，1／2／3 不標註，改為切換分頁；Shift+1/2/3 仍用來選第二端點。
         const tabDigit = /^(?:Digit|Numpad)([123])$/.exec(e.code || '')?.[1];
