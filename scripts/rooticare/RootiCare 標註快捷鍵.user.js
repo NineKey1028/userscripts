@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.55.0
+// @version      1.55.1
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -40,7 +40,7 @@
  *            以近期正常心律為基準，早搏後的代償間歇與恢復期不會讓後面的心搏被連帶判為早搏
  *            Isolated、Couplet／Triplet、Bigeminy／Trigeminy、SVE run 皆適用；區間前後整段都是早搏時改用 N→N 或週期平均推算基準
  *   同時標為 AF  面板上勾選後，以 Shift + 1／2／3 完成區間時，兩端點視為正常與 AF 的交界一併標為 AF（與 AFib + 相同，需在編輯模式）：
- *            AF 範圍為交界前後各多 10 秒；Save 後自動把該段 AF 的 Start／End segment（與 AF 清單 ◀ ▶ 相同）設在交界後 6 秒，
+ *            AF 範圍直接以兩端點交給網站（不另外延伸）；Save 後自動把該段 AF 的 Start／End segment（與 AF 清單 ◀ ▶ 相同）設在交界後 6 秒，
  *            白色區塊（報告印出的 8 秒）正好涵蓋交界（AF 清單的分段要重新載入紀錄後才更新，Save 後重新整理頁面即自動完成）；
  *            與既有 AF 合併時只調整仍為這次區間的那一端；勾選時篩選修改的原標籤自動取消 V（可再勾回）；
  *            勾選後出現子選項「僅標為 AF」（預設不勾）：勾選後完成區間只標為 AF，不修改任何標籤；
@@ -1244,11 +1244,10 @@
     }
     // 區間同時標為 AF：與網站 ECG 上的「AFib +」相同，依序以起點、終點呼叫 selectedNewAFEvent，
     // 由網站合併到 afEditing.data（與既有 AF 重疊的一併合併），尚未儲存。需在編輯模式。
-    // 兩端點視為正常心律與 AF 的交界：AF 範圍為交界前後各多 RANGE_AF_PADDING 秒。
+    // 兩端點視為正常心律與 AF 的交界：直接以點擊位置作為 AF 起訖交給網站，不另外延伸。
     // AF 清單的 Start／End segment 預設為 AF 起訖前 10 秒，且伺服器會把 AF 結尾延到紀錄的整分格線再加 60 秒，
     // 只調 AF 範圍無法讓交界落在白色區塊；因此儲存後另外把該段 AF 的 Start／End segment 設在交界後
     // RANGE_AF_SEGMENT_SHIFT 秒（與在 AF 清單按 ◀ ▶ 調整相同，存在 eventRecordRange.af），交界落在白色區塊（前 10～2 秒）中央。
-    const RANGE_AF_PADDING = 10;
     const RANGE_AF_SEGMENT_SHIFT = 6;
     // 由絕對取樣索引換算時間：紀錄起點（dataRange[0]）＋索引÷取樣率。
     // 不用視窗的 startTime：心電圖視窗捲動後 startTime 已含 shiftSec，再加位移會晚 shiftSec 秒（20、30 秒不等）。
@@ -1268,8 +1267,8 @@
         const recordStart = Number(af.record?.startTimeInt);
         const recordEnd = Number(af.record?.endTimeInt);
         const junctions = [Math.round(Math.min(...times)), Math.round(Math.max(...times))];
-        let start = junctions[0] - RANGE_AF_PADDING;
-        let end = junctions[1] + RANGE_AF_PADDING;
+        let start = junctions[0];
+        let end = junctions[1];
         if (Number.isFinite(recordStart)) start = Math.max(start, recordStart);
         if (Number.isFinite(recordEnd) && recordEnd > recordStart) end = Math.min(end, recordEnd);
         if (!(end > start)) throw new Error('區間太短');
