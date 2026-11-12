@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.48.1
+// @version      1.55.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -28,6 +28,7 @@
  *   Alt+左鍵拖曳         左右微調標籤位置（Esc 取消；Mac 為 Option）；
  *                        按在標籤列空白處或心電圖波形上會吸過最近的標籤；
  *                        開始後可放開 Alt，拖曳中按 1／2／3 改為 V／S／N，放開滑鼠一併送出
+ *                        Shift 區間已選第一端點時，Alt+1/2/3 與 Alt 拖曳仍可使用（端點保留）
  *
  * 【區間】Shift+1/2/3/4 按兩次（起點、終點），可跨視窗；Esc 取消
  *   篩選修改  依 BPM、變動率、原標籤、前一個／後一個標籤、type（排除／限於 type 1,155）篩選後
@@ -38,6 +39,12 @@
  *            結尾按 1／2 把判為早搏的改為 V／S，按 3 把未判為早搏的改為 N；
  *            以近期正常心律為基準，早搏後的代償間歇與恢復期不會讓後面的心搏被連帶判為早搏
  *            Isolated、Couplet／Triplet、Bigeminy／Trigeminy、SVE run 皆適用；區間前後整段都是早搏時改用 N→N 或週期平均推算基準
+ *   同時標為 AF  面板上勾選後，以 Shift + 1／2／3 完成區間時，兩端點視為正常與 AF 的交界一併標為 AF（與 AFib + 相同，需在編輯模式）：
+ *            AF 範圍為交界前後各多 10 秒；Save 後自動把該段 AF 的 Start／End segment（與 AF 清單 ◀ ▶ 相同）設在交界後 6 秒，
+ *            白色區塊（報告印出的 8 秒）正好涵蓋交界（AF 清單的分段要重新載入紀錄後才更新，Save 後重新整理頁面即自動完成）；
+ *            與既有 AF 合併時只調整仍為這次區間的那一端；勾選時篩選修改的原標籤自動取消 V（可再勾回）；
+ *            勾選後出現子選項「僅標為 AF」（預設不勾）：勾選後完成區間只標為 AF，不修改任何標籤；
+ *            尚未儲存，按 Save（含心電圖視窗的 Save、Ctrl+S）時與標籤一起上傳；勾選保留到重新整理頁面
  *   面板開啟時按 1 / 2 / 3（不按 Shift）切換分頁：篩選修改／填補整理／早搏判讀。
  *   分頁選擇保留到重新整理頁面為止。
  *
@@ -46,7 +53,7 @@
  *   Q / E   切換時間（← / →），縮放高度保持不變；滑鼠不必停在心電圖上
  *   A / D   以 Q / E 一半的距離切換時間（主畫面 30 秒、3 導程 10 秒、心電圖視窗 5 秒）；
  *           選印清單開啟時仍為切換上一張／下一張選印
- *   B       隱藏心電圖上的 AF 圖示，再按一次恢復顯示（重新整理頁面後恢復顯示）
+ *   B       隱藏心電圖上的 AF 圖示，再按一次恢復顯示（重新整理頁面後恢復顯示）；與 MP 縮圖的 AF 圖示連動
  *   ch1～3 旁的眼睛  顯示／隱藏導程（重新載入恢復全開）
  *   滑過標籤列或波形時，顯示紅色垂直對齊線
  *
@@ -75,7 +82,7 @@
  *                          「👁 列印範圍」：縮圖改顯示報告中波形下方的 30 秒縮圖範圍（綠色為印出的 8 秒），
  *                          所有清單的選印清單都有；預設關閉，開啟後保持到重新整理頁面
  *                          心電圖視窗「取消選印」旁也有「👁 列印範圍」：在上方心電圖標出實線（印出的 8 秒）
- *                          與虛線（下方 30 秒縮圖的範圍）；與縮圖的眼睛分開切換，同樣保持到重新整理頁面
+ *                          與虛線（下方 30 秒縮圖的範圍）；與縮圖的眼睛分開切換，預設關閉，開啟後保持到重新整理頁面
  *                          已不在清單中的選印（例如改成 Couplet 等子分類後重新 Group）會自動取消並提示
  *                          快速選印與換一個會先依目前標籤（含未儲存修改）驗證是否仍符合清單類型
  *                          換掉或取消選印的心電圖（及其前後 30 秒內的）重新整理頁面前不再被選回，
@@ -85,11 +92,17 @@
  *                          SVE run／SVT 超過 30 秒的心電圖改用藍色選印（區段選印），橘色強制選印也會一併檢查
  *   Pause／Event Tag 清單  按「選印 N 張」開啟選印清單，可逐張檢視（A／D 切換）、修改標籤、取消選印；
  *                          沒有快速選印、換一個、加選一個與 Group
- *   Event Tag 心電圖視窗    滑鼠移到心電圖（上方 20 秒或下方 60 秒長條）出現 10 秒虛線框，點一下即把選印時間移過去，
+ *   Print Report 旁綠色清單圖示  主畫面印表機圖示左邊，右上角為選印總張數；開啟所有選印清單：
+ *                          Min／Max HR、Max HR Sinus、Longest R-R（報告固定印出，只能檢視與改標籤）及 V、S 各清單、Pause、Event Tag、Tachy／Brady 的選印集中在一起，上方分頁切換清單，
+ *                          A／D 到清單頭尾時換到前後清單；操作與各清單的選印清單相同（沒有 Group），
+ *                          不必開事件清單，修改後自動上傳選印；按 Esc 或心電圖視窗的 X 時一併關閉；Event Tag 心電圖同樣標出選印範圍並可點選移動；AF、Spéc. 清單的選印不在其中
+ *   Event Tag 心電圖視窗   滑鼠移到心電圖（上方 20 秒或下方 60 秒長條）出現 10 秒虛線框，點一下即把選印時間移過去，
  *                          取代逐次點 ◀ ▶；以 ◀ ▶ 的 5 秒步距對齊，範圍與網站相同；實線框為目前的選印範圍；
  *                          框內最後 2 秒以灰色標示（與清單上的灰色區塊相同，報告只印出前 8 秒）；
  *                          選印在畫面外時（紀錄開頭附近的標籤可用 ◀ ▶ 移出），60 秒長條邊緣標示選印時間；
  *                          Mesurer、R-type／Pause 編輯時或按著修飾鍵時不作用；選印清單的縮圖顯示選印範圍
+ *                          視窗的 Save、Ctrl+S、按 X 後選 Yes 都與 Event Tag 清單的 Save 相同：一併儲存選印範圍、備註、刪除的虛擬標籤等；
+ *                          視窗中改過 HR 時維持網站原本的 Save
  *
  * Morphology 頁面不提供以上功能。
  */
@@ -329,7 +342,8 @@
     }
     window.addEventListener('mousemove', (e) => {
         if (!heldSweep) return;
-        if (isDisabledPage() || rangeBusy || labelDrag || rangeMode || (heldSweep.alt && !e.altKey)) {
+        // 區間已選第一端點時仍可按住 Alt + 1／2／3 修改；按住 4 刪除則不處理。
+        if (isDisabledPage() || rangeBusy || labelDrag || (rangeMode && !heldSweep.alt) || (heldSweep.alt && !e.altKey)) {
             stopHeldSweep(); return;
         }
         sweepTo(e.clientX, e.clientY);
@@ -635,7 +649,11 @@
         #rooticare-range-hotkeys.rh-minimized [data-role=tabs],
         #rooticare-range-hotkeys.rh-minimized [data-role=fill],
         #rooticare-range-hotkeys.rh-minimized [data-role=ectopic],
+        #rooticare-range-hotkeys.rh-minimized [data-role=af-option],
         #rooticare-range-hotkeys.rh-minimized [data-role=help] { display:none !important; }
+        #rooticare-range-hotkeys [data-role=af-option] { margin-top:7px;color:#374333; }
+        #rooticare-range-hotkeys [data-role=af-option] label { font-weight:600;color:#a0522d; }
+        #rooticare-range-hotkeys [data-role=af-option] label.rh-af-only { margin-left:14px;font-weight:500; }
         #rooticare-range-hotkeys.rh-minimized [data-role=message] {
             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal;
         }
@@ -665,8 +683,10 @@
         rangeHint.querySelector('[data-role="fill"]').style.display = open && rangeTool === 'fill' ? 'block' : 'none';
         rangeHint.querySelector('[data-role="ectopic"]').style.display = open && rangeTool === 'ectopic' ? 'block' : 'none';
         rangeHint.querySelector('[data-role="tabs"]').style.display = open ? 'flex' : 'none';
+        rangeHint.querySelector('[data-role="af-option"]').style.display = open ? 'block' : 'none';
         const help = rangeHint.querySelector('[data-role="help"]');
-        help.textContent = RANGE_HELP[rangeTool] + '。按 1／2／3 切換分頁';
+        help.textContent = (isRangeAFOnly() ? '在另一端按 Shift + 1／2／3，只標為 AF、不修改標籤' : RANGE_HELP[rangeTool])
+            + '。按 1／2／3 切換分頁';
         help.style.display = open ? 'block' : 'none';
     }
     function updateRangeMinimized() {
@@ -689,6 +709,10 @@
                 <button type="button" role="tab" data-tool="filter" title="快捷鍵 1">篩選修改</button>
                 <button type="button" role="tab" data-tool="fill" title="快捷鍵 2">填補整理</button>
                 <button type="button" role="tab" data-tool="ectopic" title="快捷鍵 3">早搏判讀</button></div>
+            <div data-role="af-option"><label title="完成區間時一併標為 AF（需編輯模式）">
+                <input type="checkbox" data-role="mark-af"> 同時標為 AF</label>
+                <label class="rh-af-only" data-role="af-only-option" title="不修改標籤，只把區間標為 AF" style="display:none">
+                <input type="checkbox" data-role="af-only"> 僅標為 AF</label></div>
             <div data-role="ectopic">依 RR 判斷提早出現的心搏（變動率超過門檻）；早搏後的代償間歇與恢復期不當作參考，
                 避免恢復正常的心搏被連帶判為早搏。
                 <div class="rh-ectopic-options">
@@ -754,6 +778,20 @@
         };
         typeToggle.addEventListener('change', updateType);
         updateType();
+        // 勾選「同時標為 AF」時，篩選修改的原標籤自動取消 V（AF 區段通常只改 N／S）；使用者可再自行勾回。
+        // 勾選後才顯示子選項「僅標為 AF」（預設不勾）；取消「同時標為 AF」時子選項一併取消並隱藏。
+        const afOnlyOption = rangeHint.querySelector('[data-role="af-only-option"]');
+        const afOnly = rangeHint.querySelector('[data-role="af-only"]');
+        rangeHint.querySelector('[data-role="mark-af"]').addEventListener('change', event => {
+            afOnlyOption.style.display = event.target.checked ? '' : 'none';
+            if (!event.target.checked) afOnly.checked = false;
+            if (event.target.checked) {
+                const v = rangeHint.querySelector('[data-source="V"]');
+                if (v) v.checked = false;
+            }
+            updateRangeTool();
+        });
+        afOnly.addEventListener('change', updateRangeTool);
         for (const name of ['mousedown', 'mouseup', 'click', 'keydown', 'keyup']) {
             rangeHint.addEventListener(name, e => e.stopPropagation());
         }
@@ -1204,6 +1242,151 @@
         });
         return updates.length;
     }
+    // 區間同時標為 AF：與網站 ECG 上的「AFib +」相同，依序以起點、終點呼叫 selectedNewAFEvent，
+    // 由網站合併到 afEditing.data（與既有 AF 重疊的一併合併），尚未儲存。需在編輯模式。
+    // 兩端點視為正常心律與 AF 的交界：AF 範圍為交界前後各多 RANGE_AF_PADDING 秒。
+    // AF 清單的 Start／End segment 預設為 AF 起訖前 10 秒，且伺服器會把 AF 結尾延到紀錄的整分格線再加 60 秒，
+    // 只調 AF 範圍無法讓交界落在白色區塊；因此儲存後另外把該段 AF 的 Start／End segment 設在交界後
+    // RANGE_AF_SEGMENT_SHIFT 秒（與在 AF 清單按 ◀ ▶ 調整相同，存在 eventRecordRange.af），交界落在白色區塊（前 10～2 秒）中央。
+    const RANGE_AF_PADDING = 10;
+    const RANGE_AF_SEGMENT_SHIFT = 6;
+    // 由絕對取樣索引換算時間：紀錄起點（dataRange[0]）＋索引÷取樣率。
+    // 不用視窗的 startTime：心電圖視窗捲動後 startTime 已含 shiftSec，再加位移會晚 shiftSec 秒（20、30 秒不等）。
+    function rangeIndexTime(ctx) {
+        const origin = Number(ctx.af.record?.dataRange?.[0] ?? ctx.af.record?.startTimeInt);
+        return origin + ctx.index / ctx.rate;
+    }
+    function markRangeAF(first, last) {
+        const af = first.af;
+        let host = first.parent;
+        while (host && typeof host.selectedNewAFEvent !== 'function') host = host.$parent;
+        if (!host || !af.afEditing) throw new Error('找不到網站的 AF 編輯功能');
+        if (!af.ecgAnno?.editSwitch) throw new Error('需在編輯模式才能標為 AF');
+        const times = [rangeIndexTime(first), rangeIndexTime(last)];
+        if (!times.every(Number.isFinite)) throw new Error('無法換算區間時間');
+        // 不超出紀錄的起訖時間。
+        const recordStart = Number(af.record?.startTimeInt);
+        const recordEnd = Number(af.record?.endTimeInt);
+        const junctions = [Math.round(Math.min(...times)), Math.round(Math.max(...times))];
+        let start = junctions[0] - RANGE_AF_PADDING;
+        let end = junctions[1] + RANGE_AF_PADDING;
+        if (Number.isFinite(recordStart)) start = Math.max(start, recordStart);
+        if (Number.isFinite(recordEnd) && recordEnd > recordStart) end = Math.min(end, recordEnd);
+        if (!(end > start)) throw new Error('區間太短');
+        host.$apply(() => {
+            // 清掉進行到一半的 AFib + 選取，避免與這次的起點、終點混在一起；完成後也清空，下次點 AFib + 從頭開始。
+            af.afEditing.selectedEvent = [];
+            host.selectedNewAFEvent(start);
+            host.selectedNewAFEvent(end);
+            af.afEditing.selectedEvent = [];
+        });
+        queueAFSegments(af, start, end, junctions);
+        return [start, end];
+    }
+    // 儲存後設定 Start／End segment。
+    // AF 清單的每段 AF 以伺服器算出的 60 秒區塊（tmsAFs）為準：起點可能被調到紀錄的整分格線、終點也會延長，
+    // segment 位置要存在「AF 清單的那段 AF 的起點」（eventTypeStat.af 的 key）之下才會被使用。
+    // 網站儲存 AF 後不會重算這些區塊，要重新載入紀錄後才有新的 key，因此待辦存在 localStorage（依紀錄），
+    // 重新整理頁面後仍會完成。網站上傳 AF 時會先清掉新範圍內的 segment 位置，所以也要等 AF 已儲存才寫入。
+    // 找 AF 清單中起點與這次 AF 起點相差 RANGE_AF_KEY_NEAR 秒內的那段調整 Start、終點相差 RANGE_AF_END_NEAR 秒內的調整 End；
+    // 與既有 AF 合併而端點不是這次的，該端不調整。放棄修改（AF 不再包含這段）或超過一天則取消。
+    const AF_SEGMENT_STORE = 'rc-af-segment-jobs';
+    const RANGE_AF_KEY_NEAR = 75;
+    const RANGE_AF_END_NEAR = 150;
+    function readAFSegmentJobs() {
+        try { return JSON.parse(localStorage.getItem(AF_SEGMENT_STORE) || '[]').filter(job => job && Date.now() - job.since < 864e5); }
+        catch (_) { return []; }
+    }
+    function writeAFSegmentJobs(jobs) {
+        try { if (jobs.length) localStorage.setItem(AF_SEGMENT_STORE, JSON.stringify(jobs)); else localStorage.removeItem(AF_SEGMENT_STORE); }
+        catch (_) {}
+    }
+    let afSegmentTimer = null;
+    function queueAFSegments(af, start, end, junctions) {
+        const jobs = readAFSegmentJobs();
+        jobs.push({ measure: String(af._measureId), start, end, junctions, since: Date.now() });
+        writeAFSegmentJobs(jobs);
+        startAFSegmentTimer();
+    }
+    function startAFSegmentTimer() {
+        if (!afSegmentTimer && readAFSegmentJobs().length) afSegmentTimer = setInterval(checkAFSegments, 1000);
+    }
+    let afSegmentBusy = false;
+    async function checkAFSegments() {
+        if (afSegmentBusy) return;
+        let jobs = readAFSegmentJobs();
+        if (!jobs.length) { clearInterval(afSegmentTimer); afSegmentTimer = null; writeAFSegmentJobs([]); return; }
+        const af = getPrintHost()?.af;
+        if (!af?._measureId || af.loading?.record || af.loading?.modified || !af.afEditing || !af.eventRecordRange) return;
+        const mine = jobs.filter(job => job.measure === String(af._measureId));
+        if (!mine.length) return;
+        afSegmentBusy = true;
+        try {
+            for (const job of mine) {
+                const drop = () => { jobs = jobs.filter(other => other !== job); writeAFSegmentJobs(jobs); };
+                const covers = range => Number(range?.start) <= job.start && Number(range?.end) >= job.end;
+                if (!(af.afEditing.data || []).some(covers)) { drop(); continue; } // 放棄修改
+                // 等 AF 已儲存、沒有其他未上傳的 AF 或 segment 修改。
+                if (!(af.afEditing.ogData || []).some(covers)
+                    || JSON.stringify(af.afEditing.ogData) !== JSON.stringify(af.afEditing.data)
+                    || JSON.stringify(af.eventRecordRange) !== JSON.stringify(af.ogEventRecordRange)) continue;
+                // AF 清單中的那段 AF：起點不晚於交界、終點不早於交界，且起點或終點靠近這次的 AF 起訖。
+                const episodes = Object.entries(af.eventTypeStat?.af || {}).map(([key, value]) => {
+                    const start = Number(key);
+                    return { start, end: start + Number([].concat(value)[0]) };
+                }).filter(item => Number.isFinite(item.start) && item.end > item.start
+                    && item.start <= job.junctions[0] && item.end >= job.junctions[1]);
+                const episode = episodes.find(item => Math.abs(item.start - job.start) <= RANGE_AF_KEY_NEAR
+                    || Math.abs(item.end - job.end) <= RANGE_AF_END_NEAR);
+                if (!episode) {
+                    // 新的 AF 區塊要重新載入紀錄後才有：提示一次。
+                    if (!job.hinted) {
+                        job.hinted = true;
+                        writeAFSegmentJobs(jobs);
+                        quickToast(null, '重新整理頁面後對準 AF segment');
+                    }
+                    continue;
+                }
+                const ownStart = Math.abs(episode.start - job.start) <= RANGE_AF_KEY_NEAR;
+                const ownEnd = Math.abs(episode.end - job.end) <= RANGE_AF_END_NEAR;
+                const key = episode.start;
+                // 其餘 segment 沿用網站預設（adujustEventRange：起點、中點、終點）。
+                const current = Array.isArray(af.eventRecordRange.af?.[key]) && af.eventRecordRange.af[key].length >= 3
+                    ? [...af.eventRecordRange.af[key]] : [key, key + Math.ceil((episode.end - key) / 2), episode.end];
+                if (ownStart) current[0] = job.junctions[0] + RANGE_AF_SEGMENT_SHIFT;
+                if (ownEnd) current[2] = job.junctions[1] + RANGE_AF_SEGMENT_SHIFT;
+                if (!af.eventRecordRange.af) af.eventRecordRange.af = {};
+                af.eventRecordRange.af[key] = current;
+                drop();
+                try {
+                    await uploadSectionSelections(af);
+                    getPrintHost()?.$applyAsync?.();
+                    quickToast(null, '已對準 AF segment');
+                } catch (error) {
+                    quickToast(null, `AF segment 位置上傳失敗：${error?.message || error?.status || error}`, true);
+                }
+            }
+        } finally {
+            afSegmentBusy = false;
+        }
+    }
+    // 頁面載入（或重新整理）後繼續未完成的待辦。
+    setTimeout(startAFSegmentTimer, 3000);
+    // 「同時標為 AF」與子選項「僅標為 AF」都勾選時，完成區間只標為 AF，不修改標籤。
+    function isRangeAFOnly() {
+        return !!(rangeHint.querySelector('[data-role="mark-af"]')?.checked
+            && rangeHint.querySelector('[data-role="af-only"]')?.checked);
+    }
+    // 勾選「同時標為 AF」時標記，回傳附加在結果提示的文字；標記失敗不影響已完成的標籤修改。
+    function markRangeAFNote(first, last, tag) {
+        if (tag === 'X' || !rangeHint.querySelector('[data-role="mark-af"]')?.checked) return '';
+        try {
+            markRangeAF(first, last);
+            return ' · 已標為 AF';
+        } catch (error) {
+            return ` · 未標為 AF：${error?.message || error}`;
+        }
+    }
     // 標記目前選取已取消；若資料仍在讀取，保留取消旗標讓非同步流程在寫入前中止。
     function cancelRange() {
         if (rangeMode) rangeMode.cancelled = true;
@@ -1373,7 +1556,7 @@
             dragClickUntil = Date.now() + 400;
         }
         if (event.button !== 0 || !isDragModifier(event) || event.shiftKey || event.ctrlKey || event.metaKey
-            || isDisabledPage() || rangeMode || rangeBusy || labelDrag) return;
+            || isDisabledPage() || rangeBusy || labelDrag) return;
         // 按在標籤上就拖曳該標籤；按在標籤列空白處則吸過最近的標籤，直接移到游標位置後可繼續拖曳。
         let label = event.target.closest?.('.annoText');
         if (!label && marker) label = findNearestDraggableLabel(marker, event.clientX);
@@ -1513,6 +1696,23 @@
                 return;
             }
             const mode = rangeMode;
+            // 僅標為 AF：不修改標籤，以 Shift + 1／2／3 完成區間後直接標為 AF。
+            if (isRangeAFOnly()) {
+                if (tag === 'X') {
+                    showRangeHint('僅標為 AF 時請按 Shift + 1／2／3 完成區間');
+                    return;
+                }
+                rangeBusy = true;
+                rangeMode = null;
+                try {
+                    markRangeAF(mode.first, context);
+                    showRangeHint('已標為 AF（未修改標籤） · 尚未儲存');
+                } catch (error) {
+                    failed = true;
+                    showRangeHint(`未標為 AF：${error?.message || error}`);
+                }
+                return;
+            }
             // Shift+4（刪除）只用於篩選修改；其他分頁保留第一端點，改按 Shift+1／2／3。
             if (tag === 'X' && rangeTool !== 'filter') {
                 showRangeHint('Shift + 4 刪除只能用於篩選修改，請改按 Shift + 1／2／3 或切換分頁');
@@ -1527,10 +1727,11 @@
                 showRangeHint(`正在判讀早搏 → ${tag}…`);
                 const result = await applyEctopicRange(mode.first, context, tag, options);
                 rangeMode = null;
+                const afNote = markRangeAFNote(mode.first, context, tag);
                 const notes = [`判為早搏 ${result.premature} 顆`];
                 if (result.unknown) notes.push(`${result.unknown} 顆缺少參考 RR，未判讀`);
                 showRangeHint((result.changed ? `已修改 ${result.changed} 個標籤 → ${tag}` : '沒有需要變更的標籤')
-                    + ` · ${notes.join(' · ')}` + (result.changed ? ' · 尚未儲存' : ''));
+                    + ` · ${notes.join(' · ')}` + afNote + (result.changed || afNote.includes('已標為') ? ' · 尚未儲存' : ''));
                 return;
             }
             if (rangeTool === 'fill') {
@@ -1539,11 +1740,12 @@
                 showRangeHint(`正在填補整理 → ${tag}…`);
                 const result = await applyFillRange(mode.first, context, tag);
                 rangeMode = null;
+                const afNote = markRangeAFNote(mode.first, context, tag);
                 const notes = [`RR ${Math.round(result.targetRR / mode.first.rate * 1000)} ms`];
                 if (result.maxVariability > FILL_VARIABILITY) notes.push(`最大變動率 ${(result.maxVariability * 100).toFixed(1)}%，超過 12%`);
                 showRangeHint(result.added || result.removed
-                    ? `已補 ${result.added} 顆（${tag}）、刪除 ${result.removed} 顆 · ${notes.join(' · ')} · 尚未儲存`
-                    : `兩錨點之間已符合，不需修改 · ${notes.join(' · ')}`);
+                    ? `已補 ${result.added} 顆（${tag}）、刪除 ${result.removed} 顆 · ${notes.join(' · ')}${afNote} · 尚未儲存`
+                    : `兩錨點之間已符合，不需修改 · ${notes.join(' · ')}${afNote}` + (afNote.includes('已標為') ? ' · 尚未儲存' : ''));
                 return;
             }
             let filters;
@@ -1555,8 +1757,10 @@
             showRangeHint(`正在篩選區間標籤 ${action}…`);
             const count = await applyIndexRange(mode.first, context, tag, filters);
             rangeMode = null;
-            showRangeHint(!count ? '沒有符合條件且需要變更的標籤'
-                : tag === 'X' ? `已刪除 ${count} 個標籤 · 尚未儲存` : `已修改 ${count} 個標籤 → ${tag} · 尚未儲存`);
+            const afNote = markRangeAFNote(mode.first, context, tag);
+            showRangeHint((!count ? '沒有符合條件且需要變更的標籤'
+                : tag === 'X' ? `已刪除 ${count} 個標籤` : `已修改 ${count} 個標籤 → ${tag}`)
+                + afNote + (count || afNote.includes('已標為') ? ' · 尚未儲存' : ''));
         } catch (error) {
             failed = true;
             const detail = error?.message || (error?.status ? `資料讀取失敗（HTTP ${error.status}）` : '區間修改失敗，請重新選取');
@@ -1572,6 +1776,9 @@
     }
 
     // 以樣式規則隱藏 AF 圖示，網站重繪後新產生的圖示也一併隱藏；再按一次或重新整理頁面後恢復。
+    // 告知「ECG 變動率縮圖標記器」：本腳本存在，可在 AF 頁面以 B 恢復顯示，MP 縮圖的 B 可與這裡連動（隱藏 AF 頁面的圖示）。
+    // 沒有這個標記時，縮圖標記器只隱藏自己的縮圖圖示，不影響 AF 頁面。
+    document.documentElement.dataset.rcAfIconToggle = '1';
     function toggleAFIcons() {
         const existing = document.getElementById('rc-hide-af-icon');
         if (existing) { existing.remove(); return; }
@@ -1684,7 +1891,9 @@
             }
             return;
         }
-        if (rangeMode || rangeBusy) return;
+        // 區間選取中（已選第一端點）只放行 Alt + 1／2／3 與 Alt 拖曳，其他標註鍵不處理；套用中一律不處理。
+        if (rangeBusy) return;
+        if (rangeMode && !(isAltPressed && !e.ctrlKey && !e.metaKey && ['1', '2', '3'].includes(labelKey))) return;
 
         // 按住期間由滑鼠移動接手；鍵盤連發不再重複處理。
         if (!e.ctrlKey && !e.metaKey && (labelKey === '4' || (isAltPressed && ['1', '2', '3'].includes(labelKey)))) {
@@ -2801,8 +3010,9 @@
         svebTmsArr: [],
     };
     // 依目前清單類型即時取得強制選印；不支援的清單回傳 null，改用拉條的 preselectedEvents。
-    function getLiveForcedEvents(af) {
-        const keys = FORCED_PRINT_KEYS[af?.eventDialog?.dscp?.printedEventType];
+    // key：選印欄位（printedEventType），預設為目前開著的清單；所有選印清單會指定各清單自己的欄位。
+    function getLiveForcedEvents(af, key = af?.eventDialog?.dscp?.printedEventType) {
+        const keys = FORCED_PRINT_KEYS[key];
         const selected = af?.printDialog?.selectedEvents;
         if (!keys || !selected) return null;
         return keys.flatMap(key => Array.isArray(selected[key]) ? selected[key] : []);
@@ -2963,7 +3173,8 @@
     }
     function decoratePrintBars() {
         if (isDisabledPage() || !window.angular) return;
-        if (review && !review.anchor.isConnected && !review.grouping) closePrintReview();
+        if (review && !review.multi && !review.anchor.isConnected && !review.grouping) closePrintReview();
+        decorateAllPrintButton();
         syncReviewPrints();
         recheckReviewCards();
         decorateReviewDialog();
@@ -3131,6 +3342,53 @@
         pause5: { reviewOnly: true, name: 'Pause ≥5 sec' },
         tags: { reviewOnly: true, tag: true, name: 'Event Tag' },
     };
+    // 只在「所有選印清單」中出現的清單（各清單本身維持網站原本的操作）。
+    // fixed：報告固定印出的心電圖（Min／Max HR、Max HR Sinus、Longest R-R），不是選印，只能檢視與修改標籤；
+    // 回傳該張的時間（沒有時為 0）與卡片說明。
+    const ALL_PRINT_ONLY_TYPES = {
+        minHR: { reviewOnly: true, name: 'Min. HR', fixed: af => af.record?.minHR?.time,
+            info: af => `${af.record?.minHR?.record ?? '--'} bpm` },
+        maxHR: { reviewOnly: true, name: 'Max. HR', fixed: af => af.record?.maxHR?.time,
+            info: af => `${af.record?.maxHR?.record ?? '--'} bpm` },
+        maxSinus: { reviewOnly: true, name: 'Max. HR Sinus', fixed: af => af.record?.maxSinusHR?.time,
+            info: af => `${af.record?.maxSinusHR?.record ?? '--'} bpm` },
+        rr: { reviewOnly: true, name: 'Longest R-R', fixed: af => af.record?.longestRR?.[0],
+            info: af => `${af.record?.longestRRSec ?? '--'} secs` },
+        tachy: { reviewOnly: true, recordTimes: true, name: 'Tachycardia' },
+        brady: { reviewOnly: true, recordTimes: true, name: 'Bradycardia' },
+    };
+    // 所有選印清單的分頁順序（與報告相同，Min／Max HR、Longest R-R 在前）；Pause 2-3 sec 等子清單與 Pause 共用選印，只列 Pause。
+    const ALL_PRINT_LIST_TYPES = ['minHR', 'maxHR', 'maxSinus', 'rr', 'V_isolated', 'couplets', 'triplets', 'bigemini', 'trigemini', 'vt',
+        'S_isolated', 'sveb2s', 'sveb3s', 'S_bigemini', 'S_trigemini', 'sve', 'psvt', 'pause', 'tags', 'tachy', 'brady'];
+    // 主畫面的 AF scope（有 selectPrintedEvent、openDialog 等網站函式的那一層）。
+    function getPrintHost() {
+        const element = document.querySelector('[ng-controller="RootiCareDashboardAFCtrl"]');
+        if (!element || !window.angular) return null;
+        let scope;
+        try { scope = window.angular.element(element).scope(); } catch (_) { return null; }
+        while (scope && (typeof scope.selectPrintedEvent !== 'function' || !scope.af)) scope = scope.$parent;
+        return scope || null;
+    }
+    // 不經過事件清單、直接以清單類型建立的 ctx（detached），供所有選印清單使用。
+    function getListContext(type) {
+        const host = getPrintHost();
+        const af = host?.af;
+        const dialog = af?.eventDialog;
+        const config = QUICK_PRINT_TYPES[type] || REVIEW_ONLY_TYPES[type] || ALL_PRINT_ONLY_TYPES[type];
+        const key = dialog?.[type]?.printedEventType;
+        if (!config || (!key && !config.fixed) || !af.printDialog?.selectedEvents) return null;
+        const sectionHost = typeof host.selectSectionEvent === 'function' ? host : null;
+        return { af, host, sectionHost, dialog, type, config, key, detached: true };
+    }
+    // 各清單目前的選印張數（綠色、藍色、橘色強制選印合計）。
+    function getAllPrintCounts() {
+        const counts = new Map();
+        for (const type of ALL_PRINT_LIST_TYPES) {
+            const ctx = getListContext(type);
+            if (ctx) counts.set(type, getQuickPrinted(ctx).all.length);
+        }
+        return counts;
+    }
     const QUICK_MIN_GAP = 60; // 選印心電圖之間至少相隔（秒）
     const QUICK_REJECT_NEAR = 30; // 淘汰過的心電圖前後這麼多秒內不再選（秒）
     const QUICK_S_VARIABILITY = 0.12; // Isolated S 的變動率需超過此值
@@ -3269,30 +3527,47 @@
         if (!config || !host || !key || !af.printDialog?.selectedEvents) return null;
         return { af, host, sectionHost, dialog, type, config, key };
     }
+    // 報告固定印出的那一張（ALL_PRINT_ONLY_TYPES 的 fixed）；沒有時為空。
+    function getFixedTimes(ctx) {
+        const time = toEventTime(ctx.config.fixed(ctx.af));
+        return time > 0 ? [time] : [];
+    }
     function getQuickTimes(ctx) {
+        if (ctx.config.fixed) return getFixedTimes(ctx);
         const source = ctx.dialog[ctx.type];
-        const values = Array.isArray(source?.data) ? source.data.flat() : [];
+        let values = Array.isArray(source?.data) ? source.data.flat() : [];
+        // Tachy／Brady 的清單資料在開啟清單時才由 record[type].tms 建立；沒開過時直接讀紀錄。
+        if (!values.length && ctx.config.recordTimes) values = Array.isArray(ctx.af.record?.[ctx.type]?.tms) ? ctx.af.record[ctx.type].tms : [];
         return [...new Set(values.map(toEventTime).filter(time => time !== null))];
     }
+    // 網站目前的事件清單狀態（dscp、currentData、section）是否就是這個 ctx 的清單。
+    // 所有選印清單（ctx.detached）可能在沒開清單或開著其他清單時操作，這時不能用那些狀態。
+    const isListCurrent = ctx => !ctx.detached || ctx.dialog.dscp?.type === ctx.type;
+    const listCurrentData = ctx => isListCurrent(ctx) && Array.isArray(ctx.dialog.currentData) ? ctx.dialog.currentData : [];
     // 清單中已選印（使用者綠色、藍色區段選印）與強制選印（橘色）的時間。
     function getQuickPrinted(ctx, times = getQuickTimes(ctx)) {
+        // 報告固定印出的：一律印出，與橘色強制選印一樣無法取消或替換。
+        if (ctx.config.fixed) {
+            const fixed = getFixedTimes(ctx);
+            return { selected: new Set(), section: new Set(), forced: new Set(fixed), all: fixed };
+        }
         const inList = new Set(times);
         const pick = values => new Set((Array.isArray(values) ? values : []).map(toEventTime)
             .filter(time => time !== null && inList.has(time)));
-        const forced = pick(getLiveForcedEvents(ctx.af));
+        const forced = pick(getLiveForcedEvents(ctx.af, ctx.key));
         const selected = pick(ctx.af.printDialog.selectedEvents[ctx.key]);
         const section = pick(getSectionTimes(ctx));
         return { selected, section, forced, all: [...new Set([...selected, ...section, ...forced])].sort((a, b) => a - b) };
     }
     // 藍色選印（區段選印）的事件時間：清單上的勾選（eventDialog.section）與網站保存的區段範圍（eventRecordRange）。
     function getSectionTimes(ctx) {
-        const list = Array.isArray(ctx.dialog.section) ? ctx.dialog.section : [];
+        const list = isListCurrent(ctx) && Array.isArray(ctx.dialog.section) ? ctx.dialog.section : [];
         const ranges = ctx.af.eventRecordRange?.[ctx.type];
         return [...list, ...(ranges && typeof ranges === 'object' ? Object.keys(ranges) : [])];
     }
     // 目前頁面上被標為 Artifact 等排除的心電圖（未儲存前仍在清單中），不納入快速選印。
     function getQuickExcluded(ctx) {
-        const items = Array.isArray(ctx.dialog.currentData) ? ctx.dialog.currentData : [];
+        const items = listCurrentData(ctx);
         return new Set(items.filter(item => item?.selectedType && item.selectedType !== 'none')
             .map(item => toEventTime(item.startTime)).filter(time => time !== null));
     }
@@ -3530,11 +3805,11 @@
     // 取消時依目前是哪一種選印移除。回傳是否為藍色選印。
     function setQuickPrint(ctx, time, on) {
         // 以 toEventTime 比對，Event Tag 的項目（dataTime／tagTime）也能同步勾選狀態。
-        const items = (Array.isArray(ctx.dialog.currentData) ? ctx.dialog.currentData : [])
-            .filter(item => item && toEventTime(item) === time);
+        const items = listCurrentData(ctx).filter(item => item && toEventTime(item) === time);
         const inSection = getSectionTimes(ctx).some(value => toEventTime(value) === time);
         const section = !!ctx.sectionHost && (on ? needsSectionPrint(ctx.af, ctx.type, time) : inSection);
-        ctx.host.$apply(() => {
+        if (ctx.detached) scheduleDetachedUpload(ctx.af);
+        ctx.host.$apply(() => withListScope(ctx, () => {
             if (section) {
                 const target = items[0] || { startTime: time };
                 target.isPrintSection = on;
@@ -3545,8 +3820,51 @@
             }
             ctx.host.selectPrintedEvent({ startTime: time, selectedEvent: on });
             for (const item of items) item.selectedEvent = on;
-        });
+        }));
         return section;
+    }
+    // 網站的 selectPrintedEvent／selectSectionEvent 依 eventDialog.dscp（目前開著的清單）決定寫到哪個選印欄位。
+    // 所有選印清單操作其他清單的選印時，暫時把 dscp 與 section 換成該清單的，執行完立即還原。
+    function withListScope(ctx, action) {
+        if (isListCurrent(ctx)) return action();
+        const dialog = ctx.dialog;
+        if (!dialog.dscp) dialog.dscp = {};
+        const dscp = dialog.dscp;
+        const saved = { hasType: 'type' in dscp, type: dscp.type, hasKey: 'printedEventType' in dscp, key: dscp.printedEventType,
+            hasSection: 'section' in dialog, section: dialog.section };
+        dscp.type = ctx.type;
+        dscp.printedEventType = ctx.key;
+        dialog.section = getSectionTimes(ctx).map(Number);
+        try {
+            return action();
+        } finally {
+            if (saved.hasType) dscp.type = saved.type; else delete dscp.type;
+            if (saved.hasKey) dscp.printedEventType = saved.key; else delete dscp.printedEventType;
+            if (saved.hasSection) dialog.section = saved.section; else delete dialog.section;
+        }
+    }
+    // 網站在關閉事件清單時才上傳選印；所有選印清單沒有經過事件清單，改動後稍等一下自行上傳（關閉選印清單時立即上傳）。
+    // 事件清單開著時交給網站關閉清單時上傳，避免與清單中的操作交錯。
+    let detachedUploadTimer = null;
+    let detachedUploadAF = null;
+    function scheduleDetachedUpload(af) {
+        detachedUploadAF = af;
+        clearTimeout(detachedUploadTimer);
+        detachedUploadTimer = setTimeout(flushDetachedUpload, 1500);
+    }
+    async function flushDetachedUpload() {
+        clearTimeout(detachedUploadTimer);
+        detachedUploadTimer = null;
+        const af = detachedUploadAF;
+        if (!af) return;
+        if (document.querySelector('.ngdialog.event-dialog')) { detachedUploadTimer = setTimeout(flushDetachedUpload, 3000); return; }
+        detachedUploadAF = null;
+        try {
+            await uploadPrintSelections(af);
+            await uploadSectionSelections(af);
+        } catch (error) {
+            quickToast(null, `選印上傳失敗：${error?.message || error?.status || error}`, true);
+        }
     }
     // 換掉的心電圖在本次頁面執行期不再被選回。
     const quickRejected = new Map();
@@ -3810,6 +4128,34 @@
         .rc-review-eye[aria-pressed="true"] { background:#fff; color:#5b7d1a; opacity:1; }
         .rc-review-bar.is-context .rc-review-card { width:380px; }
         .rc-review-bar.is-review-only :is(.rc-review-add, .rc-review-group, .rc-review-btn.is-swap) { display:none; }
+        /* 選印清單開著時，心電圖視窗底部留出清單的高度 */
+        body.rc-review-open :is(.ngdialog.ecg-dialog, .ngdialog.section-dialog) { padding-bottom:var(--rc-review-h, 0px) !important; }
+        /* 網站的 X 是透明底白字，下半落在白色視窗上、右緣被圓角切掉：選印清單開著時加上綠底並往內移，整顆看得到 */
+        /* 標題列只有 20px 高，Save／Discard 與 X（約 6～33px）下半落在白色視窗上看不見：加高到 38px 包住整列按鈕 */
+        body.rc-review-open :is(.ngdialog.ecg-dialog, .ngdialog.section-dialog) .content-title-bg { min-height:38px; box-sizing:border-box; }
+        body.rc-review-open :is(.ngdialog.ecg-dialog, .ngdialog.section-dialog) .content-title-bg .close-btn {
+            background:#add149; margin-right:10px; box-shadow:0 0 0 2px #fff; }
+        /* 所有選印清單：清單分頁、沒有 Group */
+        .rc-review-bar.is-multi .rc-review-group { display:none; }
+        .rc-review-bar.is-multi .rc-review-hint { flex:0 1 auto; min-width:0; }
+        .rc-review-bar.is-multi .rc-review-head { height:auto; min-height:30px; }
+        .rc-review-tabs { display:flex; flex:1 1 auto; gap:4px; min-width:0; overflow-x:auto; padding:3px 0; scrollbar-width:thin; }
+        .rc-review-tab { flex:0 0 auto; height:22px; padding:0 9px; border:1px solid rgba(255,255,255,.7); border-radius:11px;
+            background:transparent; color:#fff; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; }
+        .rc-review-tab:hover { background:rgba(255,255,255,.25); }
+        .rc-review-tab.is-current { background:#fff; border-color:#fff; color:#5b7d1a; }
+        /* 主畫面 Print Report 左邊的「選印」按鈕（印表機圖示 right:10px＋margin 15px；24 小時心電圖圖示在 right:80px） */
+        /* 綠底白圖的圓形按鈕（34px，比 25px 的灰色印表機圖示大），與兩側圖示垂直置中 */
+        .rc-all-print { position:absolute; top:0; right:60px; z-index:1; box-sizing:border-box; width:34px; height:34px; margin:10.5px 0;
+            padding:0; border:0; border-radius:50%; background:#8fb43a; color:#fff; cursor:pointer;
+            display:flex; align-items:center; justify-content:center;
+            box-shadow:0 2px 6px rgba(91,125,26,.45); transition:transform .12s, background .12s, box-shadow .12s; }
+        .rc-all-print:hover { transform:scale(1.1); background:#5b7d1a; box-shadow:0 3px 10px rgba(91,125,26,.55); }
+        .rc-all-print.is-open { background:#5b7d1a; box-shadow:0 0 0 3px rgba(143,180,58,.45); }
+        .rc-all-print svg { display:block; pointer-events:none; }
+        .rc-all-print-count { position:absolute; top:-6px; right:-7px; min-width:17px; height:17px; box-sizing:border-box; padding:0 4px;
+            border:2px solid #fff; border-radius:9px; background:#d88f3f; color:#fff; font-size:10px; font-weight:700; line-height:13px;
+            text-align:center; pointer-events:none; }
     `;
     document.head.appendChild(reviewStyle);
 
@@ -3817,20 +4163,29 @@
         if (!review) return;
         if (review.onResize) window.removeEventListener('resize', review.onResize);
         clearTimeout(review.staleTimer);
+        clearTimeout(review.syncTimer);
         review.bar.remove();
+        document.body.classList.remove('rc-review-open');
+        const multi = review.multi;
+        const multiAF = review.ctx.af;
         review = null;
+        // 關閉時一律上傳（內容沒變就不上傳）：心電圖視窗的 ◀ ▶ 等網站操作改的選印範圍也一併送出。
+        if (multi) { detachedUploadAF = multiAF; flushDetachedUpload(); }
         decorateReviewDialog();
+        schedulePrintBars();
     }
     // focusTime：開啟後顯示這張選印（仍在清單中時），否則顯示第一張。
-    function openPrintReview(anchor, focusTime = null) {
-        const ctx = getQuickContext(anchor, true);
+    // multi：所有選印清單（主畫面 Print Report 旁的「選印」），ctx 為目前分頁的清單，上方可切換各清單。
+    function openPrintReview(anchor, focusTime = null, ctx = getQuickContext(anchor, true), multi = false) {
         if (!ctx) return;
         closePrintReview();
         const bar = document.createElement('div');
-        // Pause、Event Tag 只能檢視與取消選印：隱藏加選、Group、換一個。
-        bar.className = 'rc-review-bar' + (ctx.config.reviewOnly ? ' is-review-only' : '');
+        // Pause、Event Tag 只能檢視與取消選印：隱藏加選、Group、換一個。所有選印清單沒有 Group。
+        bar.className = 'rc-review-bar' + (ctx.config.reviewOnly ? ' is-review-only' : '') + (multi ? ' is-multi' : '');
         bar.tabIndex = -1;
-        bar.innerHTML = '<div class="rc-review-head"><span class="rc-review-title"></span><span class="rc-review-count"></span>'
+        bar.innerHTML = '<div class="rc-review-head"><span class="rc-review-title"></span>'
+            + (multi ? '<span class="rc-review-tabs"></span>' : '')
+            + '<span class="rc-review-count"></span>'
             + '<span class="rc-review-hint"></span>'
             + '<button type="button" class="rc-review-eye" aria-pressed="false" title="縮圖顯示報告中波形下方的 30 秒縮圖範圍（綠色為印出的 8 秒）">👁 列印範圍</button>'
             + '<button type="button" class="rc-review-add" title="依快速選印的規則再多選一張（時段分散、相隔 1 分鐘以上）">＋ 加選一個</button>'
@@ -3839,7 +4194,7 @@
             + '<div class="rc-review-strip"><button type="button" class="rc-review-scroll is-prev" title="往前捲動" aria-label="往前捲動">◀</button>'
             + '<div class="rc-review-list"></div>'
             + '<button type="button" class="rc-review-scroll is-next" title="往後捲動" aria-label="往後捲動">▶</button></div>';
-        review = { bar, ctx, anchor, cards: new Map(), items: [], active: null, switching: false, busy: false,
+        review = { bar, ctx, anchor, multi, cards: new Map(), items: [], active: null, switching: false, busy: false,
             staleCards: new Set(), staleTimer: null, labelIndices: null };
         bar.querySelector('.rc-review-close').addEventListener('click', closePrintReview);
         bar.querySelector('.rc-review-add').addEventListener('click', addReviewPrint);
@@ -3861,12 +4216,158 @@
                 list.scrollBy({ left: direction * Math.max(200, list.clientWidth * 0.8), behavior: 'smooth' });
             });
         }
-        review.onResize = updateReviewScroll;
+        review.onResize = () => { updateReviewScroll(); updateReviewSpace(); };
         window.addEventListener('resize', review.onResize);
         document.body.appendChild(bar);
+        document.body.classList.add('rc-review-open');
+        updateReviewSpace();
         refreshPrintReview();
         if (review.items.length) showReviewTime(review.items.includes(focusTime) ? focusTime : review.items[0]);
     }
+    // 所有選印清單：從第一個有選印的清單開始；都沒有選印時只提示。
+    function openAllPrintReview(button) {
+        if (review?.multi) { closePrintReview(); return; }
+        const counts = getAllPrintCounts();
+        if (!counts.size) { quickToast(button, '紀錄尚未載入完成，請稍後再試', true); return; }
+        const type = ALL_PRINT_LIST_TYPES.find(name => counts.get(name) > 0);
+        if (!type) { quickToast(button, '目前沒有任何選印的心電圖', true); return; }
+        openPrintReview(button, null, getListContext(type), true);
+    }
+    // 切換所有選印清單的分頁；focus 為 'first'、'last' 或要顯示的時間。
+    function switchReviewList(type, focus = 'first') {
+        if (!review?.multi || review.busy || review.grouping) return;
+        const ctx = getListContext(type);
+        if (!ctx) return;
+        if (review.ctx.type !== type || review.ctx.af !== ctx.af) {
+            for (const card of review.cards.values()) card.remove();
+            review.cards.clear();
+            review.staleCards.clear();
+            review.items = [];
+            review.active = null;
+            review.labelSignature = undefined;
+            review.ctx = ctx;
+            review.bar.classList.toggle('is-review-only', !!ctx.config.reviewOnly);
+            review.bar.querySelector('.rc-review-list').scrollLeft = 0;
+        }
+        refreshPrintReview();
+        if (!review?.items.length) return;
+        const time = focus === 'last' ? review.items[review.items.length - 1]
+            : review.items.includes(focus) ? focus : review.items[0];
+        showReviewTime(time);
+    }
+    // 依分頁順序往前（-1）或往後（1）找下一個有選印的清單。
+    function adjacentReviewList(delta) {
+        if (!review?.multi) return null;
+        const counts = getAllPrintCounts();
+        const index = ALL_PRINT_LIST_TYPES.indexOf(review.ctx.type);
+        for (let i = index + delta; i >= 0 && i < ALL_PRINT_LIST_TYPES.length; i += delta) {
+            if (counts.get(ALL_PRINT_LIST_TYPES[i]) > 0) return ALL_PRINT_LIST_TYPES[i];
+        }
+        return null;
+    }
+    // 主畫面 Print Report（印表機圖示）左邊的「選印」按鈕：開啟所有選印清單，右上角顯示選印總張數。
+    // 張數最多每 500 毫秒重算一次。
+    const allPrintButtonState = { at: 0, total: null, timer: null };
+    function decorateAllPrintButton() {
+        const printer = document.querySelector('.print-dialog-bnt.icon-printer');
+        let button = document.querySelector('.rc-all-print');
+        if (!printer || printer.classList.contains('ng-hide') || !printer.parentElement) { button?.remove(); return; }
+        if (!button || button.parentElement !== printer.parentElement) {
+            button?.remove();
+            button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'rc-all-print';
+            // 圖示：清單（打勾的心電圖列）；比旁邊灰色的 Print Report 圖示大、綠底白圖，較顯眼。
+            button.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor"'
+                + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+                + '<path d="M3.5 6.5l1.5 1.5 2.5-3"/><path d="M3.5 13l1.5 1.5 2.5-3"/><path d="M3.5 19.5l1.5 1.5 2.5-3"/>'
+                + '<path d="M10.5 7h2l1-2 1.5 4 1-2h4.5"/><path d="M10.5 13.5h2l1-2 1.5 4 1-2h4.5"/><path d="M10.5 20h10"/></svg>'
+                + '<span class="rc-all-print-count" hidden></span>';
+            button.setAttribute('aria-label', '所有選印');
+            button.title = '開啟所有選印清單：Min／Max HR、Longest R-R 及 V、S、Pause、Event Tag、Tachy／Brady 的選印集中檢視，可修改標籤、取消選印或換一個';
+            button.addEventListener('click', event => {
+                event.preventDefault(); event.stopPropagation();
+                openAllPrintReview(button);
+            });
+            printer.parentElement.insertBefore(button, printer);
+            allPrintButtonState.at = 0;
+        }
+        button.classList.toggle('is-open', !!review?.multi);
+        const now = Date.now();
+        if (now - allPrintButtonState.at < 500) {
+            if (!allPrintButtonState.timer) {
+                allPrintButtonState.timer = setTimeout(() => { allPrintButtonState.timer = null; schedulePrintBars(); }, 520);
+            }
+            return;
+        }
+        allPrintButtonState.at = now;
+        let total = 0;
+        for (const count of getAllPrintCounts().values()) total += count;
+        const badge = button.querySelector('.rc-all-print-count');
+        const text = String(total);
+        if (badge.textContent !== text) badge.textContent = text;
+        badge.hidden = !total;
+    }
+    // 分頁：有選印的清單與目前這個清單，顯示名稱與張數。
+    function renderReviewTabs(counts) {
+        const holder = review?.bar.querySelector('.rc-review-tabs');
+        if (!holder) return;
+        const types = ALL_PRINT_LIST_TYPES.filter(type => counts.get(type) > 0 || type === review.ctx.type);
+        const signature = JSON.stringify([review.ctx.type, types.map(type => [type, counts.get(type) || 0])]);
+        if (holder.dataset.signature === signature) return;
+        holder.dataset.signature = signature;
+        holder.textContent = '';
+        for (const type of types) {
+            const config = QUICK_PRINT_TYPES[type] || REVIEW_ONLY_TYPES[type] || ALL_PRINT_ONLY_TYPES[type];
+            const tab = document.createElement('button');
+            tab.type = 'button';
+            tab.className = 'rc-review-tab' + (type === review.ctx.type ? ' is-current' : '');
+            tab.textContent = `${config.name} ${counts.get(type) || 0}`;
+            tab.title = `切換到 ${config.name} 的選印`;
+            tab.addEventListener('click', () => switchReviewList(type));
+            holder.appendChild(tab);
+        }
+    }
+    // 心電圖視窗在選印清單上方保留空間（--rc-review-h），視窗底部不被清單蓋住，也不必捲動而把標題列（含 X）捲出畫面。
+    function updateReviewSpace() {
+        if (!review) return;
+        document.documentElement.style.setProperty('--rc-review-h', `${review.bar.offsetHeight}px`);
+    }
+    // 網站心電圖視窗的 X：視窗真的關閉後（有未儲存修改時網站會先確認），選印清單一併關閉。
+    document.addEventListener('click', event => {
+        if (!review || !event.target.closest?.('.close-btn')) return;
+        if (!event.target.closest(REVIEW_POPUP_SELECTOR)) return;
+        const current = review;
+        waitFor(() => !document.querySelector(REVIEW_POPUP_SELECTOR), 60000).then(closed => {
+            if (closed && review === current && !review.switching && !review.grouping) closePrintReview();
+        });
+    }, true);
+    // Event Tag 心電圖視窗的儲存：網站原本只存標籤、Spéc. 與 HR（saveCurrentModifiedData），
+    // 改為與 Event Tag 清單的 Save 相同（saveAnnoModified，不跳確認）：一併存選印範圍、備註、刪除的虛擬標籤、
+    // 標籤列編輯、Pause 心搏、AF 紀錄等。視窗的 Save、Ctrl+S、按 X 後選 Yes 都呼叫這個函式，在函式本身替換。
+    // 視窗中改過 HR 時（清單的 Save 不存 HR）與其他心電圖視窗維持網站原本的儲存。
+    const tagSaveFunctions = new WeakSet();
+    function installTagSave() {
+        const element = document.querySelector('[ng-controller="RootiCareDashboardAFCtrl"]');
+        if (!element || !window.angular) return;
+        let scope;
+        try { scope = window.angular.element(element).scope(); } catch (_) { return; }
+        while (scope && !Object.prototype.hasOwnProperty.call(scope, 'saveCurrentModifiedData')) scope = scope.$parent;
+        const original = scope?.saveCurrentModifiedData;
+        if (typeof original !== 'function' || tagSaveFunctions.has(original) || typeof scope.saveAnnoModified !== 'function') return;
+        // 有未儲存的 AF 修改（例如區間「同時標為 AF」或 AFib +）時同樣改用 saveAnnoModified，否則 AF 不會上傳。
+        function saveTagDialog(...args) {
+            const af = scope.af;
+            const tagDialog = af?.eventDialog?.printInfo?.dialogType === 'tags' && !!document.querySelector('.ngdialog.ecg-dialog');
+            let afPending = false;
+            try { afPending = typeof scope.checkAFRecordModified === 'function' && !scope.checkAFRecordModified(); } catch (_) {}
+            if (!(tagDialog || afPending) || af?.dialogChart?.hrModified) return original.apply(this, args);
+            return scope.saveAnnoModified(args[0]);
+        }
+        tagSaveFunctions.add(saveTagDialog);
+        scope.saveCurrentModifiedData = saveTagDialog;
+    }
+    for (const type of ['mousedown', 'keydown']) document.addEventListener(type, installTagSave, true);
     // ◀ ▶ 只在該方向還有縮圖時顯示。
     function updateReviewScroll() {
         if (!review) return;
@@ -3891,23 +4392,43 @@
     function syncReviewPrints() {
         if (!review || review.busy || review.grouping) return;
         const ctx = review.ctx;
+        if (review.multi) {
+            // 頁面變動很頻繁，所有選印清單最多每 300 毫秒比對一次（含其他分頁的張數）。
+            const now = Date.now();
+            if (now - (review.syncedAt || 0) < 300) {
+                if (!review.syncTimer) review.syncTimer = setTimeout(() => { if (review) review.syncTimer = null; syncReviewPrints(); }, 320);
+                return;
+            }
+            review.syncedAt = now;
+            if (getPrintHost()?.af !== ctx.af) { closePrintReview(); return; }
+            const { forced, section, all } = getQuickPrinted(ctx);
+            const counts = getAllPrintCounts();
+            if (reviewPrintSignature(forced, section, all) !== review.printSignature) refreshPrintReview(counts);
+            else renderReviewTabs(counts);
+            return;
+        }
         if (!ctx.dialog || ctx.dialog.dscp?.type !== ctx.type) return;
         const { forced, section, all } = getQuickPrinted(ctx);
         if (reviewPrintSignature(forced, section, all) !== review.printSignature) refreshPrintReview();
     }
-    function refreshPrintReview() {
+    function refreshPrintReview(counts = null) {
         if (!review) return;
         const { ctx, bar, cards } = review;
-        if (!ctx.dialog || ctx.dialog.dscp?.type !== ctx.type || !review.anchor.isConnected) { closePrintReview(); return; }
+        if (review.multi) {
+            // 所有選印清單不依附事件清單；換了紀錄（或 Group 後重新載入）時關閉。
+            if (getPrintHost()?.af !== ctx.af) { closePrintReview(); return; }
+        } else if (!ctx.dialog || ctx.dialog.dscp?.type !== ctx.type || !review.anchor.isConnected) { closePrintReview(); return; }
         const times = getQuickTimes(ctx);
         const { forced, section, all } = getQuickPrinted(ctx, times);
         review.items = all;
         review.section = section;
         review.printSignature = reviewPrintSignature(forced, section, all);
-        const title = `選印清單・${ctx.config.name}`;
+        if (review.multi) renderReviewTabs(counts || getAllPrintCounts());
+        const title = review.multi ? '所有選印' : `選印清單・${ctx.config.name}`;
         const titleNode = bar.querySelector('.rc-review-title');
         if (titleNode.textContent !== title) titleNode.textContent = title;
-        const hint = 'A／D 切換上一張／下一張選印；Q/E、←/→ 移動時間。'
+        const hint = (review.multi ? 'A／D 切換上一張／下一張選印（到頭尾時換到前後清單）；' : 'A／D 切換上一張／下一張選印；')
+            + 'Q/E、←/→ 移動時間。'
             + (section.size ? '藍色選印開啟區段選印視窗（Start／Mid／End 三段）。' : '')
             + (ctx.af.editingSwitch ? '' : '目前不是編輯模式，無法修改標籤。');
         const hintNode = bar.querySelector('.rc-review-hint');
@@ -3925,14 +4446,18 @@
             card.classList.toggle('is-forced', isForced);
             card.classList.toggle('is-both', isBoth);
             card.classList.toggle('is-active', time === review.active);
-            card.querySelector('.rc-review-tag.is-forced-tag').hidden = !isForced || isBoth;
+            const forcedTag = card.querySelector('.rc-review-tag.is-forced-tag');
+            forcedTag.hidden = !isForced || isBoth;
+            const forcedText = ctx.config.fixed ? '報告固定' : '強制選印';
+            if (forcedTag.textContent !== forcedText) forcedTag.textContent = forcedText;
             card.querySelector('.rc-review-tag.is-both').hidden = !isBoth;
             const isSection = !isForced && section.has(time);
             card.classList.toggle('is-section', isSection);
             card.querySelector('.rc-review-tag.is-section').hidden = !isSection;
             for (const button of card.querySelectorAll('.rc-review-btn')) {
                 button.disabled = isForced || review.busy;
-                button.title = isForced ? '橘色強制選印由網站決定，無法在此取消或替換' : '';
+                button.title = !isForced ? '' : ctx.config.fixed ? '報告固定印出的心電圖，無法在此取消'
+                    : '橘色強制選印由網站決定，無法在此取消或替換';
             }
             const expected = previous ? previous.nextElementSibling : list.firstElementChild;
             if (expected !== card) list.insertBefore(card, expected);
@@ -3955,7 +4480,7 @@
         if (!review.grouping) group.disabled = review.busy;
         updateReviewCount();
         decorateReviewDialog();
-        requestAnimationFrame(updateReviewScroll);
+        requestAnimationFrame(() => { updateReviewScroll(); updateReviewSpace(); });
     }
     function createReviewCard(time) {
         const card = document.createElement('div');
@@ -3986,6 +4511,7 @@
     }
     async function loadReviewInfo(card, time) {
         const ctx = review?.ctx;
+        if (ctx?.config.info) { card.querySelector('.rc-review-info').textContent = ctx.config.info(ctx.af); return; }
         if (!ctx || ctx.config.reviewOnly) return;
         try {
             const [score] = await computeQuickScores(ctx, [time]);
@@ -4039,13 +4565,13 @@
             }
             if (!review || review.ctx !== ctx) return;
             if (section && ctx.sectionHost?.openSectionPrintDialog) {
-                const items = Array.isArray(ctx.dialog.currentData) ? ctx.dialog.currentData : [];
+                const items = listCurrentData(ctx);
                 const item = items.find(entry => toEventTime(entry?.startTime) === time);
                 const target = item?.isPrintSection ? item : { ...(item || {}), startTime: time, isPrintSection: true };
                 ctx.sectionHost.$apply(() => ctx.sectionHost.openSectionPrintDialog(target, ctx.type));
             } else if (ctx.config.tag && typeof ctx.host.openEventTagDialog === 'function') {
                 // Event Tag：與點擊清單上的心電圖相同。不在目前頁面的項目沒有 timeRange，依網站格式補上（起點後 10 秒）。
-                const loaded = (Array.isArray(ctx.dialog.currentData) ? ctx.dialog.currentData : []).find(entry => toEventTime(entry) === time);
+                const loaded = listCurrentData(ctx).find(entry => toEventTime(entry) === time);
                 const raw = loaded || (ctx.dialog[ctx.type]?.data || []).flat().find(entry => toEventTime(entry) === time)
                     || { tagTime: time, dataTime: time };
                 const start = toEventTime(raw);
@@ -4055,6 +4581,9 @@
                 ctx.host.$apply(() => ctx.host.openDialog(time, ctx.af.dataDuration || 60));
             }
             await waitFor(expectedOpen, 3000);
+            // 開啟後回到視窗頂端，標題列與 X 一定看得到。
+            const popup = document.querySelector(REVIEW_POPUP_SELECTOR);
+            if (popup) popup.scrollTop = 0;
         } catch (error) {
             quickToast(review?.bar, `無法開啟心電圖：${error?.message || error}`, true);
         } finally {
@@ -4062,11 +4591,17 @@
         }
     }
     function moveReview(delta) {
-        if (!review || !review.items.length) return;
+        if (!review) return;
         const index = review.items.indexOf(review.active);
+        // 所有選印清單：已在這個清單的頭尾（或清單已空）時換到前後有選印的清單。
+        const atEnd = !review.items.length || (index >= 0 && (delta > 0 ? index === review.items.length - 1 : index === 0));
+        if (atEnd) {
+            const type = review.multi && !review.switching ? adjacentReviewList(delta) : null;
+            if (type) switchReviewList(type, delta > 0 ? 'first' : 'last');
+            return;
+        }
         const next = index < 0 ? (delta > 0 ? 0 : review.items.length - 1)
             : Math.min(review.items.length - 1, Math.max(0, index + delta));
-        if (index >= 0 && next === index) return;
         showReviewTime(review.items[next]);
     }
     // A／D：選印清單開啟時切換上一張／下一張選印，不論滑鼠位置；Q/E、←/→ 維持原本的移動時間。
@@ -4080,6 +4615,13 @@
         event.stopImmediatePropagation();
         if (!event.repeat || !review.switching) moveReview(event.code === 'KeyA' ? -1 : 1);
     }, true);
+    // Esc：網站關閉心電圖視窗時，下方的選印清單一併關閉（不攔截，網站原本的 Esc 照常作用）。
+    // 拖曳標籤、區間選取中的 Esc 只取消那些操作；Group 進行中不關閉。
+    window.addEventListener('keydown', event => {
+        if (!review || event.key !== 'Escape' || event.isComposing || review.grouping) return;
+        if (labelDrag || rangeMode || rangeHint.style.display !== 'none') return;
+        closePrintReview();
+    }, true);
 
     // 縮圖：事件心電圖範圍（前 4 秒至後 6 秒）一列，上方標出心搏類型；依序載入，最多同時 3 張。
     // 眼睛（列印範圍）開啟時改顯示報告中波形下方的 30 秒縮圖範圍，綠色為印出的 8 秒；只保留到重新整理頁面。
@@ -4091,6 +4633,9 @@
     // Pause 為事件前 4 秒（印出第 0～8 秒），Event Tag 為選印範圍的起點；藍色區段選印的版面不同，回傳 null。
     function reviewPrintStart(ctx, time) {
         if (review?.section?.has(time)) return null;
+        // 網站列印（getPrintHrData）：Min／Max HR、Max HR Sinus 有 10 秒平均心率時印出該時間起 8 秒，否則與一般事件相同；
+        // Longest R-R 與一般事件相同（前 3 秒起 8 秒）。下方 30 秒縮圖同樣從印出範圍前 11 秒開始。
+        if (ctx.config.fixed && ctx.type !== 'rr' && ctx.af.record?.hasAvgHRIn10s) return time;
         if (ctx.config.tag) return getTagPrintWindow(ctx.af, time).start;
         if (/^pause/.test(ctx.type)) return time - 4;
         return time - 3;
@@ -4361,6 +4906,11 @@
         }
         refreshPrintReview();
         if (neighbor !== null) showReviewTime(neighbor);
+        else if (review?.multi && !review.items.length) {
+            // 這個清單的選印都取消了：換到下一個（沒有則上一個）有選印的清單。
+            const type = adjacentReviewList(1) || adjacentReviewList(-1);
+            if (type) switchReviewList(type);
+        }
     }
     async function swapReviewPrint(time, button) {
         if (!review || review.busy) return;
@@ -4540,7 +5090,8 @@
         const forced = !!review.cards.get(time)?.classList.contains('is-forced');
         for (const button of actions.querySelectorAll('button:not(.is-eye)')) {
             button.disabled = forced || review.busy || review.grouping;
-            button.title = forced ? '橘色強制選印由網站決定，無法在此取消或替換' : '';
+            button.title = !forced ? '' : review.ctx.config.fixed ? '報告固定印出的心電圖，無法在此取消'
+                : '橘色強制選印由網站決定，無法在此取消或替換';
         }
     }
 
@@ -4599,12 +5150,15 @@
         const af = host?.af;
         const info = af?.eventDialog?.printInfo;
         const tagTime = Number(info?.dataTms);
-        if (!af || info?.dialogType !== 'tags' || af.eventDialog?.dscp?.type !== 'tags' || !Number.isFinite(tagTime)) return null;
+        // 所有選印清單停在 Event Tag 分頁時沒有開著 Event Tag 清單，同樣顯示選印範圍（detached：改動後自行上傳）。
+        const detached = af?.eventDialog?.dscp?.type !== 'tags';
+        const fromAllPrints = !!review?.multi && review.ctx.type === 'tags' && review.ctx.af === af;
+        if (!af || info?.dialogType !== 'tags' || (detached && !fromAllPrints) || !Number.isFinite(tagTime)) return null;
         if (isECGMeasuring(af) || af.loading?.ecg) return null;
         const trend = af.ECGTrendDialog;
         const range = Array.isArray(trend?.timeRange) ? trend.timeRange.map(Number) : [];
         if (range.length < 2 || !Number.isFinite(Number(trend.startTime))) return null;
-        return { dialog, host, af, tagTime, viewStart: Number(trend.startTime), range };
+        return { dialog, host, af, tagTime, viewStart: Number(trend.startTime), range, detached };
     }
     // 心電圖視窗中可點選的波形：下方含綠色顯示範圍的是 60 秒長條，其餘為上方 20 秒心電圖（3 導程時有多條）。
     function getTagPrintStrips(ctx) {
@@ -4739,8 +5293,9 @@
         if (!af.eventRecordRange) af.eventRecordRange = {};
         if (!af.eventRecordRange.tag) af.eventRecordRange.tag = {};
         const ranges = af.eventRecordRange.tag;
-        const item = (Array.isArray(af.eventDialog.currentData) ? af.eventDialog.currentData : [])
+        const item = (!ctx.detached && Array.isArray(af.eventDialog.currentData) ? af.eventDialog.currentData : [])
             .find(entry => entry && toEventTime(entry) === ctx.tagTime);
+        if (ctx.detached) scheduleDetachedUpload(af);
         ctx.host.$apply(() => {
             if (item) {
                 // 先放在前一步，網站再往後移 5 秒正好落在 start；紀錄開頭（前一步早於開頭）改從後一步往前移。
