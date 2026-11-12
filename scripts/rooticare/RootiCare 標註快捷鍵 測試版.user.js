@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.55.1
+// @version      1.55.2
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -42,7 +42,7 @@
  *   同時標為 AF  面板上勾選後，以 Shift + 1／2／3 完成區間時，兩端點視為正常與 AF 的交界一併標為 AF（與 AFib + 相同，需在編輯模式）：
  *            AF 範圍直接以兩端點交給網站（不另外延伸）；Save 後自動把該段 AF 的 Start／End segment（與 AF 清單 ◀ ▶ 相同）設在交界後 6 秒，
  *            白色區塊（報告印出的 8 秒）正好涵蓋交界（AF 清單的分段要重新載入紀錄後才更新，Save 後重新整理頁面即自動完成）；
- *            與既有 AF 合併時只調整仍為這次區間的那一端；勾選時篩選修改的原標籤自動取消 V（可再勾回）；
+ *            開頭或結尾落在原有 AF 之中時，該端以原有 AF 為主（起訖與 Start／End segment 都維持原樣），只對準落在 AF 外的那一端；勾選時篩選修改的原標籤自動取消 V（可再勾回）；
  *            勾選後出現子選項「僅標為 AF」（預設不勾）：勾選後完成區間只標為 AF，不修改任何標籤；
  *            尚未儲存，按 Save（含心電圖視窗的 Save、Ctrl+S）時與標籤一起上傳；勾選保留到重新整理頁面
  *   面板開啟時按 1 / 2 / 3（不按 Shift）切換分頁：篩選修改／填補整理／早搏判讀。
@@ -1272,6 +1272,17 @@
         if (Number.isFinite(recordStart)) start = Math.max(start, recordStart);
         if (Number.isFinite(recordEnd) && recordEnd > recordStart) end = Math.min(end, recordEnd);
         if (!(end > start)) throw new Error('區間太短');
+        // 端點落在原有 AF 之中時，該端以原有 AF 為主：記下原本的起點／終點（儲存後用來找回同一段 AF）
+        // 與原本自訂的 Start／End segment（儲存後還原，不移到點擊位置）。須在合併前記錄。
+        const keepOriginal = (time, side) => {
+            const range = (af.afEditing.data || []).find(item => Number(item?.start) <= time && Number(item?.end) >= time);
+            if (!range) return null;
+            const episode = listAFEpisodes(af).find(item => item.start <= time && item.end >= time);
+            const saved = episode && af.eventRecordRange?.af?.[episode.start];
+            const seg = Array.isArray(saved) && saved.length >= 3 ? Number(saved[side === 'start' ? 0 : 2]) : NaN;
+            return { ref: Number(side === 'start' ? range.start : range.end), seg: Number.isFinite(seg) ? seg : null };
+        };
+        const keep = { start: keepOriginal(start, 'start'), end: keepOriginal(end, 'end') };
         host.$apply(() => {
             // 清掉進行到一半的 AFib + 選取，避免與這次的起點、終點混在一起；完成後也清空，下次點 AFib + 從頭開始。
             af.afEditing.selectedEvent = [];
@@ -1279,7 +1290,7 @@
             host.selectedNewAFEvent(end);
             af.afEditing.selectedEvent = [];
         });
-        queueAFSegments(af, start, end, junctions);
+        queueAFSegments(af, start, end, junctions, keep);
         return [start, end];
     }
     // 儲存後設定 Start／End segment。
@@ -1288,7 +1299,8 @@
     // 網站儲存 AF 後不會重算這些區塊，要重新載入紀錄後才有新的 key，因此待辦存在 localStorage（依紀錄），
     // 重新整理頁面後仍會完成。網站上傳 AF 時會先清掉新範圍內的 segment 位置，所以也要等 AF 已儲存才寫入。
     // 找 AF 清單中起點與這次 AF 起點相差 RANGE_AF_KEY_NEAR 秒內的那段調整 Start、終點相差 RANGE_AF_END_NEAR 秒內的調整 End；
-    // 與既有 AF 合併而端點不是這次的，該端不調整。放棄修改（AF 不再包含這段）或超過一天則取消。
+    // 與既有 AF 合併而端點不是這次的，該端不調整；標記時端點已在原有 AF 之中的，該端還原原本的 segment（以原有 AF 為主）。
+    // 放棄修改（AF 不再包含這段）或超過一天則取消。
     const AF_SEGMENT_STORE = 'rc-af-segment-jobs';
     const RANGE_AF_KEY_NEAR = 75;
     const RANGE_AF_END_NEAR = 150;
@@ -1301,9 +1313,17 @@
         catch (_) {}
     }
     let afSegmentTimer = null;
-    function queueAFSegments(af, start, end, junctions) {
+    // AF 清單中的每段 AF（eventTypeStat.af：key 為起點，值為秒數）。
+    function listAFEpisodes(af) {
+        return Object.entries(af.eventTypeStat?.af || {}).map(([key, value]) => {
+            const start = Number(key);
+            return { start, end: start + Number([].concat(value)[0]) };
+        }).filter(item => Number.isFinite(item.start) && item.end > item.start);
+    }
+    function queueAFSegments(af, start, end, junctions, keep = {}) {
         const jobs = readAFSegmentJobs();
-        jobs.push({ measure: String(af._measureId), start, end, junctions, since: Date.now() });
+        jobs.push({ measure: String(af._measureId), start, end, junctions,
+            keepStart: keep.start || null, keepEnd: keep.end || null, since: Date.now() });
         writeAFSegmentJobs(jobs);
         startAFSegmentTimer();
     }
@@ -1329,14 +1349,14 @@
                 if (!(af.afEditing.ogData || []).some(covers)
                     || JSON.stringify(af.afEditing.ogData) !== JSON.stringify(af.afEditing.data)
                     || JSON.stringify(af.eventRecordRange) !== JSON.stringify(af.ogEventRecordRange)) continue;
-                // AF 清單中的那段 AF：起點不晚於交界、終點不早於交界，且起點或終點靠近這次的 AF 起訖。
-                const episodes = Object.entries(af.eventTypeStat?.af || {}).map(([key, value]) => {
-                    const start = Number(key);
-                    return { start, end: start + Number([].concat(value)[0]) };
-                }).filter(item => Number.isFinite(item.start) && item.end > item.start
-                    && item.start <= job.junctions[0] && item.end >= job.junctions[1]);
-                const episode = episodes.find(item => Math.abs(item.start - job.start) <= RANGE_AF_KEY_NEAR
-                    || Math.abs(item.end - job.end) <= RANGE_AF_END_NEAR);
+                // AF 清單中的那段 AF：起點不晚於交界、終點不早於交界，且起點或終點靠近這次的 AF 起訖
+                // （端點在原有 AF 之中的，改以原有 AF 的起點／終點比對）。
+                const startRef = job.keepStart ? job.keepStart.ref : job.start;
+                const endRef = job.keepEnd ? job.keepEnd.ref : job.end;
+                const episodes = listAFEpisodes(af)
+                    .filter(item => item.start <= job.junctions[0] && item.end >= job.junctions[1]);
+                const episode = episodes.find(item => Math.abs(item.start - startRef) <= RANGE_AF_KEY_NEAR
+                    || Math.abs(item.end - endRef) <= RANGE_AF_END_NEAR);
                 if (!episode) {
                     // 新的 AF 區塊要重新載入紀錄後才有：提示一次。
                     if (!job.hinted) {
@@ -1346,17 +1366,23 @@
                     }
                     continue;
                 }
-                const ownStart = Math.abs(episode.start - job.start) <= RANGE_AF_KEY_NEAR;
-                const ownEnd = Math.abs(episode.end - job.end) <= RANGE_AF_END_NEAR;
+                const ownStart = !job.keepStart && Math.abs(episode.start - job.start) <= RANGE_AF_KEY_NEAR;
+                const ownEnd = !job.keepEnd && Math.abs(episode.end - job.end) <= RANGE_AF_END_NEAR;
                 const key = episode.start;
                 // 其餘 segment 沿用網站預設（adujustEventRange：起點、中點、終點）。
-                const current = Array.isArray(af.eventRecordRange.af?.[key]) && af.eventRecordRange.af[key].length >= 3
-                    ? [...af.eventRecordRange.af[key]] : [key, key + Math.ceil((episode.end - key) / 2), episode.end];
+                const saved = af.eventRecordRange.af?.[key];
+                const current = Array.isArray(saved) && saved.length >= 3
+                    ? [...saved] : [key, key + Math.ceil((episode.end - key) / 2), episode.end];
                 if (ownStart) current[0] = job.junctions[0] + RANGE_AF_SEGMENT_SHIFT;
+                else if (job.keepStart?.seg != null) current[0] = job.keepStart.seg;
                 if (ownEnd) current[2] = job.junctions[1] + RANGE_AF_SEGMENT_SHIFT;
+                else if (job.keepEnd?.seg != null) current[2] = job.keepEnd.seg;
+                drop();
+                // 兩端都以原有 AF 為主且 segment 沒有變動時，不必上傳。
+                if (Array.isArray(saved) && JSON.stringify(saved) === JSON.stringify(current)) continue;
+                if (!ownStart && !ownEnd && !Array.isArray(saved) && job.keepStart?.seg == null && job.keepEnd?.seg == null) continue;
                 if (!af.eventRecordRange.af) af.eventRecordRange.af = {};
                 af.eventRecordRange.af[key] = current;
-                drop();
                 try {
                     await uploadSectionSelections(af);
                     getPrintHost()?.$applyAsync?.();
