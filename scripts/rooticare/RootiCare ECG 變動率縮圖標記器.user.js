@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.20.2
+// @version      1.22.0
 // @description  依變動率、BPM、彩色波形高度／寬度、與前一跳比較（高矮寬窄快慢）、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -38,6 +38,10 @@
  *   選印該心搏所屬清單（VT、Triplet、Couplet、Bigeminy 等）中的心電圖；
  *   都不屬於時選印 VEB / SVEB 清單；全部已選印時再按 5 取消。
  *   改過標籤、尚未重新 Group 的心搏，依目前標籤的連續數判斷：2 顆 Couplet、3 顆 Triplet、4 顆以上 VT。
+ *
+ * 【AF 標示】縮圖的心搏落在 AF 時段中時，在縮圖標籤（N／S／V／A）上方顯示 AF 圖示（與 AF 頁面心電圖上的相同）；
+ *   按 B 開關，與標註快捷鍵 AF 頁面的 B 連動（任一頁隱藏，另一頁也隱藏）；預設顯示，重新整理頁面後恢復顯示；
+ *   沒有安裝標註快捷鍵時只隱藏縮圖上的圖示，不影響 AF 頁面
  */
 
 (() => {
@@ -2104,6 +2108,7 @@
                 thumb.classList.toggle(CONFIG.reclassifiedClass, reclassified);
             }
         }
+        refreshAFMarks();
     }
 
     // 以 scheduled 合併短時間多次 DOM 通知，180 ms 後統一更新縮圖標記。
@@ -2142,6 +2147,10 @@
                 controlContainer = null;
             }
             const relevant = records.some(record => {
+                // 腳本自己加上或移除的 AF 圖示不算網站變動。
+                if (record.type === 'childList' && [...record.addedNodes, ...record.removedNodes]
+                    .every(node => node.classList?.contains('rc-af-mark'))) return false;
+                if (record.type === 'attributes' && record.target.classList?.contains('rc-af-mark')) return false;
                 const statusTarget = record.target instanceof Element ? record.target : record.target.parentElement;
                 if (statusTarget?.closest(`#${CONFIG.controlId} [data-role="batch-status"]`)) return false;
                 if (record.target instanceof Element && record.target.closest(`#${PLAYER_CONTROL_ID}`)) return false;
@@ -2548,6 +2557,147 @@
             printBusy = false;
         }
     }
+
+    // ── AF 標示：縮圖的心搏時間落在 AF 中時，在縮圖標籤（N／S／V／A）上方顯示 AF 圖示（與 AF 頁面心電圖上的相同）。
+    // B 鍵開關，與「RootiCare 標註快捷鍵」AF 頁面的 B 連動：共用同一個樣式元素（#rc-hide-af-icon）表示隱藏，
+    // 在任一頁按 B 隱藏或顯示，切到另一頁也相同；預設顯示，重新整理頁面後恢復顯示。
+    // （該樣式的規則也會隱藏這裡的圖示，因為圖示路徑含 icon_AFibMark。）
+    // AF 時段為網站的 tmsAFs（每筆代表該秒起 60 秒）加上編輯加入的 AF 範圍（afRangeModified）。縮圖只有絕對取樣索引：以前後最近的 V／S 心搏（時間與索引都已知）
+    // 內插換算時間；不用固定取樣率，實際取樣率與網站存的 250 略有差異，整份紀錄累積可差到數分鐘。
+    const AF_MARK_CLASS = 'rc-af-mark';
+    const AF_MARK_SRC = 'assets/images/rooti-care/icon_AFibMark.png';
+    const AF_MARK_SIZE = 14;
+    const AF_BLOCK_SECONDS = 60;
+    const AF_MARK_KEY = 'KeyB';
+    const AF_HIDE_STYLE_ID = 'rc-hide-af-icon';
+    const afMarksOn = () => !document.getElementById(AF_HIDE_STYLE_ID);
+    // 有這個樣式表示隱藏 AF 圖示。有安裝標註快捷鍵（它在 <html> 加上 data-rc-af-icon-toggle）時，
+    // 內容與它的 toggleAFIcons 相同，AF 頁面的圖示一起隱藏，回到 AF 頁面可再按 B 恢復；
+    // 沒有安裝時只隱藏縮圖上的圖示，避免 AF 頁面的圖示被藏起來卻沒有方法恢復。
+    function toggleAFHideStyle() {
+        const existing = document.getElementById(AF_HIDE_STYLE_ID);
+        if (existing) { existing.remove(); return; }
+        const style = document.createElement('style');
+        style.id = AF_HIDE_STYLE_ID;
+        style.textContent = document.documentElement.dataset.rcAfIconToggle
+            ? 'image.af-icon, image[*|href*="icon_AFibMark"] { display: none !important; }'
+            : `image.${AF_MARK_CLASS} { display: none !important; }`;
+        document.head.appendChild(style);
+    }
+    let afMarkContext = null;
+    let afMarkLoading = null;
+    // 依紀錄讀取一次（換紀錄或重新進入 MP 頁面時重讀）；讀取中回傳 null，讀完後重新整理縮圖。
+    function loadAFMarkContext() {
+        const user = thumbnailScope()?.rooticare?.selectedUser;
+        const ids = { vendorId: user?.vendorId, idNumber: user?.idNumber,
+            measureId: readStoredId('_measureId'), afId: readStoredId('_afId') };
+        const container = document.querySelector('.morphology > .container');
+        if (!container || !ids.vendorId || !ids.idNumber || !ids.measureId || !ids.afId) return null;
+        const cacheKey = `${ids.vendorId}|${ids.idNumber}|${ids.measureId}|${ids.afId}`;
+        if (afMarkContext?.cacheKey === cacheKey && afMarkContext.container === container) return afMarkContext;
+        if (afMarkLoading?.cacheKey === cacheKey && afMarkLoading.container === container) return null;
+        const job = { cacheKey, container };
+        afMarkLoading = job;
+        const done = context => {
+            if (afMarkLoading !== job) return;
+            afMarkLoading = null;
+            afMarkContext = { cacheKey, container, ...context };
+            scheduleUpdate();
+        };
+        const manager = window.angular.element(document.body).injector().get('WppManager');
+        // 編輯加上的 AF（AFib +、AFib All 等，afRangeModified）不在 tmsAFs 的區塊中，兩者合併才是 AF 頁面上的 AF。
+        Promise.all([
+            Promise.resolve(manager.Af.getTagTms(ids.vendorId, ids.idNumber, ids.afId)).then(plainData),
+            Promise.resolve(manager.Af.getAfModifiedRange(ids.vendorId, ids.idNumber, ids.measureId)).then(plainData).catch(() => []),
+        ]).then(([record, edited]) => {
+            const ranges = (record?.tmsAFs || []).map(Number).filter(Number.isFinite)
+                .map(start => [start, start + AF_BLOCK_SECONDS]);
+            for (const range of Array.isArray(edited) ? edited : []) ranges.push([Number(range?.start), Number(range?.end)]);
+            const blocks = mergeAFRanges(ranges);
+            const beats = [];
+            for (const [timesKey, positionsKey] of [['tmsPVC', 'posPVC'], ['tmsSVEB', 'posSVEB']]) {
+                pairBeats(record?.[timesKey], record?.[positionsKey]).forEach((time, position) => beats.push([position, time]));
+            }
+            beats.sort((a, b) => a[0] - b[0]);
+            done({ blocks, positions: beats.map(beat => beat[0]), times: beats.map(beat => beat[1]) });
+        }).catch(() => done({ blocks: mergeAFRanges([]), positions: [], times: [] })); // 讀不到時這次不標示，換紀錄或重新進入頁面再讀
+        return null;
+    }
+    // 絕對取樣索引 → 時間（秒）：在前後兩顆已知心搏之間內插；超出範圍時以整份紀錄的平均速率外推。
+    function afMarkTime(context, index) {
+        const { positions, times } = context;
+        const count = positions.length;
+        if (count < 2 || positions[count - 1] === positions[0]) return null;
+        const i = lowerBound(positions, index);
+        if (i > 0 && i < count) {
+            const span = positions[i] - positions[i - 1];
+            return span ? times[i - 1] + (index - positions[i - 1]) * (times[i] - times[i - 1]) / span : times[i];
+        }
+        const slope = (times[count - 1] - times[0]) / (positions[count - 1] - positions[0]);
+        const anchor = i === 0 ? 0 : count - 1;
+        return times[anchor] + (index - positions[anchor]) * slope;
+    }
+    // 合併成依起點排序、不重疊的 [起, 訖) 區段，起點另存一份供二分搜尋。
+    function mergeAFRanges(ranges) {
+        const sorted = ranges.filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+            .sort((a, b) => a[0] - b[0]);
+        const merged = [];
+        for (const [start, end] of sorted) {
+            const last = merged[merged.length - 1];
+            if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+            else merged.push([start, end]);
+        }
+        return { starts: merged.map(range => range[0]), ranges: merged };
+    }
+    function isAFTime(blocks, time) {
+        let i = lowerBound(blocks.starts, time);
+        if (blocks.starts[i] !== time) i--;
+        return i >= 0 && time < blocks.ranges[i][1];
+    }
+    // 只增刪有變化的圖示；位置跟著標籤文字（網站重畫縮圖時重新放置）。
+    function refreshAFMarks() {
+        const thumbs = [...document.querySelectorAll('#right-list .ecg-trend')];
+        const context = afMarksOn() && thumbs.length ? loadAFMarkContext() : null;
+        for (const thumb of thumbs) {
+            const svg = thumb.querySelector('.ecgWave svg');
+            const label = svg?.querySelector('g.centerGroup > text');
+            let mark = svg?.querySelector(`image.${AF_MARK_CLASS}`);
+            let show = false;
+            if (context && label?.textContent.trim()) {
+                const index = Number(window.angular.element(thumb).scope?.()?.segment?.absoluteIndex);
+                const time = Number.isFinite(index) ? afMarkTime(context, index) : null;
+                show = time !== null && isAFTime(context.blocks, time);
+            }
+            if (!show) { mark?.remove(); continue; }
+            let box;
+            try { box = label.getBBox(); } catch (_) { continue; }
+            if (!box.width) continue;
+            if (!mark) {
+                mark = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+                mark.setAttribute('class', AF_MARK_CLASS);
+                mark.setAttribute('href', AF_MARK_SRC);
+                mark.setAttribute('width', String(AF_MARK_SIZE));
+                mark.setAttribute('height', String(AF_MARK_SIZE));
+                mark.setAttribute('pointer-events', 'none');
+            }
+            const x = (box.x + box.width / 2 - AF_MARK_SIZE / 2).toFixed(1);
+            const y = (box.y - AF_MARK_SIZE - 1).toFixed(1);
+            if (mark.getAttribute('x') !== x) mark.setAttribute('x', x);
+            if (mark.getAttribute('y') !== y) mark.setAttribute('y', y);
+            if (mark.parentNode !== label.parentNode) label.parentNode.appendChild(mark);
+        }
+    }
+    document.addEventListener('keydown', event => {
+        if (event.code !== AF_MARK_KEY || event.repeat || event.isComposing
+            || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+        if (!document.querySelector('.morphology > .container') || document.querySelector('.ngdialog')) return;
+        if (event.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        toggleAFHideStyle();
+        refreshAFMarks();
+        printToast(afMarksOn() ? '顯示 AF 圖示' : '隱藏 AF 圖示');
+    }, true);
 
     document.addEventListener('keydown', event => {
         if (event.key !== PRINT_KEY || event.repeat || event.isComposing
