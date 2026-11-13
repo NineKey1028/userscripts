@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.55.3
+// @version      1.55.4
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -1290,6 +1290,29 @@
         const origin = Number(ctx.af.record?.dataRange?.[0] ?? ctx.af.record?.startTimeInt);
         return origin + ctx.index / ctx.rate;
     }
+    // 【測試版】對齊自我檢查：比對心搏內插與畫面時間（視窗 startTime＋索引差÷取樣率），寫到 Console；
+    // 差超過 RANGE_TIME_CHECK_WARN 秒時另外提示。用來決定之後以哪一種時間為準，不影響實際標記（仍以心搏內插為準）。
+    const RANGE_TIME_CHECK_WARN = 2;
+    function checkRangeTime(ctx, label) {
+        const interp = rangeIndexTime(ctx);
+        const view = Number(ctx.scope?.startTime) + (ctx.index - ctx.viewStart) / ctx.rate;
+        const origin = Number(ctx.af.record?.dataRange?.[0] ?? ctx.af.record?.startTimeInt);
+        const naive = origin + ctx.index / ctx.rate;
+        const shift = ctx.scope?.threeChannel || ctx.scope?.dialogSwitch ? Number(ctx.scope.shiftSec) : 0;
+        // 前後參考心搏的距離（分鐘）；沒有心搏資料或在第一顆之前、最後一顆之後時為 null。
+        let gap = null;
+        const clock = getBeatClock(ctx.af);
+        if (clock) {
+            const i = lowerBound(clock.positions, ctx.index);
+            if (i > 0 && i < clock.positions.length) gap = (clock.times[i] - clock.times[i - 1]) / 60;
+        }
+        const diff = view - interp;
+        const fmt = value => Number.isFinite(value) ? value.toFixed(1) : '--';
+        console.log(`[RootiCare AF 對齊檢查] ${label}：心搏內插 ${fmt(interp)} | 畫面時間 ${fmt(view)}（差 ${fmt(diff)} 秒）`
+            + ` | 舊算法 ${fmt(naive)}（差 ${fmt(naive - interp)} 秒） | 參考心搏相距 ${gap === null ? '--' : gap.toFixed(1)} 分鐘`
+            + ` | shift ${fmt(shift)} | ${ctx.scope?.dialogSwitch ? '心電圖視窗' : ctx.scope?.threeChannel ? '3 導程' : '主畫面'}`);
+        return Number.isFinite(diff) && Math.abs(diff) > RANGE_TIME_CHECK_WARN ? `${label}差 ${fmt(diff)} 秒` : null;
+    }
     function markRangeAF(first, last) {
         const af = first.af;
         let host = first.parent;
@@ -1298,6 +1321,12 @@
         if (!af.ecgAnno?.editSwitch) throw new Error('需在編輯模式才能標為 AF');
         const times = [rangeIndexTime(first), rangeIndexTime(last)];
         if (!times.every(Number.isFinite)) throw new Error('無法換算區間時間');
+        try {
+            const warnings = [checkRangeTime(first, '第一端點'), checkRangeTime(last, '第二端點')].filter(Boolean);
+            if (warnings.length) quickToast(null, `AF 對齊檢查：畫面時間與心搏內插不一致（${warnings.join('、')}），詳見 Console`, true);
+        } catch (error) {
+            console.warn('[RootiCare AF 對齊檢查] 失敗', error);
+        }
         // 不超出紀錄的起訖時間。
         const recordStart = Number(af.record?.startTimeInt);
         const recordEnd = Number(af.record?.endTimeInt);
