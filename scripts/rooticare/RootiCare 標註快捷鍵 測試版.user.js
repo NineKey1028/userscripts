@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.55.4
+// @version      1.55.5
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -873,6 +873,8 @@
             throw new Error('請先結束原生 R-type／Pause 模式或等待儲存完成');
         return { scope, parent, af: parent.af, index: Math.round(viewStart + fraction * rate * seconds),
             rate, viewStart, startTime: Number(scope.startTime) + shift,
+            // 【測試版】對齊自我檢查用：選取當下的視窗 startTime（視窗之後捲動，scope 上的值會改變）。
+            viewStartTime: Number(scope.startTime),
             modifiedData: scope.modifiedData,
             record: [parent.af._vendorId, parent.af._idNumber, parent.af._measureId].join('|') };
     }
@@ -1295,7 +1297,8 @@
     const RANGE_TIME_CHECK_WARN = 2;
     function checkRangeTime(ctx, label) {
         const interp = rangeIndexTime(ctx);
-        const view = Number(ctx.scope?.startTime) + (ctx.index - ctx.viewStart) / ctx.rate;
+        // 視窗 startTime 已含 shiftSec（對應 viewStart），不再加位移。
+        const view = ctx.viewStartTime + (ctx.index - ctx.viewStart) / ctx.rate;
         const origin = Number(ctx.af.record?.dataRange?.[0] ?? ctx.af.record?.startTimeInt);
         const naive = origin + ctx.index / ctx.rate;
         const shift = ctx.scope?.threeChannel || ctx.scope?.dialogSwitch ? Number(ctx.scope.shiftSec) : 0;
