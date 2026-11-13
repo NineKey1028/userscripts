@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.22.0
+// @version      1.22.1
 // @description  依變動率、BPM、彩色波形高度／寬度、與前一跳比較（高矮寬窄快慢）、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -41,7 +41,8 @@
  *
  * 【AF 標示】縮圖的心搏落在 AF 時段中時，在縮圖標籤（N／S／V／A）上方顯示 AF 圖示（與 AF 頁面心電圖上的相同）；
  *   按 B 開關，與標註快捷鍵 AF 頁面的 B 連動（任一頁隱藏，另一頁也隱藏）；預設顯示，重新整理頁面後恢復顯示；
- *   沒有安裝標註快捷鍵時只隱藏縮圖上的圖示，不影響 AF 頁面
+ *   沒有安裝標註快捷鍵時只隱藏縮圖上的圖示，不影響 AF 頁面；
+ *   在 AF 頁面清除（標為 artifact）的 AF 區塊不顯示
  */
 
 (() => {
@@ -2562,7 +2563,7 @@
     // B 鍵開關，與「RootiCare 標註快捷鍵」AF 頁面的 B 連動：共用同一個樣式元素（#rc-hide-af-icon）表示隱藏，
     // 在任一頁按 B 隱藏或顯示，切到另一頁也相同；預設顯示，重新整理頁面後恢復顯示。
     // （該樣式的規則也會隱藏這裡的圖示，因為圖示路徑含 icon_AFibMark。）
-    // AF 時段為網站的 tmsAFs（每筆代表該秒起 60 秒）加上編輯加入的 AF 範圍（afRangeModified）。縮圖只有絕對取樣索引：以前後最近的 V／S 心搏（時間與索引都已知）
+    // AF 時段為網站的 tmsAFs（每筆代表該秒起 60 秒），扣掉 AF 頁面清除的區塊（AF 修改資料的 artifact），再加上編輯加入的 AF 範圍（afRangeModified）。縮圖只有絕對取樣索引：以前後最近的 V／S 心搏（時間與索引都已知）
     // 內插換算時間；不用固定取樣率，實際取樣率與網站存的 250 略有差異，整份紀錄累積可差到數分鐘。
     const AF_MARK_CLASS = 'rc-af-mark';
     const AF_MARK_SRC = 'assets/images/rooti-care/icon_AFibMark.png';
@@ -2606,11 +2607,14 @@
         };
         const manager = window.angular.element(document.body).injector().get('WppManager');
         // 編輯加上的 AF（AFib +、AFib All 等，afRangeModified）不在 tmsAFs 的區塊中，兩者合併才是 AF 頁面上的 AF。
+        // tmsAFs 是原始的 AF 區塊，清除 AF 後不會改變；清除的區塊記在 AF 修改資料（getAfModifiedData）的 artifact（同樣以 60 秒區塊起點表示），要扣掉。
         Promise.all([
             Promise.resolve(manager.Af.getTagTms(ids.vendorId, ids.idNumber, ids.afId)).then(plainData),
             Promise.resolve(manager.Af.getAfModifiedRange(ids.vendorId, ids.idNumber, ids.measureId)).then(plainData).catch(() => []),
-        ]).then(([record, edited]) => {
-            const ranges = (record?.tmsAFs || []).map(Number).filter(Number.isFinite)
+            Promise.resolve(manager.Af.getAfModifiedData(ids.vendorId, ids.idNumber, ids.measureId)).then(plainData).catch(() => null),
+        ]).then(([record, edited, modified]) => {
+            const cleared = new Set((Array.isArray(modified?.artifact) ? modified.artifact : []).map(Number).filter(Number.isFinite));
+            const ranges = (record?.tmsAFs || []).map(Number).filter(start => Number.isFinite(start) && !cleared.has(start))
                 .map(start => [start, start + AF_BLOCK_SECONDS]);
             for (const range of Array.isArray(edited) ? edited : []) ranges.push([Number(range?.start), Number(range?.end)]);
             const blocks = mergeAFRanges(ranges);
