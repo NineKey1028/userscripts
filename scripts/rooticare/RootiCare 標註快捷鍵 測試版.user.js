@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.55.2
+// @version      1.55.3
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -1249,9 +1249,44 @@
     // 只調 AF 範圍無法讓交界落在白色區塊；因此儲存後另外把該段 AF 的 Start／End segment 設在交界後
     // RANGE_AF_SEGMENT_SHIFT 秒（與在 AF 清單按 ◀ ▶ 調整相同，存在 eventRecordRange.af），交界落在白色區塊（前 10～2 秒）中央。
     const RANGE_AF_SEGMENT_SHIFT = 6;
-    // 由絕對取樣索引換算時間：紀錄起點（dataRange[0]）＋索引÷取樣率。
-    // 不用視窗的 startTime：心電圖視窗捲動後 startTime 已含 shiftSec，再加位移會晚 shiftSec 秒（20、30 秒不等）。
+    // 由絕對取樣索引換算時間：以前後最近的 V／S 心搏（時間與索引都已知，取自時間軸）內插。
+    // 不用「紀錄起點＋索引÷取樣率」：實際取樣率與網站存的略有差異，越往紀錄後段累積誤差越大，
+    // 每份報告差的秒數都不同，交界會對不準白色區塊。V／S 心搏不足兩顆時才退回該算法。
+    // 也不用視窗的 startTime：心電圖視窗捲動後 startTime 已含 shiftSec，再加位移會晚 shiftSec 秒（20、30 秒不等）。
+    const beatClockCache = new WeakMap();
+    function getBeatClock(af) {
+        const key = af.tmsline?.ogTagsRecord || af.tmsline?.tagsRecord;
+        if (key && beatClockCache.has(key)) return beatClockCache.get(key);
+        const pairs = [];
+        for (const beat of ['V', 'S']) {
+            const list = getBeatList(af, beat);
+            list.positions.forEach((position, i) => pairs.push([position, list.times[i]]));
+        }
+        pairs.sort((a, b) => a[0] - b[0]);
+        const positions = [], times = [];
+        for (const [position, time] of pairs) {
+            if (!Number.isFinite(position) || !Number.isFinite(time) || position === positions[positions.length - 1]) continue;
+            positions.push(position); times.push(time);
+        }
+        const clock = positions.length >= 2 && positions[positions.length - 1] > positions[0] ? { positions, times } : null;
+        if (key) beatClockCache.set(key, clock);
+        return clock;
+    }
     function rangeIndexTime(ctx) {
+        const clock = getBeatClock(ctx.af);
+        if (clock) {
+            const { positions, times } = clock;
+            const count = positions.length;
+            const i = lowerBound(positions, ctx.index);
+            if (i > 0 && i < count) {
+                const span = positions[i] - positions[i - 1];
+                return times[i - 1] + (ctx.index - positions[i - 1]) * (times[i] - times[i - 1]) / span;
+            }
+            // 第一顆之前或最後一顆之後：以整份紀錄的平均速率外推。
+            const slope = (times[count - 1] - times[0]) / (positions[count - 1] - positions[0]);
+            const anchor = i === 0 ? 0 : count - 1;
+            return times[anchor] + (ctx.index - positions[anchor]) * slope;
+        }
         const origin = Number(ctx.af.record?.dataRange?.[0] ?? ctx.af.record?.startTimeInt);
         return origin + ctx.index / ctx.rate;
     }
