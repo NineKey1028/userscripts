@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.55.3
+// @version      1.56.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -54,6 +54,10 @@
  *   A / D   以 Q / E 一半的距離切換時間（主畫面 30 秒、3 導程 10 秒、心電圖視窗 5 秒）；
  *           選印清單開啟時仍為切換上一張／下一張選印
  *   B       隱藏心電圖上的 AF 圖示，再按一次恢復顯示（重新整理頁面後恢復顯示）；與 MP 縮圖的 AF 圖示連動
+ *   V       顯示隱藏的原始心搏：機器原本標的 S／V 沒被刪除、畫面上卻看不到的（例如旁邊又新增了一顆），
+ *           以紫色標記畫在波形上方並加紫色虛線，與標籤列上的標籤同時顯示；這種心搏 Group 時仍會被算進去，
+ *           可能讓 Triplet／SVE run 等子分類出錯。點紫色標記加入刪除（虛線框，未儲存），再點一下取消；
+ *           按 Save 後再 Group 即修正。原始資料不變；原本為 N 的心搏網站沒有提供，不顯示。再按 V 關閉
  *   ch1～3 旁的眼睛  顯示／隱藏導程（重新載入恢復全開）
  *   滑過標籤列或波形時，顯示紅色垂直對齊線
  *
@@ -1249,44 +1253,9 @@
     // 只調 AF 範圍無法讓交界落在白色區塊；因此儲存後另外把該段 AF 的 Start／End segment 設在交界後
     // RANGE_AF_SEGMENT_SHIFT 秒（與在 AF 清單按 ◀ ▶ 調整相同，存在 eventRecordRange.af），交界落在白色區塊（前 10～2 秒）中央。
     const RANGE_AF_SEGMENT_SHIFT = 6;
-    // 由絕對取樣索引換算時間：以前後最近的 V／S 心搏（時間與索引都已知，取自時間軸）內插。
-    // 不用「紀錄起點＋索引÷取樣率」：實際取樣率與網站存的略有差異，越往紀錄後段累積誤差越大，
-    // 每份報告差的秒數都不同，交界會對不準白色區塊。V／S 心搏不足兩顆時才退回該算法。
-    // 也不用視窗的 startTime：心電圖視窗捲動後 startTime 已含 shiftSec，再加位移會晚 shiftSec 秒（20、30 秒不等）。
-    const beatClockCache = new WeakMap();
-    function getBeatClock(af) {
-        const key = af.tmsline?.ogTagsRecord || af.tmsline?.tagsRecord;
-        if (key && beatClockCache.has(key)) return beatClockCache.get(key);
-        const pairs = [];
-        for (const beat of ['V', 'S']) {
-            const list = getBeatList(af, beat);
-            list.positions.forEach((position, i) => pairs.push([position, list.times[i]]));
-        }
-        pairs.sort((a, b) => a[0] - b[0]);
-        const positions = [], times = [];
-        for (const [position, time] of pairs) {
-            if (!Number.isFinite(position) || !Number.isFinite(time) || position === positions[positions.length - 1]) continue;
-            positions.push(position); times.push(time);
-        }
-        const clock = positions.length >= 2 && positions[positions.length - 1] > positions[0] ? { positions, times } : null;
-        if (key) beatClockCache.set(key, clock);
-        return clock;
-    }
+    // 由絕對取樣索引換算時間：紀錄起點（dataRange[0]）＋索引÷取樣率。
+    // 不用視窗的 startTime：心電圖視窗捲動後 startTime 已含 shiftSec，再加位移會晚 shiftSec 秒（20、30 秒不等）。
     function rangeIndexTime(ctx) {
-        const clock = getBeatClock(ctx.af);
-        if (clock) {
-            const { positions, times } = clock;
-            const count = positions.length;
-            const i = lowerBound(positions, ctx.index);
-            if (i > 0 && i < count) {
-                const span = positions[i] - positions[i - 1];
-                return times[i - 1] + (ctx.index - positions[i - 1]) * (times[i] - times[i - 1]) / span;
-            }
-            // 第一顆之前或最後一顆之後：以整份紀錄的平均速率外推。
-            const slope = (times[count - 1] - times[0]) / (positions[count - 1] - positions[0]);
-            const anchor = i === 0 ? 0 : count - 1;
-            return times[anchor] + (ctx.index - positions[anchor]) * slope;
-        }
         const origin = Number(ctx.af.record?.dataRange?.[0] ?? ctx.af.record?.startTimeInt);
         return origin + ctx.index / ctx.rate;
     }
@@ -1848,6 +1817,245 @@
         document.head.appendChild(style);
     }
 
+    // ── V：顯示隱藏的原始心搏 ──
+    // 機器原本標的 S／V（分類紀錄的 posSVEB／posPVC）若沒有被刪除，卻沒有出現在畫面上（例如旁邊又新增了一顆，
+    // 網站只顯示其中一顆），伺服器分類時仍可能算進去，造成 Triplet／SVE run 等子分類錯誤。
+    // 按 V 以紫色在標籤列標出這些心搏（波形上加紫色虛線），點一下加入「刪除」的未儲存修改，再點一下取消；
+    // 只寫入未儲存修改（與網站刪除標籤相同），原始資料不變，按 Save 後才生效。原本為 N 的心搏網站沒有提供，不顯示。
+    const HIDDEN_BEAT_COLOR = '#8e24aa';
+    const hiddenBeatStyle = document.createElement('style');
+    hiddenBeatStyle.textContent = `
+        .rc-hidden-beat rect { fill:${HIDDEN_BEAT_COLOR}; cursor:pointer; vector-effect:non-scaling-stroke; }
+        .rc-hidden-beat text { fill:#fff; font-weight:700; text-anchor:middle; dominant-baseline:central;
+            font-family:Arial, sans-serif; pointer-events:none; user-select:none; }
+        .rc-hidden-beat.is-pending rect { fill:#fff; stroke:${HIDDEN_BEAT_COLOR}; stroke-width:1.5; stroke-dasharray:3 2; }
+        .rc-hidden-beat.is-pending text { fill:${HIDDEN_BEAT_COLOR}; text-decoration:line-through; }
+        .rc-hidden-beat-line { stroke:${HIDDEN_BEAT_COLOR}; stroke-width:1.5; stroke-dasharray:4 3; pointer-events:none;
+            vector-effect:non-scaling-stroke; }
+        .rc-hidden-beat-line.is-pending { stroke-opacity:.35; }
+    `;
+    document.head.appendChild(hiddenBeatStyle);
+    let hiddenBeatsOn = false;
+    let hiddenBeatFrame = null;
+    // 已儲存的標籤修改（annoResult），依紀錄快取；開啟時與 Save 完成後重新讀取。
+    const hiddenSavedEdits = new Map();
+    const hiddenRawCache = new WeakMap();
+    let hiddenLastSaving = false;
+    function hiddenRecordKey(af) {
+        return [af?._vendorId, af?._idNumber, af?._measureId].join('|');
+    }
+    function loadHiddenSavedEdits(af, force = false) {
+        const key = hiddenRecordKey(af);
+        let entry = hiddenSavedEdits.get(key);
+        if (entry && !force) return entry;
+        entry = { edits: null, error: null };
+        hiddenSavedEdits.set(key, entry);
+        const manager = window.angular.element(document.body).injector().get('WppManager');
+        manager.Af.getAnnoModifiedData(af._vendorId, af._idNumber, af._measureId).then(response => {
+            const list = response?.plain ? response.plain() : response;
+            entry.edits = new Map((Array.isArray(list) ? list : []).filter(item => item?.[4])
+                .map(item => [Number(item[1]), item]));
+        }).catch(error => { entry.error = error; entry.edits = new Map(); })
+            .finally(() => { if (hiddenSavedEdits.get(key) === entry) scheduleHiddenBeats(); });
+        return entry;
+    }
+    // 機器原始的 S／V 位置（排序後快取）；分類紀錄沒有原始 N 的位置。
+    function getHiddenRawBeats(af) {
+        const record = af?.tmsline?.tagsRecord || af?.tmsline?.ogTagsRecord;
+        if (!record) return [];
+        const cached = hiddenRawCache.get(record);
+        if (cached && cached.sveb === record.posSVEB && cached.pvc === record.posPVC) return cached.beats;
+        const beats = [
+            ...(Array.isArray(record.posSVEB) ? record.posSVEB : []).map(index => [Number(index), 'S']),
+            ...(Array.isArray(record.posPVC) ? record.posPVC : []).map(index => [Number(index), 'V']),
+        ].filter(([index]) => Number.isFinite(index)).sort((a, b) => a[0] - b[0]);
+        hiddenRawCache.set(record, { sveb: record.posSVEB, pvc: record.posPVC, beats });
+        return beats;
+    }
+    // 標籤列的可視範圍與目前畫面上的心搏；不可編輯或資料不完整時回傳 null。
+    function getHiddenBeatView(svg) {
+        const scope = window.angular?.element(svg).isolateScope();
+        const info = scope?.posInfo;
+        const rate = Number(info?.sampleRate || scope?.sampleRate);
+        const seconds = Number(scope?.segSec);
+        const start = Number(info?.idxRange?.[0]);
+        const width = Number(svg.getAttribute('width')) || svg.getBoundingClientRect().width;
+        if (!scope || !Number.isFinite(start) || !(rate > 0) || !(seconds > 0) || !(width > 0)) return null;
+        const shift = scope.threeChannel || scope.dialogSwitch ? Number(scope.shiftSec) || 0 : 0;
+        let parent = scope;
+        while (parent && !parent.af) parent = parent.$parent;
+        if (!parent?.af || !Array.isArray(scope.annoData)) return null;
+        const viewStart = start + shift * rate;
+        // 修改資料的時間與網站相同：scope.startTime 已是位移後畫面起點的時間，不再加 shift。
+        return { scope, parent, af: parent.af, rate, width, viewStart, viewEnd: viewStart + rate * seconds,
+            startTime: Number(scope.startTime),
+            modifiedData: Array.isArray(scope.modifiedData) ? scope.modifiedData : null };
+    }
+    // 找出可視範圍內的隱藏原始心搏：未出現在畫面上、也沒有被（已儲存的修改）刪除。
+    // 未儲存修改把它改為刪除時標為 pending（虛線、刪除線），再點一下可取消。
+    function findHiddenBeats(view, savedEdits) {
+        const shown = new Set(view.scope.annoData.filter(beat => ['N', 'S', 'A', 'V'].includes(beat?.type))
+            .map(beat => Number(beat.index)));
+        const pending = new Map((view.modifiedData || []).filter(item => item?.[4]).map(item => [Number(item[1]), item]));
+        const beats = getHiddenRawBeats(view.af);
+        let low = 0, high = beats.length;
+        while (low < high) { const mid = (low + high) >> 1; if (beats[mid][0] < view.viewStart) low = mid + 1; else high = mid; }
+        const hidden = [];
+        for (let i = low; i < beats.length && beats[i][0] <= view.viewEnd; i++) {
+            const [index, rawType] = beats[i];
+            const saved = savedEdits.get(index);
+            if (saved && saved[2] === 'X') continue;
+            const edit = pending.get(index);
+            const isPending = edit?.[2] === 'X';
+            if (shown.has(index) && !isPending) continue;
+            const type = saved && ['N', 'S', 'A', 'V'].includes(saved[2]) ? saved[2] : rawType;
+            // 原分類沿用已儲存修改記錄的原始標籤；原始 S 在標註資料中為 A。
+            const original = saved?.[3] && saved[3] !== 'X' ? saved[3] : rawType === 'S' ? 'A' : rawType;
+            hidden.push({ index, type: type === 'A' ? 'S' : type, original, pending: isPending });
+        }
+        return hidden;
+    }
+    function scheduleHiddenBeats() {
+        if (hiddenBeatFrame !== null) return;
+        hiddenBeatFrame = requestAnimationFrame(() => { hiddenBeatFrame = null; drawHiddenBeats(); });
+    }
+    function clearHiddenBeats() {
+        document.querySelectorAll('.rc-hidden-beats').forEach(node => node.remove());
+    }
+    // 對應的波形 SVG：標籤列之後的 div.ecgWave（主波形）。
+    function getHiddenBeatWaveSvg(svg) {
+        let wave = svg.nextElementSibling;
+        while (wave && !wave.matches('div.ecgWave')) wave = wave.nextElementSibling;
+        return wave?.querySelector('svg') || null;
+    }
+    // 紫色標記畫在波形最上方（不蓋住標籤列上的標籤，兩者可同時看到），並以紫色虛線貫穿波形；
+    // 找不到波形 SVG 時才畫在標籤列上。
+    function drawHiddenBeats() {
+        if (!hiddenBeatsOn || isDisabledPage() || !window.angular) { clearHiddenBeats(); return; }
+        const markers = [...document.querySelectorAll('svg.ecgRMarker')].filter(svg => svg.closest(TARGET_BLOCK_SELECTOR));
+        const owners = new Set(markers.map(svg => svg.dataset.rcHiddenOwner).filter(Boolean));
+        for (const node of document.querySelectorAll('.rc-hidden-beats')) if (!owners.has(node.dataset.owner)) node.remove();
+        for (const svg of markers) {
+            if (!svg.dataset.rcHiddenOwner) svg.dataset.rcHiddenOwner = String(Math.random()).slice(2);
+            const owner = svg.dataset.rcHiddenOwner;
+            const existing = document.querySelector(`.rc-hidden-beats[data-owner="${owner}"]`);
+            const view = getHiddenBeatView(svg);
+            if (!view) { existing?.remove(); continue; }
+            // Save 完成（af.loading.modified 由 true 變回 false）後重新讀取已儲存的修改。
+            const saving = !!view.af.loading?.modified;
+            if (hiddenLastSaving && !saving) hiddenSavedEdits.clear();
+            hiddenLastSaving = saving;
+            const entry = loadHiddenSavedEdits(view.af);
+            if (!entry.edits) continue; // 讀取完成後會再畫一次。
+            const hidden = findHiddenBeats(view, entry.edits);
+            const waveSvg = getHiddenBeatWaveSvg(svg);
+            const host = waveSvg || svg;
+            const markerBox = svg.getBoundingClientRect();
+            const hostBox = host.getBoundingClientRect();
+            const signature = [view.viewStart, view.width, markerBox.width, hostBox.width, hostBox.height,
+                ...hidden.map(beat => `${beat.index}${beat.type}${beat.pending ? 'x' : ''}`)].join(',');
+            if (existing?.dataset.signature === signature && existing.parentNode === host && host.lastElementChild === existing) continue;
+            existing?.remove();
+            const matrix = host.getScreenCTM?.();
+            if (!hidden.length || !matrix || !(markerBox.width > 0)) continue;
+            // 以螢幕座標換算到所在 SVG 的座標（波形 SVG 與標籤列的座標系不一定相同）。
+            const inverse = matrix.inverse();
+            const point = host.createSVGPoint();
+            const toLocal = (x, y) => { point.x = x; point.y = y; return point.matrixTransform(inverse); };
+            const unit = toLocal(hostBox.left + 1, hostBox.top).x - toLocal(hostBox.left, hostBox.top).x || 1;
+            const size = 15 * unit;
+            const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            group.setAttribute('class', 'rc-hidden-beats');
+            group.dataset.signature = signature;
+            group.dataset.owner = owner;
+            for (const beat of hidden) {
+                const screenX = markerBox.left + (beat.index - view.viewStart) / (view.viewEnd - view.viewStart) * markerBox.width;
+                const top = toLocal(screenX, hostBox.top);
+                const bottom = toLocal(screenX, hostBox.bottom);
+                const item = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                item.setAttribute('class', `rc-hidden-beat${beat.pending ? ' is-pending' : ''}`);
+                item.dataset.index = String(beat.index);
+                item.dataset.original = beat.original;
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.setAttribute('class', `rc-hidden-beat-line${beat.pending ? ' is-pending' : ''}`);
+                line.setAttribute('x1', String(top.x));
+                line.setAttribute('x2', String(top.x));
+                line.setAttribute('y1', String(top.y + size + unit));
+                line.setAttribute('y2', String(bottom.y));
+                const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                rect.setAttribute('x', String(top.x - size / 2));
+                rect.setAttribute('y', String(top.y + unit));
+                rect.setAttribute('width', String(size));
+                rect.setAttribute('height', String(size));
+                rect.setAttribute('rx', String(3 * unit));
+                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                text.setAttribute('x', String(top.x));
+                text.setAttribute('y', String(top.y + unit + size / 2));
+                text.style.fontSize = `${11 * unit}px`;
+                text.textContent = beat.type;
+                const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+                title.textContent = beat.pending
+                    ? `隱藏的原始 ${beat.type}（位置 ${beat.index}）：已加入刪除（未儲存），點一下取消`
+                    : `隱藏的原始 ${beat.type}（位置 ${beat.index}）：畫面上看不到，但伺服器分類時仍會計入；點一下加入刪除`;
+                item.append(line, rect, text, title);
+                group.appendChild(item);
+            }
+            host.appendChild(group);
+        }
+    }
+    function toggleHiddenBeats() {
+        hiddenBeatsOn = !hiddenBeatsOn;
+        if (!hiddenBeatsOn) { clearHiddenBeats(); quickToast(null, '已關閉隱藏心搏顯示'); return; }
+        hiddenSavedEdits.clear();
+        scheduleHiddenBeats();
+        // 讀取已儲存的修改後回報目前畫面上的數量。
+        setTimeout(function report(tries = 0) {
+            if (!hiddenBeatsOn) return;
+            const markers = [...document.querySelectorAll('svg.ecgRMarker')].filter(svg => svg.closest(TARGET_BLOCK_SELECTOR));
+            const views = markers.map(getHiddenBeatView).filter(Boolean);
+            if (!views.length) { quickToast(null, '隱藏心搏顯示已開啟（目前畫面上沒有可編輯的心電圖）'); return; }
+            const entries = views.map(view => loadHiddenSavedEdits(view.af));
+            if (entries.some(entry => !entry.edits)) { if (tries < 40) setTimeout(() => report(tries + 1), 250); return; }
+            if (entries.some(entry => entry.error)) { quickToast(null, '讀取已儲存的標籤修改失敗，隱藏心搏可能不完整', true); return; }
+            const count = views.reduce((sum, view, i) => sum + findHiddenBeats(view, entries[i].edits).length, 0);
+            quickToast(null, count ? `紫色標出 ${count} 顆隱藏的原始心搏；點一下加入刪除，按 Save 後再 Group`
+                : '目前畫面上沒有隱藏的原始心搏（再按 V 關閉）');
+        }, 0);
+    }
+    // 點紫色標籤：加入或取消「刪除」的未儲存修改。在 window 捕獲階段處理，不讓網站與其他標註功能收到這次點擊。
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick', 'auxclick']) {
+        window.addEventListener(type, event => {
+            const item = event.target?.closest?.('.rc-hidden-beat');
+            if (!item) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            if (type !== 'click' || event.button !== 0) return;
+            const owner = item.closest('.rc-hidden-beats')?.dataset.owner;
+            const svg = owner && [...document.querySelectorAll('svg.ecgRMarker')].find(marker => marker.dataset.rcHiddenOwner === owner);
+            const view = svg && getHiddenBeatView(svg);
+            const index = Number(item.dataset.index);
+            if (!view?.modifiedData || !Number.isFinite(index)) return;
+            if (view.af.loading?.modified || view.af.labelEditing?.edit || view.af.labelEditing?.pauseEdit) {
+                quickToast(item, '請先結束原生 R-type／Pause 模式或等待儲存完成', true);
+                return;
+            }
+            const pending = view.modifiedData;
+            view.parent.$apply(() => {
+                const position = pending.findIndex(entry => entry?.[4] && Number(entry[1]) === index);
+                if (position >= 0 && pending[position][2] === 'X') {
+                    pending.splice(position, 1);
+                } else {
+                    if (position >= 0) pending.splice(position, 1);
+                    pending.push([view.startTime + Math.floor((index - view.viewStart) / view.rate), index, 'X',
+                        item.dataset.original || 'S', 1]);
+                }
+            });
+            scheduleHiddenBeats();
+        }, true);
+    }
+    new MutationObserver(() => { if (hiddenBeatsOn) scheduleHiddenBeats(); })
+        .observe(document.body, { childList: true, subtree: true });
+
     /**
      * 分派標註、區間選取與縮放快捷鍵。
      */
@@ -1885,6 +2093,13 @@
             e.preventDefault();
             e.stopImmediatePropagation();
             if (!e.repeat) toggleAFIcons();
+            return;
+        }
+        // V 切換顯示隱藏的原始心搏（紫色）；不攔截 Ctrl／⌘+V 等組合鍵。
+        if (e.code === 'KeyV' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && !e.isComposing) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (!e.repeat) toggleHiddenBeats();
             return;
         }
 
