@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.56.0
+// @version      1.56.1
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -438,9 +438,15 @@
         return null;
     }
 
-    // 當滑鼠移入時自動聚焦，避免快捷鍵失效
+    // 當滑鼠移入時自動聚焦，避免快捷鍵失效。
+    // 正在輸入文字時不搶焦點：Spéc. 的 Note 輸入框在區塊內，搶走焦點會讓備註下拉清單（datalist）在滑鼠移過去時關閉。
+    function isEditingText() {
+        const el = document.activeElement;
+        return !!el && (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
+            (el.tagName === 'INPUT' && !['button', 'checkbox', 'radio', 'submit', 'reset', 'range', 'color', 'file', 'image'].includes(el.type)));
+    }
     document.addEventListener('mouseover', (e) => {
-        if (isDisabledPage()) return;
+        if (isDisabledPage() || isEditingText()) return;
         const block = e.target.closest(TARGET_BLOCK_SELECTOR);
         if (block && document.activeElement !== block) {
             if (block.tabIndex < 0) block.tabIndex = 0;
