@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.24
-// @description  檢查 Longest R-R 間隔、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
+// @version      2.25
+// @description  檢查 Longest R-R 間隔、Min. / Max. / Max. sinus HR 與 ECG 平均心率、Longest R-R 與 ECG 最長間隔是否一致、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -15,7 +15,8 @@
 // ==/UserScript==
 
 // 使用教學：開啟 RootiCare Report 預覽，腳本會自動檢查報告並顯示異常提示。
-// 檢查項目：Longest R-R 與實際間隔、Max. sinus 標籤、VT 心率範圍，以及 Specifics Note / Summary 雙向一致性。
+// 檢查項目：Longest R-R 與實際間隔、Min. / Max. / Max. sinus HR 與 ECG 平均、Longest R-R 與 ECG 最長間隔、Max. sinus 標籤、VT 心率範圍，以及 Specifics Note / Summary 雙向一致性。
+// HR 平均：取 ECG 片段內各間隔顯示 BPM 的平均，與標題數字相差超過 hrToleranceBpm 才提示。
 // VT 提示條件：可讀取的 HR 範圍全部低於 100 bpm。
 // 點擊提示旁的箭頭：跳至對應 ECG；R-R 提示的時間按鈕可複製目標時間。
 // 報告內容更新後會重新檢查；提示供人工核對使用，不會修改報告內容。
@@ -39,6 +40,13 @@
         ].join(', '),
         vtStatSelector: `[ng-show="checkEventStat('vt', arrData.tms)"]`,
         maxSinusSelector: '[ng-show="af.record.maxSinusHR.time > 0"]',
+        // Min. / Max. / Max. sinus HR 卡片；label 用於提示文字。
+        hrCards: [
+            { label: 'Min. HR', selector: '[ng-show="af.record.minHR.time > 0"]' },
+            { label: 'Max. HR', selector: '[ng-show="af.record.maxHR.time > 0"]' },
+            { label: 'Max. sinus', selector: '[ng-show="af.record.maxSinusHR.time > 0"]' },
+        ],
+        hrToleranceBpm: 3,
         maxIntervalMs: 10000,
         debounceMs: 250,
         visibleMargin: 48,
@@ -49,6 +57,7 @@
     let maxSinusIndicator;
     let vtIndicators = [];
     let specificsIndicators = [];
+    let hrIndicators = [];
     let observer;
     let scanTimer;
     let target = null;
@@ -228,6 +237,70 @@
         return intervals;
     }
 
+    // 讀取單一 ECG 卡片內、前一搏也在片段中的 R-R 間隔，回傳毫秒與顯示 BPM。
+    // 格式與範圍檢查同 getDisplayedIntervals；卡片有多個片段時只取第一個有間隔的，避免重複計算。
+    function getStripIntervals(card) {
+        for (const marker of card.querySelectorAll('.event-ecg-blk .ecgRMarker')) {
+            const intervals = [];
+            for (const label of marker.querySelectorAll('.annoDuration')) {
+                const rawInterval = label.childNodes[0]?.textContent.trim() || '';
+                const rawBpm = label.querySelector('tspan')?.textContent.trim() || '';
+                if (!/^\d+(?:[.,]\d+)?$/.test(rawInterval) || !/^\d+(?:\.\d+)?$/.test(rawBpm)) continue;
+                if (!hasPreviousBeatInStrip(label, marker)) continue;
+                const value = Number(rawInterval.replace(',', '.'));
+                const milliseconds = value * (value < 100 ? 1000 : 1);
+                if (!Number.isFinite(milliseconds) || milliseconds <= 0 || milliseconds > CONFIG.maxIntervalMs) continue;
+                intervals.push({ milliseconds, bpm: Number(rawBpm) });
+            }
+            if (intervals.length) return intervals;
+        }
+        return [];
+    }
+
+    // 比對 Min. / Max. / Max. sinus HR 標題數字與 ECG 平均心率，以及 Longest R-R 標題秒數與 ECG 最長間隔。
+    // 標題或 ECG 間隔無法讀取時略過，不以缺資料視為異常。
+    function getHeartRateMismatchFindings(report) {
+        const findings = [];
+        const headerText = card => (card.querySelector('.event-ecg-header-blk')?.innerText || '').replace(/\s+/g, ' ');
+
+        for (const { label, selector } of CONFIG.hrCards) {
+            // 摘要列也使用相同 ng-show，須同時存在 ECG 容器才視為目標。
+            const card = [...report.querySelectorAll(selector)].find(item => item.querySelector('.event-ecg-blk'));
+            if (!card) continue;
+            const reportedMatch = [...headerText(card).matchAll(/(\d+(?:[.,]\d+)?)\s*bpm/gi)].pop();
+            const reported = Number(reportedMatch?.[1].replace(',', '.'));
+            const intervals = getStripIntervals(card);
+            if (!Number.isFinite(reported) || !intervals.length) continue;
+            // 取 ECG 上逐搏顯示 BPM 的平均；不用平均 R-R 換算，因為心搏位置標錯時總時間不變，
+            // 平均 R-R 仍會等於報告值而漏抓，逐搏 BPM 則會因異常短 / 長間隔而偏離。
+            const average = intervals.reduce((sum, item) => sum + item.bpm, 0) / intervals.length;
+            if (Math.abs(average - reported) <= CONFIG.hrToleranceBpm) continue;
+            findings.push({
+                target: card.querySelector('.event-ecg-blk'),
+                message: `${label} 報告 ${reported} bpm ≠ ECG 平均 ${average.toFixed(1)} bpm`,
+            });
+        }
+
+        // Longest R-R 可有多張卡片，各自比對標題秒數與片段內最長間隔；標題可能四捨五入或截位，兩者皆接受。
+        for (const card of report.querySelectorAll(CONFIG.longestRRSelector)) {
+            const text = headerText(card);
+            const reportedSeconds = parseReportSeconds(text);
+            const intervals = getStripIntervals(card);
+            if (!Number.isFinite(reportedSeconds) || !intervals.length) continue;
+            const longest = intervals.reduce((best, item) => item.milliseconds > best.milliseconds ? item : best);
+            const decimals = (text.match(/([\d.,]+)\s*(?:sec|secs|s)\b/i)?.[1].split(/[.,]/)[1] || '').length;
+            const scale = 10 ** decimals;
+            const seconds = longest.milliseconds / 1000;
+            const candidates = [Math.round(seconds * scale), Math.floor(seconds * scale + 1e-9)];
+            if (candidates.includes(Math.round(reportedSeconds * scale))) continue;
+            findings.push({
+                target: card.querySelector('.event-ecg-blk'),
+                message: `Longest R-R 報告 ${reportedSeconds.toFixed(decimals)}s ≠ ECG 最長 ${seconds.toFixed(Math.max(decimals, 2))}s（${longest.bpm} bpm）`,
+            });
+        }
+        return findings;
+    }
+
     // 定位 Max. sinus 的 ECG，收集畫面中出現的 S / V 標籤並去重。
     // 只檢查既有顯示標籤，沒有 S / V 時回傳 null，不以心率推測分類。
     function getMaxSinusTagFinding(report) {
@@ -285,7 +358,7 @@
                 // 固定提示從最新狀態取目標，多筆提示從目前陣列查 ID；目標已卸載時不跳轉。
                 const resolvedTarget = id === CONFIG.indicatorId ? target
                     : id === CONFIG.maxSinusIndicatorId ? maxSinusTarget
-                        : [...vtIndicators, ...specificsIndicators].find(item => item.element.id === id)?.target;
+                        : [...vtIndicators, ...specificsIndicators, ...hrIndicators].find(item => item.element.id === id)?.target;
                 if (!resolvedTarget?.isConnected) return;
                 // 尊重使用者的減少動態效果設定；正常模式平滑捲動，減少動態時立即定位。
                 const behavior = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
@@ -383,6 +456,7 @@
             { target: maxSinusTarget, element: maxSinusIndicator },
             ...vtIndicators,
             ...specificsIndicators,
+            ...hrIndicators,
         ].filter(item => item.target?.isConnected && item.element?.isConnected && item.element.style.display !== 'none');
         if (!items.length) return;
 
@@ -477,6 +551,8 @@
             vtIndicators = [];
             specificsIndicators.forEach(item => item.element.remove());
             specificsIndicators = [];
+            hrIndicators.forEach(item => item.element.remove());
+            hrIndicators = [];
             return;
         }
 
@@ -519,6 +595,18 @@
         });
         previousSpecificsIndicators.forEach(item => {
             if (!specificsIndicators.some(current => current.element === item.element)) item.element.remove();
+        });
+
+        // HR / Longest R-R 數值一致性：每筆不一致各一個提示，箭頭指向該 ECG。
+        const previousHrIndicators = hrIndicators;
+        hrIndicators = getHeartRateMismatchFindings(report).map((finding, index) => {
+            const element = ensureIndicator(`rooticare-report-checker-hr-indicator-${index}`, false);
+            element.querySelector('.message').textContent = finding.message;
+            element.style.display = 'flex';
+            return { target: finding.target, element };
+        });
+        previousHrIndicators.forEach(item => {
+            if (!hrIndicators.some(current => current.element === item.element)) item.element.remove();
         });
 
         const intervals = getDisplayedIntervals(report);
