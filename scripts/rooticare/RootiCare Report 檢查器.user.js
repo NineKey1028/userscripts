@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.25.2
-// @description  檢查 Longest R-R 間隔、Min. / Max. / Max. sinus HR 與 ECG 平均心率、Longest R-R 與 ECG 最長間隔是否一致、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
+// @version      2.26.0
+// @description  檢查 Longest R-R 間隔、Min. / Max. / Max. sinus HR 與 ECG 平均心率、是否為全報告 ECG 平均最慢 / 最快、Longest R-R 與 ECG 最長間隔是否一致、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
 // @supportURL   https://github.com/NineKey1028/userscripts/issues
@@ -16,8 +16,9 @@
 // ==/UserScript==
 
 // 使用教學：開啟 RootiCare Report 預覽，腳本會自動檢查報告並顯示異常提示。
-// 檢查項目：Longest R-R 與實際間隔、Min. / Max. / Max. sinus HR 與 ECG 平均、Longest R-R 與 ECG 最長間隔、Max. sinus 標籤、VT 心率範圍，以及 Specifics Note / Summary 雙向一致性。
-// HR 平均：取 ECG 片段內各間隔顯示 BPM 的平均，與標題數字相差超過該卡片的 toleranceBpm（Min. / Max. HR ±10、Max. sinus ±3）才提示。
+// 檢查項目：Longest R-R 與實際間隔、Min. / Max. / Max. sinus HR 與 ECG 平均、Min. / Max. / Max. sinus 是否為全報告平均最慢 / 最快、Longest R-R 與 ECG 最長間隔、Max. sinus 標籤、VT 心率範圍，以及 Specifics Note / Summary 雙向一致性。
+// HR 平均：取 ECG 片段內各間隔顯示 BPM 的平均，與標題數字相差超過 toleranceBpm（±10）才提示。
+// 平均最快 / 最慢：其他 ECG 片段平均比 Min. HR 慢、或比 Max. HR / Max. sinus 快超過 toleranceBpm 才提示；Max. sinus 只與無 S / V 標籤的片段比較。
 // VT 提示條件：可讀取的 HR 範圍全部低於 100 bpm。
 // 點擊提示旁的箭頭：跳至對應 ECG；R-R 提示的時間按鈕可複製目標時間。
 // 報告內容更新後會重新檢查；提示供人工核對使用，不會修改報告內容。
@@ -41,11 +42,12 @@
         ].join(', '),
         vtStatSelector: `[ng-show="checkEventStat('vt', arrData.tms)"]`,
         maxSinusSelector: '[ng-show="af.record.maxSinusHR.time > 0"]',
-        // Min. / Max. / Max. sinus HR 卡片；label 用於提示文字，toleranceBpm 為報告值與 ECG 平均可容許的 ± 差距。
+        // Min. / Max. / Max. sinus HR 卡片；label 用於提示文字，toleranceBpm 為可容許的 ± 差距，
+        // extreme 表示該值應為全報告 ECG 平均最慢（slowest）或最快（fastest），sinusOnly 只與無 S / V 標籤的片段比較。
         hrCards: [
-            { label: 'Min. HR', selector: '[ng-show="af.record.minHR.time > 0"]', toleranceBpm: 10 },
-            { label: 'Max. HR', selector: '[ng-show="af.record.maxHR.time > 0"]', toleranceBpm: 10 },
-            { label: 'Max. sinus', selector: '[ng-show="af.record.maxSinusHR.time > 0"]', toleranceBpm: 3 },
+            { label: 'Min. HR', selector: '[ng-show="af.record.minHR.time > 0"]', toleranceBpm: 10, extreme: 'slowest' },
+            { label: 'Max. HR', selector: '[ng-show="af.record.maxHR.time > 0"]', toleranceBpm: 10, extreme: 'fastest' },
+            { label: 'Max. sinus', selector: '[ng-show="af.record.maxSinusHR.time > 0"]', toleranceBpm: 10, extreme: 'fastest', sinusOnly: true },
         ],
         maxIntervalMs: 10000,
         debounceMs: 250,
@@ -257,27 +259,71 @@
         return [];
     }
 
-    // 比對 Min. / Max. / Max. sinus HR 標題數字與 ECG 平均心率，以及 Longest R-R 標題秒數與 ECG 最長間隔。
-    // 標題或 ECG 間隔無法讀取時略過，不以缺資料視為異常。
+    // 取 ECG 上逐搏顯示 BPM 的平均；不用平均 R-R 換算，因為心搏位置標錯時總時間不變，
+    // 平均 R-R 仍會等於報告值而漏抓，逐搏 BPM 則會因異常短 / 長間隔而偏離。
+    function averageBpm(intervals) {
+        return intervals.reduce((sum, item) => sum + item.bpm, 0) / intervals.length;
+    }
+
+    // 收集報告內每個 ECG 片段的平均心率與 S / V 標籤，供平均最快 / 最慢比較；無可讀間隔的片段略過。
+    function getReportStripAverages(report) {
+        return [...report.querySelectorAll('.event-ecg-blk')].flatMap(ecg => {
+            const intervals = getStripIntervals(ecg);
+            if (!intervals.length) return [];
+            const hasSV = [...ecg.querySelectorAll('text')]
+                .some(item => ['S', 'V'].includes(item.textContent.trim()));
+            const title = ecg.closest('.print-page-content-blk')?.querySelector('.event-ecg-header-blk')?.innerText
+                ?.trim().replace(/\s+/g, ' ') || 'Report ECG';
+            return [{ ecg, title, average: averageBpm(intervals), hasSV }];
+        });
+    }
+
+    // 比對 Min. / Max. / Max. sinus HR 標題數字與 ECG 平均心率、是否為全報告 ECG 平均最慢 / 最快，
+    // 以及 Longest R-R 標題秒數與 ECG 最長間隔。標題或 ECG 間隔無法讀取時略過，不以缺資料視為異常。
     function getHeartRateMismatchFindings(report) {
         const findings = [];
         const headerText = card => (card.querySelector('.event-ecg-header-blk')?.innerText || '').replace(/\s+/g, ' ');
-
-        for (const { label, selector, toleranceBpm } of CONFIG.hrCards) {
+        const hrCards = CONFIG.hrCards.map(config => ({
+            ...config,
             // 摘要列也使用相同 ng-show，須同時存在 ECG 容器才視為目標。
-            const card = [...report.querySelectorAll(selector)].find(item => item.querySelector('.event-ecg-blk'));
+            card: [...report.querySelectorAll(config.selector)].find(item => item.querySelector('.event-ecg-blk')),
+        }));
+        const hrCardEcgs = hrCards.flatMap(({ card }) => card ? [...card.querySelectorAll('.event-ecg-blk')] : []);
+        // 比較對象排除三張 HR 卡片自身的 ECG。
+        const otherStrips = getReportStripAverages(report).filter(strip => !hrCardEcgs.includes(strip.ecg));
+        const shortTitle = title => title.length > 40 ? `${title.slice(0, 40)}…` : title;
+
+        for (const { label, card, toleranceBpm, extreme, sinusOnly } of hrCards) {
             if (!card) continue;
             const reportedMatch = [...headerText(card).matchAll(/(\d+(?:[.,]\d+)?)\s*bpm/gi)].pop();
             const reported = Number(reportedMatch?.[1].replace(',', '.'));
+            if (!Number.isFinite(reported)) continue;
+
             const intervals = getStripIntervals(card);
-            if (!Number.isFinite(reported) || !intervals.length) continue;
-            // 取 ECG 上逐搏顯示 BPM 的平均；不用平均 R-R 換算，因為心搏位置標錯時總時間不變，
-            // 平均 R-R 仍會等於報告值而漏抓，逐搏 BPM 則會因異常短 / 長間隔而偏離。
-            const average = intervals.reduce((sum, item) => sum + item.bpm, 0) / intervals.length;
-            if (Math.abs(average - reported) <= toleranceBpm) continue;
+            if (intervals.length) {
+                const average = averageBpm(intervals);
+                if (Math.abs(average - reported) > toleranceBpm) {
+                    findings.push({
+                        target: card.querySelector('.event-ecg-blk'),
+                        message: `${label} 報告 ${reported} bpm ≠ ECG 平均 ${average.toFixed(1)} bpm`,
+                    });
+                }
+            }
+
+            // 找出超出報告值 ± 容許差距、且最極端的其他片段；每張卡片最多提示一筆，箭頭指向該片段。
+            const slowest = extreme === 'slowest';
+            const outlier = otherStrips
+                .filter(strip => !(sinusOnly && strip.hasSV))
+                .filter(strip => slowest
+                    ? strip.average < reported - toleranceBpm
+                    : strip.average > reported + toleranceBpm)
+                .reduce((best, strip) => !best || (slowest ? strip.average < best.average : strip.average > best.average)
+                    ? strip : best, null);
+            if (!outlier) continue;
             findings.push({
-                target: card.querySelector('.event-ecg-blk'),
-                message: `${label} 報告 ${reported} bpm ≠ ECG 平均 ${average.toFixed(1)} bpm`,
+                target: outlier.ecg,
+                message: `${label} 報告 ${reported} bpm，但「${shortTitle(outlier.title)}」ECG 平均 ` +
+                    `${outlier.average.toFixed(1)} bpm 更${slowest ? '慢' : '快'}`,
             });
         }
 
