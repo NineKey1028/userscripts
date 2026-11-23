@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP快速點擊選取器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.3
+// @version      1.3.1
 // @description  在 MP 右側清單按住左鍵滑過 ECG 縮圖，連續選取或取消選取；支援 Ctrl 多選及 Alt 原生拖曳。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -10,6 +10,7 @@
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20MP快速點擊選取器.user.js
 // @match        https://editor.rooticare.com/rooti-care/*
 // @match        https://editoreu.rooticare.com/rooti-care/*
+// @match        https://report2.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
 

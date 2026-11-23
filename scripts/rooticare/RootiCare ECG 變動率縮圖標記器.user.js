@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率縮圖標記器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.22.1
+// @version      1.22.2
 // @description  依變動率、BPM、彩色波形高度／寬度、與前一跳比較（高矮寬窄快慢）、波形方向與雜訊判斷（測試版）標記 ECG 縮圖並同步標示 type；支援逐頁批次分類，以及含前一搏分類篩選的 Morphology Player 自動修改。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -10,6 +10,7 @@
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20ECG%20變動率縮圖標記器.user.js
 // @match        https://editor.rooticare.com/rooti-care/*
 // @match        https://editoreu.rooticare.com/rooti-care/*
+// @match        https://report2.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
 
