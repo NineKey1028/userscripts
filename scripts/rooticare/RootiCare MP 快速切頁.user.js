@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare MP 快速切頁
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.7.1
+// @version      1.7.2
 // @description  在 MP 分頁邊界以 Q / E 切換相鄰 type，A / D 直接切換上一個 / 下一個 type；Ctrl + E 配合網頁原生功能快速往下選中 type。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -10,6 +10,7 @@
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20MP%20快速切頁.user.js
 // @match        https://editor.rooticare.com/rooti-care/*
 // @match        https://editoreu.rooticare.com/rooti-care/*
+// @match        https://report2.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
 

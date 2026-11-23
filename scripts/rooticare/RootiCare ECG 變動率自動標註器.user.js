@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率自動標註器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.2
+// @version      1.2.1
 // @description  依相鄰心搏間隔計算變動率，預設達 12% 時標紅並加粗；按住反引號鍵顯示各組平均心率（排除灰色背景區段）。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -10,6 +10,7 @@
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20ECG%20變動率自動標註器.user.js
 // @match        https://editor.rooticare.com/rooti-care/*
 // @match        https://editoreu.rooticare.com/rooti-care/*
+// @match        https://report2.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標籤彩色化
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.1
+// @version      1.1.1
 // @description  自動將 V / S / N 文字套用自訂顏色與可選粗體，並移除網站頁尾。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -10,6 +10,7 @@
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20標籤彩色化.user.js
 // @match        https://editor.rooticare.com/rooti-care/*
 // @match        https://editoreu.rooticare.com/rooti-care/*
+// @match        https://report2.rooticare.com/rooti-care/*
 // @grant        none
 // ==/UserScript==
 
