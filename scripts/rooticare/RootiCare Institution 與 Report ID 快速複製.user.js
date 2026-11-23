@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         RootiCare Institution 與 Report ID 快速複製
 // @namespace    https://dashboard.rooticare.com/
-// @version      1.1
+// @version      1.2
 // @description  在 Dashboard 的 Todo 詳細資料彈窗加入按鈕，一鍵複製 Institution / Report ID。
 // @author       Alex
 // @updateURL    https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20Institution%20與%20Report%20ID%20快速複製.user.js
 // @downloadURL  https://raw.githubusercontent.com/NineKey1028/userscripts/main/scripts/rooticare/RootiCare%20Institution%20與%20Report%20ID%20快速複製.user.js
 // @match        https://dashboard.rooticare.com/todo.page*
+// @match        https://dashboard2.rooticare.com/todo.page*
 // @match        https://dashboardeu.rooticare.com/todo.page*
 // @run-at       document-idle
 // @grant        none
@@ -15,7 +16,7 @@
 // 使用教學：在 Dashboard 的 Todo 頁面開啟詳細資料彈窗。
 // Institution 與 Report ID 都有內容時，Report ID 旁會出現 ⧉ 複製按鈕。
 // 點擊 ⧉：複製「Institution / Report ID」；✓ 表示成功，! 表示失敗。
-// 支援 dashboard.rooticare.com 與 dashboardeu.rooticare.com 的 Todo 頁面。
+// 支援 dashboard.rooticare.com、dashboard2.rooticare.com 與 dashboardeu.rooticare.com 的 Todo 頁面。
 
 (() => {
     'use strict';
