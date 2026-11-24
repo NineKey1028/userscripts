@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.26.1
+// @version      2.27.0
 // @description  檢查 Longest R-R 間隔、Min. / Max. / Max. sinus HR 與 ECG 平均心率、是否為全報告 ECG 平均最慢 / 最快、Longest R-R 與 ECG 最長間隔是否一致、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -18,7 +18,7 @@
 // 使用教學：開啟 RootiCare Report 預覽，腳本會自動檢查報告並顯示異常提示。
 // 檢查項目：Longest R-R 與實際間隔、Min. / Max. / Max. sinus HR 與 ECG 平均、Min. / Max. / Max. sinus 是否為全報告平均最慢 / 最快、Longest R-R 與 ECG 最長間隔、Max. sinus 標籤、VT 心率範圍，以及 Specifics Note / Summary 雙向一致性。
 // HR 平均：取 ECG 片段內各間隔顯示 BPM 的平均，與標題數字相差超過 toleranceBpm（±10）才提示。
-// 平均最快 / 最慢：其他 ECG 片段平均比 Min. HR 慢、或比 Max. HR / Max. sinus 快超過 toleranceBpm 才提示；Max. sinus 只與無 S / V 標籤的片段比較。
+// 平均最快 / 最慢：其他 ECG 片段平均比 Min. HR 慢、或比 Max. HR / Max. sinus 快超過 toleranceBpm 才提示；Max. sinus 只與無 S / V 標籤、且非 AF / AFL 區塊的片段比較。
 // VT 提示條件：可讀取的 HR 範圍全部低於 100 bpm。
 // 點擊提示旁的箭頭：跳至對應 ECG；R-R 提示的時間按鈕可複製目標時間。
 // 報告內容更新後會重新檢查；提示供人工核對使用，不會修改報告內容。
@@ -269,7 +269,16 @@
         return intervals.reduce((sum, item) => sum + item.bpm, 0) / intervals.length;
     }
 
-    // 收集報告內每個 ECG 片段的平均心率與 S / V 標籤，供平均最快 / 最慢比較；無可讀間隔的片段略過。
+    // AF / AFL 區塊標題關鍵字（含常見報告語言）；這類片段非竇性節律，不可作為 Max. sinus 的比較對象。
+    const AF_TITLE_PATTERN = new RegExp([
+        String.raw`\bA-?Fib\b`, String.raw`\bAFL\b`, String.raw`\bAF\b`, String.raw`\bA-?Flutter\b`,
+        String.raw`atrial\s+(?:fibrillation|flutter)`,
+        String.raw`fibrill?a(?:zione|tion|ción|cion)\s+(?:atriale|auriculaire|auricular|atrial)`,
+        String.raw`flutter\s+(?:atriale|auriculaire|auricular|atrial)`,
+        'vorhof(?:flimmern|flattern)',
+    ].join('|'), 'i');
+
+    // 收集報告內每個 ECG 片段的平均心率、S / V 標籤與是否屬 AF / AFL 區塊，供平均最快 / 最慢比較；無可讀間隔的片段略過。
     function getReportStripAverages(report) {
         return [...report.querySelectorAll('.event-ecg-blk')].flatMap(ecg => {
             const intervals = getStripIntervals(ecg);
@@ -278,7 +287,8 @@
                 .some(item => ['S', 'V'].includes(item.textContent.trim()));
             const title = ecg.closest('.print-page-content-blk')?.querySelector('.event-ecg-header-blk')?.innerText
                 ?.trim().replace(/\s+/g, ' ') || 'Report ECG';
-            return [{ ecg, title, average: averageBpm(intervals), hasSV }];
+            const isAF = AF_TITLE_PATTERN.test(title);
+            return [{ ecg, title, average: averageBpm(intervals), hasSV, isAF }];
         });
     }
 
@@ -317,7 +327,8 @@
             // 找出超出報告值 ± 容許差距、且最極端的其他片段；每張卡片最多提示一筆，箭頭指向該片段。
             const slowest = extreme === 'slowest';
             const outlier = otherStrips
-                .filter(strip => !(sinusOnly && strip.hasSV))
+                // Max. sinus 只比較竇性片段：排除含 S / V 標籤與 AF / AFL 區塊。
+                .filter(strip => !(sinusOnly && (strip.hasSV || strip.isAF)))
                 .filter(strip => slowest
                     ? strip.average < reported - toleranceBpm
                     : strip.average > reported + toleranceBpm)
