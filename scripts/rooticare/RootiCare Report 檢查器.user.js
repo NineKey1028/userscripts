@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.27.0
+// @version      2.27.1
 // @description  檢查 Longest R-R 間隔、Min. / Max. / Max. sinus HR 與 ECG 平均心率、是否為全報告 ECG 平均最慢 / 最快、Longest R-R 與 ECG 最長間隔是否一致、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -198,8 +198,10 @@
     // 原站 ecgRMarker 的第一個間隔沒有片段內前一搏，改用 idxAdjust 顯示；該值由 getDurationDiff
     // 在整段取回資料中找前一搏，不檢查中間是否為無資料區或錄製起點，片段靠近錄製頭尾時會得到數秒的假間隔。
     // 這種間隔的前一搏不在片段內，無法從報告核對，因此不納入比較；片段內兩搏之間的長停頓仍照常計算。
+    // 片段內完全沒有心搏標籤（如 Measurement 頁的卡尺量測數值）時，間隔文字不是 R-R，一律不納入。
     function hasPreviousBeatInStrip(label, marker) {
         const beats = [...marker.querySelectorAll('.annoText')];
+        if (!beats.length) return false;
         // d3 綁定資料：間隔文字為右側心搏索引，心搏文字為 { index, type }。
         const beatIndexes = beats.map(beat => Number(beat.__data__?.index)).filter(Number.isFinite);
         const labelIndex = Number(label.__data__);
