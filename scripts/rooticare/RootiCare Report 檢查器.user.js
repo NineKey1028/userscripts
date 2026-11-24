@@ -18,7 +18,7 @@
 // 使用教學：開啟 RootiCare Report 預覽，腳本會自動檢查報告並顯示異常提示。
 // 檢查項目：Longest R-R 與實際間隔、Min. / Max. / Max. sinus HR 與 ECG 平均、Min. / Max. / Max. sinus 是否為全報告平均最慢 / 最快、Longest R-R 與 ECG 最長間隔、Max. sinus 標籤、VT 心率範圍，以及 Specifics Note / Summary 雙向一致性。
 // HR 平均：取 ECG 片段內各間隔顯示 BPM 的平均，與標題數字相差超過 toleranceBpm（±10）才提示。
-// 平均最快 / 最慢：其他 ECG 片段平均比 Min. HR 慢、或比 Max. HR / Max. sinus 快超過 toleranceBpm 才提示；Max. sinus 只與無 S / V 標籤、且非 AF / AFL 區塊的片段比較。
+// 平均最快 / 最慢：其他 ECG 片段平均比 Min. HR 慢、或比 Max. HR / Max. sinus 快超過 toleranceBpm 才提示；Max. sinus 只與無 S / V 標籤、且未與 AF 時段重疊的片段比較（AF 時段判斷同標註快捷鍵）。
 // VT 提示條件：可讀取的 HR 範圍全部低於 100 bpm。
 // 點擊提示旁的箭頭：跳至對應 ECG；R-R 提示的時間按鈕可複製目標時間。
 // 報告內容更新後會重新檢查；提示供人工核對使用，不會修改報告內容。
@@ -269,17 +269,80 @@
         return intervals.reduce((sum, item) => sum + item.bpm, 0) / intervals.length;
     }
 
-    // AF / AFL 區塊標題關鍵字（含常見報告語言）；這類片段非竇性節律，不可作為 Max. sinus 的比較對象。
-    const AF_TITLE_PATTERN = new RegExp([
-        String.raw`\bA-?Fib\b`, String.raw`\bAFL\b`, String.raw`\bAF\b`, String.raw`\bA-?Flutter\b`,
-        String.raw`atrial\s+(?:fibrillation|flutter)`,
-        String.raw`fibrill?a(?:zione|tion|ción|cion)\s+(?:atriale|auriculaire|auricular|atrial)`,
-        String.raw`flutter\s+(?:atriale|auriculaire|auricular|atrial)`,
-        'vorhof(?:flimmern|flattern)',
-    ].join('|'), 'i');
+    // AF 時段判斷沿用「RootiCare 標註快捷鍵」Max HR sinus「排除 AF 時段」的做法：
+    // AF 時段取自時間軸的 tmsAFs（已含 AF 修改，每筆代表該秒起 60 秒），再加上 AF 編輯中尚未儲存的區段，
+    // 合併成不重疊的區段；10 秒心電圖與任一區段重疊即視為 AF 片段。
+    const HR_STRIP_SECONDS = 10;
+    const AF_BLOCK_SECONDS = 60;
+    // 時間值可能是數字或含 startTime / tms 等欄位的物件；陣列取第一筆。無法解析時回傳 null。
+    function toEventTime(value) {
+        if (Array.isArray(value)) value = value[0];
+        if (value && typeof value === 'object') value = value.startTime ?? value.dataTime ?? value.tagTime ?? value.tms ?? value.time;
+        const time = Number(value);
+        return Number.isFinite(time) ? time : null;
+    }
+    function mergeRanges(ranges) {
+        const sorted = ranges.filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+            .sort((a, b) => a[0] - b[0]);
+        const merged = [];
+        for (const [start, end] of sorted) {
+            const last = merged[merged.length - 1];
+            if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+            else merged.push([start, end]);
+        }
+        return merged;
+    }
+    // 從報告所在的 Angular scope 往上找網站 AF 控制器的 af 物件；頁面沒有 Angular 時回傳 null。
+    function getAFScope(report) {
+        if (!window.angular) return null;
+        let scope;
+        try { scope = window.angular.element(report).scope?.(); } catch (_) { return null; }
+        while (scope && !scope.af) scope = scope.$parent;
+        return scope?.af || null;
+    }
+    function getAFRanges(af) {
+        const ranges = [];
+        const blocks = af?.tmsline?.tagsRecord?.tmsAFs;
+        if (Array.isArray(blocks)) {
+            for (const value of blocks) {
+                const start = Number(value);
+                ranges.push([start, start + AF_BLOCK_SECONDS]);
+            }
+        }
+        const edited = af?.afEditing?.data;
+        if (Array.isArray(edited)) {
+            for (const range of edited) ranges.push([Number(range?.start), Number(range?.end)]);
+        }
+        return mergeRanges(ranges);
+    }
+    // 報告各卡片以 ng-repeat 的 arrData（或 currentData）帶入事件時間；由 ECG 的 scope 往上找第一個可解析的時間。
+    function getStripTime(ecg) {
+        if (!window.angular) return null;
+        let scope;
+        try { scope = window.angular.element(ecg).scope?.(); } catch (_) { return null; }
+        for (let depth = 0; scope && depth < 12; depth += 1, scope = scope.$parent) {
+            for (const key of ['arrData', 'currentData']) {
+                if (!Object.prototype.hasOwnProperty.call(scope, key)) continue;
+                const time = toEventTime(scope[key]);
+                if (time !== null) return time;
+            }
+        }
+        return null;
+    }
+    // 二分搜尋第一個結束時間晚於心電圖起點的區段，再看它是否早於心電圖終點開始。
+    function overlapsAF(start, afRanges) {
+        if (start === null || !afRanges.length) return false;
+        let low = 0, high = afRanges.length;
+        while (low < high) {
+            const mid = (low + high) >> 1;
+            if (afRanges[mid][1] <= start) low = mid + 1; else high = mid;
+        }
+        return low < afRanges.length && afRanges[low][0] < start + HR_STRIP_SECONDS;
+    }
 
-    // 收集報告內每個 ECG 片段的平均心率、S / V 標籤與是否屬 AF / AFL 區塊，供平均最快 / 最慢比較；無可讀間隔的片段略過。
+    // 收集報告內每個 ECG 片段的平均心率、S / V 標籤與是否落在 AF 時段，供平均最快 / 最慢比較；無可讀間隔的片段略過。
     function getReportStripAverages(report) {
+        const afRanges = getAFRanges(getAFScope(report));
         return [...report.querySelectorAll('.event-ecg-blk')].flatMap(ecg => {
             const intervals = getStripIntervals(ecg);
             if (!intervals.length) return [];
@@ -287,7 +350,7 @@
                 .some(item => ['S', 'V'].includes(item.textContent.trim()));
             const title = ecg.closest('.print-page-content-blk')?.querySelector('.event-ecg-header-blk')?.innerText
                 ?.trim().replace(/\s+/g, ' ') || 'Report ECG';
-            const isAF = AF_TITLE_PATTERN.test(title);
+            const isAF = overlapsAF(getStripTime(ecg), afRanges);
             return [{ ecg, title, average: averageBpm(intervals), hasSV, isAF }];
         });
     }
@@ -327,7 +390,7 @@
             // 找出超出報告值 ± 容許差距、且最極端的其他片段；每張卡片最多提示一筆，箭頭指向該片段。
             const slowest = extreme === 'slowest';
             const outlier = otherStrips
-                // Max. sinus 只比較竇性片段：排除含 S / V 標籤與 AF / AFL 區塊。
+                // Max. sinus 只比較竇性片段：排除含 S / V 標籤與 AF 時段的片段。
                 .filter(strip => !(sinusOnly && (strip.hasSV || strip.isAF)))
                 .filter(strip => slowest
                     ? strip.average < reported - toleranceBpm
