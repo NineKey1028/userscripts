@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率自動標註器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.2.1
+// @version      1.2.2
 // @description  依相鄰心搏間隔計算變動率，預設達 12% 時標紅並加粗；按住反引號鍵顯示各組平均心率（排除灰色背景區段）。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -43,6 +43,10 @@
         groupDataCache = []; // 清空快取
 
         groups.forEach(group => {
+            // 片段內沒有任何心搏標籤（如 Measurement 頁的卡尺量測數值）時，間隔文字不是 R-R，整組略過。
+            const beatScope = group.closest('.ecgRMarker') || group;
+            if (!beatScope.querySelector('.annoText')) return;
+
             const textElements = Array.from(group.querySelectorAll('text.annoDuration'));
             let lastValidValue = null;
             const heartRateLabels = []; // 心率與其文字節點，按鍵時用來排除灰色區段
