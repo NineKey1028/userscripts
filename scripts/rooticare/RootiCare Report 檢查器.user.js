@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.26.0
+// @version      2.26.1
 // @description  檢查 Longest R-R 間隔、Min. / Max. / Max. sinus HR 與 ECG 平均心率、是否為全報告 ECG 平均最慢 / 最快、Longest R-R 與 ECG 最長間隔是否一致、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -111,8 +111,12 @@
     // 比較時統一全半形、大小寫、空白與部分標點；顯示提示時仍保留原始 Note 文字。
     function getMissingSpecificsFindings(report) {
         // 正向比對：每張 Specifics 卡片的 Note 都應出現在 Summary，缺漏時將箭頭指向該 ECG。
+        // 優先取內容含「Specifics:」的診斷欄；報告後方可能另有結論欄（如義大利文 CONCLUSIONI），
+        // 不能固定取最後一個，找不到 Specifics 標題時才退回最後一個欄位。
         const summaries = [...report.querySelectorAll('.diagnosis-textarea-blk textarea')];
-        const summary = summaries[summaries.length - 1];
+        const summary = summaries.find(field =>
+            /^\s*(?:[-•]\s*)?Specifics\s*[:：]/im.test(field.value || field.textContent || ''))
+            || summaries[summaries.length - 1];
         if (!summary) return [];
         const normalize = text => text.replace(/\s+/g, ' ').trim();
         const normalizeForComparison = text => normalize(text)
