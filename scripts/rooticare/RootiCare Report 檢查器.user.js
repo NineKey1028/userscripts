@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare Report 檢查器
 // @namespace    https://editoreu.rooticare.com/
-// @version      2.27.1
+// @version      2.28.0
 // @description  檢查 Longest R-R 間隔、Min. / Max. / Max. sinus HR 與 ECG 平均心率、是否為全報告 ECG 平均最慢 / 最快、Longest R-R 與 ECG 最長間隔是否一致、Max. sinus 的 S / V 標籤、VT 心率範圍低於 100 bpm，以及 Specifics Note / Summary 雙向一致性。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -20,7 +20,7 @@
 // HR 平均：取 ECG 片段內各間隔顯示 BPM 的平均，與標題數字相差超過 toleranceBpm（±10）才提示。
 // 平均最快 / 最慢：其他 ECG 片段平均比 Min. HR 慢、或比 Max. HR / Max. sinus 快超過 toleranceBpm 才提示；Max. sinus 只與無 S / V 標籤、且未與 AF 時段重疊的片段比較（AF 時段判斷同標註快捷鍵）。
 // VT 提示條件：可讀取的 HR 範圍全部低於 100 bpm。
-// 點擊提示旁的箭頭：跳至對應 ECG；R-R 提示的時間按鈕可複製目標時間。
+// 點擊提示旁的箭頭：跳至對應 ECG；R-R 與 Min. / Max. / Max. sinus 平均更慢 / 更快提示的時間按鈕可複製目標時間。
 // 報告內容更新後會重新檢查；提示供人工核對使用，不會修改報告內容。
 
 (() => {
@@ -370,7 +370,6 @@
         const hrCardEcgs = hrCards.flatMap(({ card }) => card ? [...card.querySelectorAll('.event-ecg-blk')] : []);
         // 比較對象排除三張 HR 卡片自身的 ECG。
         const otherStrips = getReportStripAverages(report).filter(strip => !hrCardEcgs.includes(strip.ecg));
-        const shortTitle = title => title.length > 40 ? `${title.slice(0, 40)}…` : title;
 
         for (const { label, card, toleranceBpm, extreme, sinusOnly } of hrCards) {
             if (!card) continue;
@@ -384,7 +383,7 @@
                 if (Math.abs(average - reported) > toleranceBpm) {
                     findings.push({
                         target: card.querySelector('.event-ecg-blk'),
-                        message: `${label} 報告 ${reported} bpm ≠ ECG 平均 ${average.toFixed(1)} bpm`,
+                        message: `${label} ${reported} ≠ ECG 平均 ${average.toFixed(1)} bpm`,
                     });
                 }
             }
@@ -402,8 +401,9 @@
             if (!outlier) continue;
             findings.push({
                 target: outlier.ecg,
-                message: `${label} 報告 ${reported} bpm，但「${shortTitle(outlier.title)}」ECG 平均 ` +
-                    `${outlier.average.toFixed(1)} bpm 更${slowest ? '慢' : '快'}`,
+                // 訊息只保留數值比較，ECG 時間改由時間按鈕顯示並可點擊複製。
+                message: `${label} ${reported} ${slowest ? '>' : '<'} ECG ${outlier.average.toFixed(1)} bpm`,
+                timestamp: extractTimestamp(outlier.title),
             });
         }
 
@@ -634,17 +634,32 @@
         }
     }
 
-    // 只複製目前 R-R 異常目標的時間；沒有時間或提示時直接結束。
+    // 從 ECG 標題擷取日期時間，支援 MM/DD/YYYY（或 DD/MM/YYYY）與 YYYY/MM/DD 兩種格式；找不到時回傳空字串。
+    function extractTimestamp(title) {
+        return title.match(/\b((?:\d{2}\/\d{2}\/\d{4}|\d{4}\/\d{2}\/\d{2})\s+\d{2}:\d{2}:\d{2})\b/)?.[1] || '';
+    }
+
+    // 設定提示的時間按鈕：時間存於 data-value 供複製；沒有時間時停用按鈕，仍保留跳轉功能。
+    function setTimestampButton(element, timestamp) {
+        const button = element.querySelector('.timestamp');
+        button.dataset.value = timestamp;
+        // 正在顯示「已複製」時不覆寫，待計時器還原。
+        if (button.textContent !== '已複製') button.textContent = timestamp || '無時間';
+        button.disabled = !timestamp;
+    }
+
+    // 複製被點擊按鈕上的目標時間；沒有時間時直接結束。
     // 優先使用 Clipboard API，失敗才用暫存 textarea 備援；成功後短暫顯示「已複製」。
-    async function copyTargetTimestamp() {
-        if (!targetTimestamp || !indicator) return;
-        const button = indicator.querySelector('.timestamp');
+    async function copyTargetTimestamp(event) {
+        const button = event.currentTarget;
+        const timestamp = button?.dataset.value;
+        if (!timestamp) return;
         try {
-            await navigator.clipboard.writeText(targetTimestamp);
+            await navigator.clipboard.writeText(timestamp);
         } catch {
             // 剪貼簿 API 失敗時建立畫面外文字欄，選取後執行備援複製，再移除暫存節點。
             const temporaryInput = document.createElement('textarea');
-            temporaryInput.value = targetTimestamp;
+            temporaryInput.value = timestamp;
             temporaryInput.style.cssText = 'position:fixed;left:-9999px;top:0';
             document.body.appendChild(temporaryInput);
             temporaryInput.select();
@@ -655,7 +670,7 @@
         button.textContent = '已複製';
         // 1.2 秒後還原時間文字；按鈕已離開 DOM 時不再更新。
         setTimeout(() => {
-            if (button.isConnected) button.textContent = targetTimestamp;
+            if (button.isConnected) button.textContent = button.dataset.value || '無時間';
         }, 1200);
     }
 
@@ -726,8 +741,11 @@
         // HR / Longest R-R 數值一致性：每筆不一致各一個提示，箭頭指向該 ECG。
         const previousHrIndicators = hrIndicators;
         hrIndicators = getHeartRateMismatchFindings(report).map((finding, index) => {
-            const element = ensureIndicator(`rooticare-report-checker-hr-indicator-${index}`, false);
+            // 平均更慢 / 更快的提示附時間按鈕，可複製該 ECG 時間；報告值與自身 ECG 不符的提示不附。
+            const withTimestamp = finding.timestamp !== undefined;
+            const element = ensureIndicator(`rooticare-report-checker-hr-indicator-${index}`, withTimestamp);
             element.querySelector('.message').textContent = finding.message;
+            if (withTimestamp) setTimestampButton(element, finding.timestamp);
             element.style.display = 'flex';
             return { target: finding.target, element };
         });
@@ -758,17 +776,11 @@
         target = longestInECG.ecg;
         targetInterval = longestInECG.milliseconds / 1000;
         reportInterval = longestReported;
-        // 從異常 ECG 標題擷取日期時間，支援 MM/DD/YYYY（或 DD/MM/YYYY）與 YYYY/MM/DD 兩種格式；
-        // 沒有符合格式時停用複製按鈕，仍保留跳轉功能。
-        const timestampMatch = longestInECG.title.match(
-            /\b((?:\d{2}\/\d{2}\/\d{4}|\d{4}\/\d{2}\/\d{2})\s+\d{2}:\d{2}:\d{2})\b/);
-        targetTimestamp = timestampMatch?.[1] || '';
+        targetTimestamp = extractTimestamp(longestInECG.title);
         indicator = ensureIndicator(CONFIG.indicatorId, true);
         indicator.querySelector('.message').textContent =
             `R-R ${targetInterval.toFixed(2)}s > 報告最長 ${reportInterval.toFixed(2)}s`;
-        const timestampButton = indicator.querySelector('.timestamp');
-        timestampButton.textContent = targetTimestamp || '無時間';
-        timestampButton.disabled = !targetTimestamp;
+        setTimestampButton(indicator, targetTimestamp);
         indicator.style.display = 'flex';
         positionIndicator();
     }
