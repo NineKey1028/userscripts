@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.58.0
+// @version      1.59.2
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -84,8 +84,12 @@
  *                          Longest R-R 改看暫停本身：最長 R-R 是否完整印在白色區段內（找不到 R-R 為零分）、是否位於事件時間、
  *                          暫停前後各至少 2 顆心搏；
  *                          Min／Max HR、Max HR sinus 另顯示實際平均 BPM（白色區段 R-R 的平均，與按住 ` 相同），
- *                          與卡片右上角的清單 HR 相差超出 ±10 BPM 扣 40 分；
- *                          Max HR sinus 另檢查含 V／S 標籤或與 AF 時段重疊（皆為零分）；只看報告印出的白色 8 秒，含未儲存的標籤修改；
+ *                          與卡片右上角的清單 HR 相差超出 ±10 BPM 扣 40 分；另檢查合理心率：平均超出 30–220 bpm 扣 60 分，
+ *                          單一 R-R 超過 2.5 秒或短於 0.27 秒各扣 40 分（多半是漏標、重複標註或雜訊）；
+ *                          Max HR sinus 另檢查含 V／S 標籤或與 AF 時段重疊（皆為零分）；
+ *                          所有清單另檢查雜訊（超出畫面或密集震盪的時間：0.4 秒以上扣 20、1 秒以上扣 40、2.5 秒以上扣 60），
+ *                          Longest R-R 的最長 R-R 內或兩端有雜訊再扣 40（暫停可能是雜訊造成或心搏被雜訊蓋住）；
+ *                          只看報告印出的白色 8 秒，含未儲存的標籤修改；
  *                          右側 Minimap 為所有燈號（左側深色條／「印」＝選印、★ 或金色圓點＝星號，藍框為畫面中的卡片），
  *                          左側為編號刻度；張數多時燈號維持可辨識的大小，Minimap 跟著清單捲動；點燈號跳到該張，
  *                          點空白處或拖曳可捲動，在 Minimap 上滾動滾輪即捲動清單；「返回分頁」或 Esc 回到原本的分頁，停在目前這張所在的頁。
@@ -4232,6 +4236,17 @@
             quickToastElement = document.createElement('div');
             quickToastElement.className = 'rc-quick-toast';
             document.body.appendChild(quickToastElement);
+            // 訊息顯示期間接著點擊或按鍵（例如開啟選印清單）時立即收起，不擋住新開的畫面（例如選印清單的標籤列）。
+            // 在 document 的捕獲階段處理，會早於按鈕或快捷鍵的處理函式，同一次操作產生的新訊息不會被收掉；
+            // 不設最短顯示時間，否則快速連點時剛出現的訊息要點兩下才收得掉。
+            const dismiss = () => {
+                const toast = quickToastElement;
+                if (toast.style.opacity !== '1') return;
+                clearTimeout(toast.rcTimer);
+                toast.style.opacity = '0';
+            };
+            document.addEventListener('pointerdown', dismiss, true);
+            document.addEventListener('keydown', dismiss, true);
         }
         const toast = quickToastElement;
         toast.textContent = message;
@@ -4243,7 +4258,14 @@
         toast.style.left = `${Math.max(8, Math.min((rect?.left ?? 16), window.innerWidth - width - 8))}px`;
         let top = rect ? rect.bottom + 8 : 16;
         if (rect && top + height > window.innerHeight - 8) top = rect.top - height - 8;
-        toast.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+        top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+        // 選印清單（畫面底部的面板）開著時，訊息不可蓋到清單（標籤列、心電圖）：改放在按鈕上方，仍會重疊時放在清單上緣之上。
+        const bar = review?.bar?.isConnected && !(anchor && review.bar.contains(anchor)) ? review.bar.getBoundingClientRect() : null;
+        if (bar && bar.height && top + height > bar.top - 4) {
+            const above = rect ? rect.top - height - 8 : -1;
+            top = above >= 8 && above + height <= bar.top - 4 ? above : Math.max(8, bar.top - height - 8);
+        }
+        toast.style.top = `${top}px`;
         toast.style.opacity = '1';
         clearTimeout(toast.rcTimer);
         toast.rcTimer = setTimeout(() => { toast.style.opacity = '0'; }, isError ? 5000 : 3500);
@@ -5430,8 +5452,11 @@
         { id: 'pauseContext', name: '前後心搏', types: ['rr'], check: scorePauseContext },
         { id: 'spread', name: '標籤分布', types: ['minHR', 'maxHR', 'maxSinus'], check: scoreLabelSpread },
         { id: 'avgBPM', name: '平均 BPM', types: ['minHR', 'maxHR', 'maxSinus'], check: scoreAverageBPM },
+        { id: 'plausible', name: '合理心率', types: ['minHR', 'maxHR', 'maxSinus'], check: scorePlausibleRate },
         { id: 'sinusVS', name: 'V／S 標籤', types: ['maxSinus'], check: scoreSinusEctopic },
         { id: 'sinusAF', name: 'AF 時段', types: ['maxSinus'], check: scoreSinusAF },
+        { id: 'noise', name: '雜訊', check: scoreNoise },
+        { id: 'pauseNoise', name: '暫停雜訊', types: ['rr'], check: scorePauseNoise },
     ];
     function scrollIntervals(beats) {
         const intervals = [];
@@ -5516,11 +5541,11 @@
             ? { penalty: 0, note: `暫停前 ${before} 顆、後 ${after} 顆` }
             : { penalty: 20, note: `白色區段內暫停前 ${before} 顆、後 ${after} 顆（各需 ${SCROLL_PAUSE_CONTEXT} 顆）` };
     }
-    // Max HR sinus：整張心電圖有 V 或 S 標籤（含未儲存的修改）即零分。
-    function scoreSinusEctopic({ all }) {
-        const v = all.filter(beat => beat.type === 'V').length;
-        const s = all.filter(beat => beat.type === 'S').length;
-        if (!v && !s) return { penalty: 0, note: '沒有 V／S 標籤' };
+    // Max HR sinus：報告印出的白色區段內有 V 或 S 標籤（含未儲存的修改）即零分；灰色區段不會印出，不列入。
+    function scoreSinusEctopic({ beats }) {
+        const v = beats.filter(beat => beat.type === 'V').length;
+        const s = beats.filter(beat => beat.type === 'S').length;
+        if (!v && !s) return { penalty: 0, note: '白色區段內沒有 V／S 標籤' };
         return { penalty: 100, note: `含 ${[v ? `V×${v}` : '', s ? `S×${s}` : ''].filter(Boolean).join(' ')}` };
     }
     // Max HR sinus：與 AF 時段（含未儲存的 AF 編輯）重疊即零分。
@@ -5555,6 +5580,96 @@
         return Math.abs(diff) <= SCROLL_AVG_TOLERANCE ? { penalty: 0, note }
             : { penalty: SCROLL_AVG_PENALTY, note: `${note}，超出 ±${SCROLL_AVG_TOLERANCE}` };
     }
+    // 合理心率：其他條件都是相對比較（RR 與中位數、與清單 HR），整段都漏標時（例如每 3 秒才一個標籤、平均 19 bpm）仍會滿分；
+    // 因此另以絕對範圍檢查：平均心率超出 30～220 bpm，或白色區段內有單一 R-R 超過 2.5 秒（約 24 bpm）或短於 0.27 秒（約 220 bpm），
+    // 多半是漏標、重複標註或雜訊。R-R 與平均 BPM 相同，以中點落在白色區段內者為準。
+    const SCROLL_RATE_RANGE = [30, 220]; // 平均心率的合理範圍（bpm）
+    const SCROLL_RR_RANGE = [0.27, 2.5]; // 單一 R-R 的合理範圍（秒）
+    function scorePlausibleRate({ all, white, avgBPM }) {
+        if (avgBPM === null) return { penalty: 0, note: '沒有 R-R，無法判斷' };
+        const [from, to] = white;
+        const gaps = [];
+        for (let i = 1; i < all.length; i++) {
+            const gap = all[i].offset - all[i - 1].offset;
+            const middle = (all[i].offset + all[i - 1].offset) / 2;
+            if (gap > 0 && middle >= from && middle < to) gaps.push(gap);
+        }
+        const notes = [];
+        let penalty = 0;
+        if (avgBPM < SCROLL_RATE_RANGE[0] || avgBPM > SCROLL_RATE_RANGE[1]) {
+            penalty += 60;
+            notes.push(`平均 ${formatBPM(avgBPM)} bpm 超出 ${SCROLL_RATE_RANGE[0]}–${SCROLL_RATE_RANGE[1]}，可能漏標或雜訊`);
+        }
+        const longest = Math.max(...gaps);
+        const shortest = Math.min(...gaps);
+        if (longest > SCROLL_RR_RANGE[1]) {
+            penalty += 40;
+            notes.push(`有 R-R 長達 ${longest.toFixed(2)} 秒（可能漏標或暫停）`);
+        }
+        if (shortest < SCROLL_RR_RANGE[0]) {
+            penalty += 40;
+            notes.push(`有 R-R 僅 ${Math.round(shortest * 1000)} ms（可能重複標註）`);
+        }
+        return penalty ? { penalty, note: notes.join('；') } : { penalty: 0, note: '心率與 R-R 都在合理範圍' };
+    }
+    // 雜訊：白色區段每 0.2 秒一格，波形超出卡片畫面（網站以 10 mm/mV 繪製，零線在高度 2/3 處，約 +2.1～−1.05 mV），
+    // 或格內有 4 次以上超過 0.15 mV 的轉向（密集震盪；正常 QRS 約 2 次），即為雜訊格。回傳 [{ from, to }]（秒，自心電圖起點）。
+    const SCROLL_NOISE_WINDOW = 0.2; // 每格秒數
+    const SCROLL_NOISE_RANGE = [-1.05, 2.1]; // 卡片畫面可顯示的範圍（mV）
+    const SCROLL_NOISE_SWING = 0.15; // 算作一次轉向的最小振幅（mV）
+    const SCROLL_NOISE_TURNS = 4; // 一格內轉向達此次數即為雜訊
+    const SCROLL_NOISE_STEPS = [[2.5, 60], [1, 40], [0.4, 20]]; // 雜訊秒數達此值 → 扣分（取第一個符合的）
+    const SCROLL_PAUSE_NOISE_PENALTY = 40; // 最長 R-R 內或兩端有雜訊的扣分
+    function scrollNoiseWindows(data, start, white) {
+        const values = Array.isArray(data?.ecg) ? data.ecg.map(Number) : [];
+        const sampleRate = Number(data?.sampleRate) || 250;
+        const fromTime = Number(data?.fromTimestamp);
+        if (!values.length || !Number.isFinite(fromTime)) return [];
+        const index = second => Math.max(0, Math.min(values.length, Math.round((start + second - fromTime) * sampleRate)));
+        const [low, high] = SCROLL_NOISE_RANGE;
+        const step = Math.max(1, Math.round(SCROLL_NOISE_WINDOW * sampleRate));
+        const end = index(white[1]);
+        const windows = [];
+        for (let a = index(white[0]); a < end; a += step) {
+            const b = Math.min(end, a + step);
+            let clipped = false, turns = 0, dir = 0, top = values[a], bottom = values[a];
+            for (let i = a; i < b; i++) {
+                const value = values[i];
+                if (!Number.isFinite(value)) continue;
+                if (value > high || value < low) clipped = true;
+                if (dir !== -1) {
+                    if (value > top) top = value;
+                    if (top - value > SCROLL_NOISE_SWING) { turns++; dir = -1; bottom = value; }
+                }
+                if (dir !== 1) {
+                    if (value < bottom) bottom = value;
+                    if (value - bottom > SCROLL_NOISE_SWING) { turns++; dir = 1; top = value; }
+                }
+            }
+            if (clipped || turns >= SCROLL_NOISE_TURNS) {
+                const from = fromTime + a / sampleRate - start;
+                windows.push({ from, to: from + (b - a) / sampleRate, clipped });
+            }
+        }
+        return windows;
+    }
+    function scoreNoise({ noise }) {
+        const seconds = noise.length * SCROLL_NOISE_WINDOW;
+        const step = SCROLL_NOISE_STEPS.find(([limit]) => seconds >= limit - 1e-6);
+        if (!step) return { penalty: 0, note: seconds ? `雜訊約 ${seconds.toFixed(1)} 秒（未達扣分）` : '白色區段內沒有明顯雜訊' };
+        const clipped = noise.filter(window => window.clipped).length * SCROLL_NOISE_WINDOW;
+        const parts = [clipped ? `超出畫面 ${clipped.toFixed(1)} 秒` : '', seconds > clipped ? `密集震盪 ${(seconds - clipped).toFixed(1)} 秒` : '']
+            .filter(Boolean).join('、');
+        return { penalty: step[1], note: `白色區段內雜訊約 ${seconds.toFixed(1)} 秒（${parts}）` };
+    }
+    // Longest R-R：最長的 R-R 內或兩端（±0.1 秒）有雜訊時，暫停可能是雜訊造成的（例如飽和後的平線），或心搏被雜訊蓋住而漏標。
+    function scorePauseNoise({ all, noise }) {
+        const pause = longestInterval(all);
+        if (!pause) return { penalty: 0, note: '找不到 R-R' };
+        const hit = noise.some(window => window.to > pause.from - 0.1 && window.from < pause.to + 0.1);
+        return hit ? { penalty: SCROLL_PAUSE_NOISE_PENALTY, note: `最長 R-R（第 ${pause.from.toFixed(1)}–${pause.to.toFixed(1)} 秒）內或兩端有雜訊，暫停可能不可靠` }
+            : { penalty: 0, note: '最長 R-R 內沒有雜訊' };
+    }
     function scoreScrollItem(view, item) {
         const { config, type, af } = view.ctx;
         const start = item.time - config.before;
@@ -5565,7 +5680,9 @@
         const beats = all.filter(beat => beat.offset >= from && beat.offset <= to);
         const avgBPM = scrollAverageBPM(all, config.white);
         const listedHR = HR_VALUE_LISTS[type] ? getHRValueMap(af, type).get(item.time) ?? null : null;
-        const input = { beats, all, white: config.white, start, duration, config, af, type, avgBPM, listedHR };
+        let noise = [];
+        try { noise = scrollNoiseWindows(item.data, start, config.white); } catch (_) { noise = []; }
+        const input = { beats, all, white: config.white, start, duration, config, af, type, avgBPM, listedHR, noise };
         const results = SCROLL_CRITERIA.filter(criterion => !criterion.types || criterion.types.includes(type))
             .map(criterion => {
                 let outcome;
@@ -5746,12 +5863,14 @@
     // 換頁：分頁資料 pages、目前頁碼 page，交給網站的 pageChanged 重新建立卡片並讀取心電圖。
     // 「排除 ±1 分」等排除中的清單（hrExclusion.pages）一併換成新的分頁，避免被當成網站換回完整清單而重新套用。
     // 先清空卡片再換頁：網站以 $index 沿用卡片，灰色遮罩（ecgMask）只在卡片建立時依寬度畫一次，沿用的卡片會留著舊寬度。
-    function setScrollPages(ctx, pages, perPage, page) {
+    // keepCards：卡片寬度不變時（捲動檢視中重新合併成一頁）沿用卡片，只換資料；
+    // 數百張卡片全部重建會讓畫面卡住約 1～2 秒（例如每次選印後網站重新分頁）。
+    function setScrollPages(ctx, pages, perPage, page, keepCards = false) {
         const { ed, host, type } = ctx;
         const replaced = hrExclusion.pages === ed.pageData;
         // 分兩次套用：網站的頁碼元件在總張數改變的同一次更新中，會以舊的總頁數把頁碼夾回 1，因此先換總張數、再設頁碼。
         host.$apply(() => {
-            ed.currentData = [];
+            if (!keepCards) ed.currentData = [];
             ed.pageData = pages;
             ed.pagination.itemsPerPage = perPage;
             ed.pagination.totalItems = pages.reduce((sum, list) => sum + list.length, 0);
@@ -5770,7 +5889,8 @@
         const flat = ctx.ed.pageData.flat();
         const perPage = Number(pagination.itemsPerPage) || 6;
         const view = { ctx, saved: { perPage }, entries: new Map(), active: Math.max(0, (Number(pagination.currentPage) - 1) * perPage),
-            panel: null, map: null, mapView: null, cells: [], count: 0, modSignature: scrollModSignature(ctx.af), timer: null, loadJob: null };
+            panel: null, map: null, mapView: null, cells: [], count: 0, modSignature: scrollModSignature(ctx.af), timer: null, loadJob: null,
+            modItems: (Array.isArray(ctx.af.ecgAnno?.modifiedData) ? ctx.af.ecgAnno.modifiedData : []).map(item => JSON.stringify(item)) };
         scrollView = view;
         // 捲動區高度：使整個清單視窗與原本分頁時一樣高（先量原本的高度，改版後再補上差距）。
         const content = view.content = ctx.dialog.querySelector('.content-blk');
@@ -5780,12 +5900,7 @@
         const originalContent = content.offsetHeight;
         // 先改成一欄再換頁：網站依卡片當時的寬度畫心電圖。
         ctx.root.classList.add('rc-scroll-mode');
-        // 頁碼列隱藏後，右上角的 VEB／Misura（絕對定位）會壓到第一張卡片：捲動區上緣移到它下方。
-        const tools = ctx.dialog.querySelector('.tool-btns');
-        if (tools && tools.offsetParent === content.offsetParent) {
-            const gap = tools.offsetTop + tools.offsetHeight + 6 - content.offsetTop;
-            if (gap > 0) content.style.marginTop = `${gap}px`;
-        }
+        alignScrollTop(view, false);
         content.style.height = `${Math.max(SCROLL_MIN_HEIGHT, originalContent)}px`;
         const adjusted = Math.max(SCROLL_MIN_HEIGHT, content.offsetHeight + originalDialog - dialogBox.offsetHeight);
         content.style.height = `${adjusted}px`;
@@ -5825,10 +5940,66 @@
             // 放回監看後跑一次網站的更新，補畫暫停期間的標籤修改與尚未畫出的心電圖。
             if (resumed) view.ctx.host.$applyAsync();
         }, { root: content, rootMargin: SCROLL_LIVE_MARGIN });
+        installScrollReuse(view);
         view.timer = setInterval(() => tickScrollView(view), 600);
         tickScrollView(view);
         requestAnimationFrame(() => scrollToCard(view, view.active, 'auto'));
         decorateScrollButtons();
+    }
+    // 選印（selectHR）或重新分頁（pageChanged）時，網站會替目前這頁的每張卡片建立新資料，0.5 秒後再逐張重新處理心電圖；
+    // 分頁時只有 6 張，捲動檢視一頁有數百張，每次選印都會卡住。卡片的時間都沒變、心電圖也都已載入時，
+    // 沿用原本的卡片資料並取消網站的重新處理，只依網站相同的規則（setSelectedPrintEvent）更新選印勾選。
+    // 清空後重建（setScrollPages 未指定 keepCards、rebuildScrollCards）時原本的卡片資料是空的，照常交給網站處理。
+    function installScrollReuse(view) {
+        const wrap = name => {
+            let owner = view.ctx.host;
+            while (owner && !Object.prototype.hasOwnProperty.call(owner, name)) owner = owner.$parent;
+            const original = owner?.[name];
+            if (typeof original !== 'function') return null;
+            const wrapper = function (...args) {
+                const before = scrollView === view ? view.ctx.ed.currentData : null;
+                const result = original.apply(this, args);
+                if (before && scrollView === view) reuseScrollCards(view, before);
+                return result;
+            };
+            owner[name] = wrapper;
+            return () => { if (owner[name] === wrapper) owner[name] = original; };
+        };
+        view.unwrap = ['selectHR', 'pageChanged'].map(wrap).filter(Boolean);
+    }
+    // 與網站 setSelectedPrintEvent 相同：依 af.printDialog.selectedEvents[printedEventType] 判斷是否已選印。
+    function isSitePrintSelected(af, item, printedType) {
+        const list = af.printDialog?.selectedEvents?.[printedType];
+        if (!Array.isArray(list) || !list.length) return false;
+        let time = 0;
+        if (item.dataTmsRange) time = item.dataTmsRange[0];
+        if (item.tagTime) time = item.tagTime;
+        if (item.startTime) time = item.startTime;
+        if (item.dataTime) time = item.dataTime;
+        return list.indexOf(time) >= 0;
+    }
+    function reuseScrollCards(view, before) {
+        const { ed, af, scope } = view.ctx;
+        const next = ed.currentData;
+        const timer = scope?.rooticare?.timer;
+        if (!timer || !Array.isArray(before) || !before.length || !Array.isArray(next) || next === before) return;
+        const pool = new Map();
+        for (const item of before) {
+            if (!Array.isArray(item?.ecgData) || !item.ecgData.length) return; // 還有心電圖沒載入完：交給網站處理
+            const key = String(item.startTime);
+            if (!pool.has(key)) pool.set(key, []);
+            pool.get(key).push(item);
+        }
+        const reused = [];
+        for (const item of next) {
+            const old = pool.get(String(item?.startTime))?.shift();
+            if (!old) return; // 有新的心電圖：交給網站處理
+            reused.push(old);
+        }
+        clearTimeout(timer.ecgWave);
+        const printedType = ed.dscp?.printedEventType;
+        for (const item of reused) item.selectedEvent = isSitePrintSelected(af, item, printedType);
+        ed.currentData = reused;
     }
     // 回到分頁：依原本每頁張數重新分頁，停在目前這張所在的頁。清單已關閉時只還原每頁張數（網站各清單共用分頁設定）。
     function closeScrollView() {
@@ -5836,6 +6007,7 @@
         if (!view) return;
         scrollView = null;
         clearInterval(view.timer);
+        for (const restore of view.unwrap || []) restore();
         view.mapObserver?.disconnect();
         view.liveObserver?.disconnect();
         resumeAllScrollCards(view);
@@ -5868,10 +6040,11 @@
         const ctx = getScrollListContext(view.ctx.dialog);
         if (!ctx || ctx.type !== view.ctx.type || ctx.root !== view.ctx.root) { closeScrollView(); return; }
         view.ctx = ctx;
-        // 網站或排除功能把清單換回多頁（例如選印後重新分頁）時，再合併成一頁。
+        // 網站或排除功能把清單換回多頁（例如選印後重新分頁）時，再合併成一頁；卡片寬度不變，沿用卡片只換資料。
         if (ctx.ed.pageData.length > 1 || Number(ctx.ed.pagination.itemsPerPage) !== SCROLL_ALL_PER_PAGE) {
-            setScrollPages(ctx, [ctx.ed.pageData.flat()], SCROLL_ALL_PER_PAGE, 1);
+            setScrollPages(ctx, [ctx.ed.pageData.flat()], SCROLL_ALL_PER_PAGE, 1, true);
         }
+        alignScrollTop(view);
         // 網頁縮放（視窗寬度改變）時網站依新寬度重畫心電圖，但灰色遮罩（ecgMask）只在卡片建立時畫一次，
         // 留著舊寬度會與心電圖錯位、蓋到右側評分欄：心電圖寬度改變時重建所有卡片。
         const ecgWidth = Number(ctx.af.ecgChart?.width) || 0;
@@ -5880,6 +6053,7 @@
         const signature = scrollModSignature(ctx.af);
         if (signature !== view.modSignature) {
             view.modSignature = signature;
+            noteSavedScrollMods(view, ctx.af.ecgAnno?.modifiedData);
             for (const entry of view.entries.values()) if (entry.status === 'ready') entry.result = scoreScrollItem(view, entry);
         }
         const cards = getScrollCards(view);
@@ -5898,6 +6072,20 @@
         updateScrollMapView(view);
     }
     // 清空後重建所有卡片（網站重新建立卡片並以目前寬度畫心電圖與灰色遮罩），重建後停在原本畫面最上方的那張。
+    // 頁碼列隱藏後，右上角的 VEB／Measure（絕對定位）會壓到第一張卡片：捲動區上緣移到它下方。
+    // 換成單頁後網站才收起頁碼列等列（例如 Longest R-R），捲動區會再往上移，因此每次檢查都重新校正；
+    // keepHeight 時上緣移動多少、捲動區高度就減少多少，整個清單視窗高度不變。
+    function alignScrollTop(view, keepHeight = true) {
+        const content = view.content;
+        const tools = view.ctx.dialog.querySelector('.tool-btns');
+        if (!content || !tools || tools.offsetParent !== content.offsetParent || !tools.offsetHeight) return;
+        const margin = parseFloat(content.style.marginTop) || 0;
+        const next = Math.max(0, Math.round(tools.offsetTop + tools.offsetHeight + 6 - (content.offsetTop - margin)));
+        if (next === margin) return;
+        content.style.marginTop = next ? `${next}px` : '';
+        const height = parseFloat(content.style.height);
+        if (keepHeight && height) content.style.height = `${Math.max(SCROLL_MIN_HEIGHT, height - (next - margin))}px`;
+    }
     function rebuildScrollCards(view) {
         const { ctx, content } = view;
         let anchor = getScrollCards(view).findIndex(card => card.offsetTop + card.offsetHeight > content.scrollTop);
@@ -5905,6 +6093,40 @@
         ctx.host.$apply(() => { ctx.ed.currentData = []; });
         ctx.host.$apply(() => ctx.host.pageChanged(ctx.type));
         requestAnimationFrame(() => scrollToCard(view, anchor, 'auto'));
+    }
+    // 評分用的心電圖標籤是開啟時向伺服器讀取的，再套上未儲存的修改（af.ecgAnno.modifiedData）。
+    // 儲存（或 Discard）後網站清空未儲存的修改，若不重讀，分數會回到修改前的標籤：
+    // 修改清單中消失的項目所在的卡片重新讀取。清空的時機可能早於伺服器寫入完成，因此稍後再讀一次。
+    const SCROLL_REFRESH_DELAYS = [800, 3000]; // 未儲存修改消失後重新讀取的時間（ms）
+    function noteSavedScrollMods(view, modifiedData) {
+        const current = Array.isArray(modifiedData) ? modifiedData.map(item => JSON.stringify(item)) : [];
+        const previous = view.modItems || [];
+        view.modItems = current;
+        const kept = new Set(current);
+        const indexes = previous.filter(item => !kept.has(item))
+            .map(item => { try { return Number(JSON.parse(item)?.[1]); } catch (_) { return NaN; } })
+            .filter(Number.isFinite);
+        if (!indexes.length) return;
+        for (const delay of SCROLL_REFRESH_DELAYS) setTimeout(() => refreshScrollEntries(view, indexes), delay);
+    }
+    async function refreshScrollEntries(view, indexes) {
+        if (scrollView !== view) return;
+        const { af, config } = view.ctx;
+        const targets = [...view.entries.values()].filter(entry => {
+            if (entry.status !== 'ready' || !Array.isArray(entry.data?.ecg)) return false;
+            const from = Number(entry.data.fromIndex) || 0;
+            const to = from + entry.data.ecg.length;
+            return indexes.some(index => index >= from && index <= to);
+        });
+        if (!targets.length) return;
+        await runLimited(targets, QUICK_FETCH_CONCURRENCY, async entry => {
+            if (scrollView !== view) return;
+            try {
+                entry.data = await fetchEventECG(af, entry.time, config.before, config.after);
+                entry.result = scoreScrollItem(view, entry);
+            } catch (_) { /* 讀取失敗時保留原本的資料與分數 */ }
+        });
+        if (scrollView === view) tickScrollView(view);
     }
     async function loadScrollEntries(view) {
         const job = view.loadJob = {};
