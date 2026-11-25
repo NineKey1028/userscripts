@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.57.1
+// @version      1.58.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -80,7 +80,11 @@
  *                          為了讓修改標籤保持流暢，只有畫面附近的卡片會即時更新，遠處的卡片捲到附近時才補上最新的標籤；
  *                          每張標題列加上燈號與分數：綠＝滿分、黃＝有扣分、紅＝零分；
  *                          右側評分欄：扣分的條件逐行列出原因與扣分，通過的條件縮成綠色小標籤（滑過看說明）；
- *                          條件：BPM 速度是否平均（RR 與中位數的差距；Longest R-R 不計最長那段）、標籤是否集中或有一段沒有標籤，
+ *                          條件：BPM 速度是否平均（RR 與中位數的差距）、標籤是否集中或有一段沒有標籤，
+ *                          Longest R-R 改看暫停本身：最長 R-R 是否完整印在白色區段內（找不到 R-R 為零分）、是否位於事件時間、
+ *                          暫停前後各至少 2 顆心搏；
+ *                          Min／Max HR、Max HR sinus 另顯示實際平均 BPM（白色區段 R-R 的平均，與按住 ` 相同），
+ *                          與卡片右上角的清單 HR 相差超出 ±10 BPM 扣 40 分；
  *                          Max HR sinus 另檢查含 V／S 標籤或與 AF 時段重疊（皆為零分）；只看報告印出的白色 8 秒，含未儲存的標籤修改；
  *                          右側 Minimap 為所有燈號（左側深色條／「印」＝選印、★ 或金色圓點＝星號，藍框為畫面中的卡片），
  *                          左側為編號刻度；張數多時燈號維持可辨識的大小，Minimap 跟著清單捲動；點燈號跳到該張，
@@ -5400,7 +5404,7 @@
         maxHR: { name: 'Max HR', before: 0, after: 10, white: [0, 8], printed: af => af.record?.maxAvgHR?.[0] },
         maxSinus: { name: 'Max HR sinus', before: 0, after: 10, white: [0, 8], printed: af => af.record?.maxSinusAvgHR?.[0] },
         // Longest R-R：心電圖為事件前 4 秒至後 6 秒，頭尾各 1 秒為灰色（報告印出中間 8 秒）。
-        rr: { name: 'Longest R-R', before: 4, after: 6, white: [1, 9], printed: af => af.record?.longestRR?.[0], longest: true },
+        rr: { name: 'Longest R-R', before: 4, after: 6, white: [1, 9], printed: af => af.record?.longestRR?.[0] },
     };
     const SCROLL_DIALOG_IDS = ['af-hr-dialog', 'af-rr-dialog'];
     const SCROLL_ALL_PER_PAGE = 100000; // 捲動檢視時的每頁張數（全部放在同一頁）
@@ -5419,8 +5423,13 @@
     // check 的參數：beats 為白色區段（報告印出的 8 秒）內的心搏 [{ offset, type }]（offset 為自心電圖起點的秒數，A 視為 S），
     // all 為整張心電圖的心搏，white 為白色區段 [開始秒, 結束秒]，start 為心電圖起點時間，duration 為長度（秒），另有 config、af、type。
     const SCROLL_CRITERIA = [
-        { id: 'even', name: 'BPM 速度', check: scoreEvenRate },
+        { id: 'even', name: 'BPM 速度', types: ['minHR', 'maxHR', 'maxSinus'], check: scoreEvenRate },
+        // Longest R-R 的目的是找出最長的 R-R（暫停），速度本來就不平均，改看暫停本身是否完整、清楚地印在報告上。
+        { id: 'pause', name: '暫停完整', types: ['rr'], check: scorePauseInWhite },
+        { id: 'pauseAt', name: '暫停位置', types: ['rr'], check: scorePauseAtEvent },
+        { id: 'pauseContext', name: '前後心搏', types: ['rr'], check: scorePauseContext },
         { id: 'spread', name: '標籤分布', types: ['minHR', 'maxHR', 'maxSinus'], check: scoreLabelSpread },
+        { id: 'avgBPM', name: '平均 BPM', types: ['minHR', 'maxHR', 'maxSinus'], check: scoreAverageBPM },
         { id: 'sinusVS', name: 'V／S 標籤', types: ['maxSinus'], check: scoreSinusEctopic },
         { id: 'sinusAF', name: 'AF 時段', types: ['maxSinus'], check: scoreSinusAF },
     ];
@@ -5429,10 +5438,9 @@
         for (let i = 1; i < beats.length; i++) intervals.push(beats[i].offset - beats[i - 1].offset);
         return intervals.filter(value => value > 0);
     }
-    // BPM 是否平均：相鄰 RR 與中位 RR 最多相差的比例。Longest R-R 不計最長的那一段（暫停本身）。
-    function scoreEvenRate({ beats, config }) {
+    // BPM 是否平均：相鄰 RR 與中位 RR 最多相差的比例（Min／Max HR、Max HR sinus）。
+    function scoreEvenRate({ beats }) {
         const intervals = scrollIntervals(beats);
-        if (config.longest && intervals.length) intervals.splice(intervals.indexOf(Math.max(...intervals)), 1);
         if (intervals.length < 2) return { penalty: 50, note: '心搏標籤不足，無法判斷速度' };
         const middle = median(intervals);
         const deviation = Math.max(...intervals.map(value => Math.abs(value - middle) / middle));
@@ -5468,6 +5476,46 @@
         }
         return penalty ? { penalty, note: notes.join('；') } : { penalty: 0, note: '標籤分布平均' };
     }
+    // Longest R-R：整張心電圖（含灰色區段）中最長的 R-R，{ gap, from, to }（秒，自心電圖起點）。
+    const SCROLL_PAUSE_EVENT_SLACK = 1; // 事件時間可比暫停起點早的秒數（清單時間以整秒記錄）
+    const SCROLL_PAUSE_CONTEXT = 2; // 暫停前、後在白色區段內至少要有的心搏數
+    function longestInterval(all) {
+        let best = null;
+        for (let i = 1; i < all.length; i++) {
+            const gap = all[i].offset - all[i - 1].offset;
+            if (gap > 0 && (!best || gap > best.gap)) best = { gap, from: all[i - 1].offset, to: all[i].offset };
+        }
+        return best;
+    }
+    const pauseText = pause => `${Math.round(pause.gap * 1000)} ms（第 ${pause.from.toFixed(1)}–${pause.to.toFixed(1)} 秒）`;
+    // 暫停兩端的心搏都要在報告印出的白色區段內，報告上才看得到完整的暫停；沒有 R-R 即零分。
+    function scorePauseInWhite({ all, white }) {
+        const pause = longestInterval(all);
+        if (!pause) return { penalty: 100, note: '心搏標籤不足，找不到 R-R' };
+        const [from, to] = white;
+        return pause.from >= from && pause.to <= to ? { penalty: 0, note: `最長 R-R ${pauseText(pause)}完整印在白色區段內` }
+            : { penalty: 60, note: `最長 R-R ${pauseText(pause)}超出白色區段，報告上看不到完整的暫停` };
+    }
+    // 清單的事件時間應落在最長的 R-R 上，否則畫面中最長的那段不是清單記錄的暫停（例如標籤被改過）。
+    function scorePauseAtEvent({ all, config }) {
+        const pause = longestInterval(all);
+        if (!pause) return { penalty: 0, note: '找不到 R-R' };
+        const event = config.before;
+        return event >= pause.from - SCROLL_PAUSE_EVENT_SLACK && event <= pause.to
+            ? { penalty: 0, note: '最長 R-R 位於事件時間' }
+            : { penalty: 40, note: `最長 R-R 在第 ${pause.from.toFixed(1)}–${pause.to.toFixed(1)} 秒，不在事件時間（第 ${event} 秒）` };
+    }
+    // 暫停前後各至少 2 顆心搏印在白色區段內，才看得出暫停前後的節律。
+    function scorePauseContext({ all, white }) {
+        const pause = longestInterval(all);
+        if (!pause) return { penalty: 0, note: '找不到 R-R' };
+        const [from, to] = white;
+        const before = all.filter(beat => beat.offset >= from && beat.offset <= pause.from).length;
+        const after = all.filter(beat => beat.offset >= pause.to && beat.offset <= to).length;
+        return before >= SCROLL_PAUSE_CONTEXT && after >= SCROLL_PAUSE_CONTEXT
+            ? { penalty: 0, note: `暫停前 ${before} 顆、後 ${after} 顆` }
+            : { penalty: 20, note: `白色區段內暫停前 ${before} 顆、後 ${after} 顆（各需 ${SCROLL_PAUSE_CONTEXT} 顆）` };
+    }
     // Max HR sinus：整張心電圖有 V 或 S 標籤（含未儲存的修改）即零分。
     function scoreSinusEctopic({ all }) {
         const v = all.filter(beat => beat.type === 'V').length;
@@ -5481,6 +5529,32 @@
         return getAFRanges(af).some(([from, to]) => from < end && to > start)
             ? { penalty: 100, note: '與 AF 時段重疊' } : { penalty: 0, note: '不在 AF 時段' };
     }
+    // 實際平均 BPM：與「變動率自動標註器」按住 ` 的平均相同，取白色區段內每段 R-R 的 BPM（四捨五入成整數，與標籤相同）平均；
+    // R-R 標籤畫在兩顆心搏中間，因此以 R-R 中點是否落在白色區段判斷。
+    const SCROLL_AVG_TOLERANCE = 10; // 與清單 HR 相差在 ±10 BPM 內為允許範圍
+    const SCROLL_AVG_PENALTY = 40; // 超出允許範圍的扣分
+    function scrollAverageBPM(all, white) {
+        const [from, to] = white;
+        const rates = [];
+        for (let i = 1; i < all.length; i++) {
+            const gap = all[i].offset - all[i - 1].offset;
+            const middle = (all[i].offset + all[i - 1].offset) / 2;
+            if (gap > 0 && middle >= from && middle < to) rates.push(Math.round(60 / gap));
+        }
+        return rates.length ? rates.reduce((sum, value) => sum + value, 0) / rates.length : null;
+    }
+    function formatBPM(value) {
+        return value.toFixed(1).replace(/\.0$/, '');
+    }
+    // 實際平均 BPM 與清單（卡片右上角 HR）相差超過 ±10 即扣分；讀不到清單 HR 或沒有 R-R 時不扣分（只顯示）。
+    function scoreAverageBPM({ avgBPM, listedHR }) {
+        if (avgBPM === null) return { penalty: 0, note: '白色區段內沒有 R-R，無法計算平均' };
+        if (!(listedHR > 0)) return { penalty: 0, note: `實際平均 ${formatBPM(avgBPM)} bpm（讀不到清單 HR）` };
+        const diff = avgBPM - listedHR;
+        const note = `實際平均 ${formatBPM(avgBPM)} bpm，清單 ${listedHR} bpm（差 ${diff >= 0 ? '+' : '−'}${formatBPM(Math.abs(diff))}）`;
+        return Math.abs(diff) <= SCROLL_AVG_TOLERANCE ? { penalty: 0, note }
+            : { penalty: SCROLL_AVG_PENALTY, note: `${note}，超出 ±${SCROLL_AVG_TOLERANCE}` };
+    }
     function scoreScrollItem(view, item) {
         const { config, type, af } = view.ctx;
         const start = item.time - config.before;
@@ -5489,7 +5563,9 @@
             .filter(beat => beat.offset >= 0 && beat.offset < duration);
         const [from, to] = config.white;
         const beats = all.filter(beat => beat.offset >= from && beat.offset <= to);
-        const input = { beats, all, white: config.white, start, duration, config, af, type };
+        const avgBPM = scrollAverageBPM(all, config.white);
+        const listedHR = HR_VALUE_LISTS[type] ? getHRValueMap(af, type).get(item.time) ?? null : null;
+        const input = { beats, all, white: config.white, start, duration, config, af, type, avgBPM, listedHR };
         const results = SCROLL_CRITERIA.filter(criterion => !criterion.types || criterion.types.includes(type))
             .map(criterion => {
                 let outcome;
@@ -5497,9 +5573,7 @@
                 return { id: criterion.id, name: criterion.name, penalty: Math.max(0, Number(outcome.penalty) || 0), note: outcome.note || '' };
             });
         const score = Math.max(0, 100 - results.reduce((sum, result) => sum + result.penalty, 0));
-        const intervals = scrollIntervals(beats);
-        const mean = intervals.length ? intervals.reduce((sum, value) => sum + value, 0) / intervals.length : 0;
-        return { score, results, light: score >= 100 ? 'green' : score > 0 ? 'yellow' : 'red', bpm: mean ? Math.round(60 / mean) : null };
+        return { score, results, light: score >= 100 ? 'green' : score > 0 ? 'yellow' : 'red', avgBPM, listedHR };
     }
 
     const scrollStyle = document.createElement('style');
@@ -5518,6 +5592,10 @@
         .ngdialog.rc-scroll-mode .content-blk > .ecg-blk { display:flex !important; align-items:stretch; gap:12px; width:auto !important;
             scroll-margin-top:3px; border-radius:6px; transition:box-shadow .12s; }
         .ngdialog.rc-scroll-mode .content-blk > .ecg-blk > .ecg-wave { flex:0 0 auto; margin:0 !important; }
+        /* 心電圖外框（centerRect 的 1px 外框線）壓在邊界上，外側半條被 svg 與 div.ecgWave（overflow:hidden）裁掉，
+           縮放成某些比例時剩下的半條會被捨去而看不到右側邊框：外框多保留 1px，其餘超出的內容仍照常裁切 */
+        .ngdialog.rc-scroll-mode .content-blk > .ecg-blk .ecgWave { overflow:clip !important; overflow-clip-margin:1px; }
+        .ngdialog.rc-scroll-mode .content-blk > .ecg-blk .ecgWave > svg { overflow:visible; }
         .rc-scroll-side { display:flex; flex:1 1 auto; flex-direction:column; gap:5px; min-width:220px; max-width:560px; margin:4px 4px 4px 0;
             padding:8px 10px; box-sizing:border-box; overflow-y:auto; scrollbar-width:thin; border:1px solid #e1e6d6;
             border-left:4px solid #c4c9cc; border-radius:6px; background:#fafbf7; color:#4a555d; font-size:12px; line-height:1.35; }
@@ -5528,6 +5606,11 @@
         .rc-scroll-side-head .rc-scroll-dot { width:14px; height:14px; }
         .rc-scroll-side-score { font-size:16px; font-weight:700; color:#333; }
         .rc-scroll-side-state { color:#7d8873; font-size:11px; }
+        /* 實際平均 BPM（Min／Max HR、Max HR sinus）：與清單 HR 相差超出允許範圍時轉紅 */
+        .rc-scroll-side-bpm { padding:0 7px; border-radius:9px; background:#eef3e2; color:#4f6b1a; font-size:12px; font-weight:700;
+            line-height:18px; white-space:nowrap; }
+        .rc-scroll-side-bpm:empty { display:none; }
+        .rc-scroll-side-bpm.is-off { background:#fbe3e0; color:#a8321f; }
         /* 扣分的條件：每行一項，依扣分由多到少 */
         .rc-scroll-side-list { margin:0; padding:0; list-style:none; }
         .rc-scroll-side-list li { display:flex; align-items:baseline; gap:6px; padding:1px 0; }
@@ -5789,6 +5872,11 @@
         if (ctx.ed.pageData.length > 1 || Number(ctx.ed.pagination.itemsPerPage) !== SCROLL_ALL_PER_PAGE) {
             setScrollPages(ctx, [ctx.ed.pageData.flat()], SCROLL_ALL_PER_PAGE, 1);
         }
+        // 網頁縮放（視窗寬度改變）時網站依新寬度重畫心電圖，但灰色遮罩（ecgMask）只在卡片建立時畫一次，
+        // 留著舊寬度會與心電圖錯位、蓋到右側評分欄：心電圖寬度改變時重建所有卡片。
+        const ecgWidth = Number(ctx.af.ecgChart?.width) || 0;
+        if (view.ecgWidth && ecgWidth && ecgWidth !== view.ecgWidth) rebuildScrollCards(view);
+        view.ecgWidth = ecgWidth;
         const signature = scrollModSignature(ctx.af);
         if (signature !== view.modSignature) {
             view.modSignature = signature;
@@ -5808,6 +5896,15 @@
         cards.forEach((card, index) => decorateScrollCard(view, card, index));
         updateScrollSummary(view);
         updateScrollMapView(view);
+    }
+    // 清空後重建所有卡片（網站重新建立卡片並以目前寬度畫心電圖與灰色遮罩），重建後停在原本畫面最上方的那張。
+    function rebuildScrollCards(view) {
+        const { ctx, content } = view;
+        let anchor = getScrollCards(view).findIndex(card => card.offsetTop + card.offsetHeight > content.scrollTop);
+        if (anchor < 0) anchor = view.active;
+        ctx.host.$apply(() => { ctx.ed.currentData = []; });
+        ctx.host.$apply(() => ctx.host.pageChanged(ctx.type));
+        requestAnimationFrame(() => scrollToCard(view, anchor, 'auto'));
     }
     async function loadScrollEntries(view) {
         const job = view.loadJob = {};
@@ -5861,19 +5958,30 @@
             side = document.createElement('div');
             side.className = 'rc-scroll-side';
             side.innerHTML = '<div class="rc-scroll-side-head"><span class="rc-scroll-dot"></span><b class="rc-scroll-side-score"></b>'
-                + '<span class="rc-scroll-side-state"></span></div><ul class="rc-scroll-side-list"></ul><div class="rc-scroll-side-pass"></div>';
+                + '<span class="rc-scroll-side-bpm"></span><span class="rc-scroll-side-state"></span></div>'
+                + '<ul class="rc-scroll-side-list"></ul><div class="rc-scroll-side-pass"></div>';
             card.appendChild(side);
         }
         const results = light ? entry.result.results : [];
         const minus = results.filter(result => result.penalty > 0).sort((a, b) => b.penalty - a.penalty);
         const passed = results.filter(result => result.penalty <= 0);
         const state = light ? (minus.length ? `${minus.length} 項扣分・${passed.length} 項通過` : `${passed.length} 項全部通過`) : '';
-        const signature = JSON.stringify([light, score, state, results.map(result => [result.id, result.penalty, result.note])]);
+        // 實際平均 BPM 只在有「平均 BPM」條件的清單（Min／Max HR、Max HR sinus）顯示，後面附上清單 HR。
+        const average = results.find(result => result.id === 'avgBPM');
+        const avgBPM = average ? entry.result.avgBPM : null;
+        const listedHR = entry?.result?.listedHR;
+        const bpmText = avgBPM === null ? '' : `平均 ${formatBPM(avgBPM)} bpm` + (listedHR > 0 ? `（清單 ${listedHR}）` : '');
+        const bpmOff = !!average && average.penalty > 0;
+        const signature = JSON.stringify([light, score, state, bpmText, bpmOff, results.map(result => [result.id, result.penalty, result.note])]);
         if (side.dataset.signature === signature) return;
         side.dataset.signature = signature;
         side.className = 'rc-scroll-side' + (light ? ` is-${light}` : '');
         side.querySelector('.rc-scroll-side-head').className = 'rc-scroll-side-head' + (light ? ` is-${light}` : '');
         side.querySelector('.rc-scroll-side-score').textContent = score;
+        const bpm = side.querySelector('.rc-scroll-side-bpm');
+        bpm.textContent = bpmText;
+        bpm.className = 'rc-scroll-side-bpm' + (bpmOff ? ' is-off' : '');
+        bpm.title = average ? `${average.note}（允許範圍 ±${SCROLL_AVG_TOLERANCE} BPM）` : '';
         side.querySelector('.rc-scroll-side-state').textContent = state;
         const list = side.querySelector('.rc-scroll-side-list');
         list.textContent = '';
