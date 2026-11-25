@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.56.2
+// @version      1.57.0
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -74,6 +74,18 @@
  *                          備註與選印一併移除；再按一次可加回星星、備註與選印，按 Save 才儲存（編輯模式）
  *   時間輸入框              W／↑ 加 2 秒、S／↓ 減 2 秒，可按住連續調整；聚焦時顯示提示 3 秒
  *   HR 清單時間框           貼上或修改時間後，自動以該心電圖白色區段的平均 BPM 填入 HR 欄
+ *   Min／Max HR、Max HR sinus、Longest R-R 清單  標題列「☰ 捲動檢視」：清單改為一頁、一欄，所有心電圖由上往下連續排列
+ *                          （含排除後的結果）；卡片放在與原本清單同高的捲動區內，標題列（Salva 等按鈕）與工具列不會捲走；
+ *                          卡片與網站原本相同（心電圖維持原本大小，格線為正方形），可照常修改標籤、選印、加星號、點時間開啟心電圖視窗；
+ *                          為了讓修改標籤保持流暢，只有畫面附近的卡片會即時更新，遠處的卡片捲到附近時才補上最新的標籤；
+ *                          每張標題列加上燈號與分數：綠＝滿分、黃＝有扣分、紅＝零分；
+ *                          右側評分欄：扣分的條件逐行列出原因與扣分，通過的條件縮成綠色小標籤（滑過看說明）；
+ *                          條件：BPM 速度是否平均（RR 與中位數的差距；Longest R-R 不計最長那段）、標籤是否集中或有一段沒有標籤，
+ *                          Max HR sinus 另檢查含 V／S 標籤或與 AF 時段重疊（皆為零分）；只看報告印出的白色 8 秒，含未儲存的標籤修改；
+ *                          右側 Minimap 為所有燈號（左側深色條／「印」＝選印、★ 或金色圓點＝星號，藍框為畫面中的卡片），
+ *                          左側為編號刻度；張數多時燈號維持可辨識的大小，Minimap 跟著清單捲動；點燈號跳到該張，
+ *                          點空白處或拖曳可捲動，在 Minimap 上滾動滾輪即捲動清單；「返回分頁」或 Esc 回到原本的分頁，停在目前這張所在的頁。
+ *                          按鍵：↑ ↓ 上一張、下一張（藍框標示目前這張，點卡片也可選），P 選印，F 星號，Enter 開啟心電圖視窗，G 下一個綠燈
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
  *   V / S 事件清單          「⚡ 快速選印」依規則補足選印（時段分散、相隔 1 分鐘以上）；
  *                          按「選印 N 張」開啟選印清單：上方為心電圖視窗（可改標籤並 Save），
@@ -5376,6 +5388,753 @@
                 : '橘色強制選印由網站決定，無法在此取消或替換';
         }
     }
+
+    // ── 捲動檢視：Min／Max HR、Max HR sinus、Longest R-R 清單 ──
+    // 清單標題列加入「☰ 捲動檢視」：把網站清單改成一頁（所有心電圖）、一欄，由第一張起往下連續排列。
+    // 卡片仍是網站自己畫的，心電圖維持原本的寬高（格線為正方形，是判讀依據，不可拉寬），標籤編輯、選印與星號勾選框都與原本相同；
+    // 標題列加上燈號與分數，右側多出的空間放評分欄（各條件的通過／扣分明細）；
+    // 每張依 SCROLL_CRITERIA 打分數（綠：滿分、黃：有扣分、紅：零分），右側 Minimap 列出所有燈號，點一下跳到該張。
+    // 清單內容取自目前的分頁資料（eventDialog.pageData），「排除 ±1 分」等排除後的結果也一併反映。
+    const SCROLL_VIEW_TYPES = {
+        minHR: { name: 'Min HR', before: 0, after: 10, white: [0, 8], printed: af => af.record?.minAvgHR?.[0] },
+        maxHR: { name: 'Max HR', before: 0, after: 10, white: [0, 8], printed: af => af.record?.maxAvgHR?.[0] },
+        maxSinus: { name: 'Max HR sinus', before: 0, after: 10, white: [0, 8], printed: af => af.record?.maxSinusAvgHR?.[0] },
+        // Longest R-R：心電圖為事件前 4 秒至後 6 秒，頭尾各 1 秒為灰色（報告印出中間 8 秒）。
+        rr: { name: 'Longest R-R', before: 4, after: 6, white: [1, 9], printed: af => af.record?.longestRR?.[0], longest: true },
+    };
+    const SCROLL_DIALOG_IDS = ['af-hr-dialog', 'af-rr-dialog'];
+    const SCROLL_ALL_PER_PAGE = 100000; // 捲動檢視時的每頁張數（全部放在同一頁）
+    const SCROLL_MIN_HEIGHT = 320; // 卡片捲動區的最小高度（原本清單很短時）
+    const SCROLL_LIVE_MARGIN = '1200px 0px'; // 捲動區上下這個範圍內的卡片才參與網站的更新（其餘暫停，見 suspendScrollCard）
+    const SCROLL_TOP_OFFSET = 48; // Minimap 面板的上緣（清單標題列下方）
+    const SCROLL_MAP_WIDTH = 88; // 右側 Minimap 面板寬度
+    const SCROLL_MAP_CELL_MAX = 22; // Minimap 每個燈號（含間距）最高的像素
+    const SCROLL_MAP_CELL_MIN = 8; // 最低的像素（燈號 6px＋間距 2px）；放不下時 Minimap 跟著清單捲動
+    const SCROLL_MAP_GUTTER = 22; // 左側編號刻度的寬度
+    const SCROLL_MAP_TICK_STEPS = [5, 10, 20, 50, 100]; // 刻度間隔的候選（張），取標示間距至少 28px 的最小者
+    const SCROLL_EVEN_STEPS = [[0.15, 0], [0.3, 20], [0.5, 40]]; // RR 與中位數最多相差的比例上限 → 扣分；超過最後一級扣 60
+    const SCROLL_SPREAD_BINS = 4; // 標籤分布：白色區段平均分成幾段
+    // 評分條件：check 回傳 { penalty: 扣分（0～100）, note: 說明 }；總分 = 100 − 扣分合計（最低 0）。
+    // 新增條件時加入此陣列即可；types 省略表示所有清單都適用。
+    // check 的參數：beats 為白色區段（報告印出的 8 秒）內的心搏 [{ offset, type }]（offset 為自心電圖起點的秒數，A 視為 S），
+    // all 為整張心電圖的心搏，white 為白色區段 [開始秒, 結束秒]，start 為心電圖起點時間，duration 為長度（秒），另有 config、af、type。
+    const SCROLL_CRITERIA = [
+        { id: 'even', name: 'BPM 速度', check: scoreEvenRate },
+        { id: 'spread', name: '標籤分布', types: ['minHR', 'maxHR', 'maxSinus'], check: scoreLabelSpread },
+        { id: 'sinusVS', name: 'V／S 標籤', types: ['maxSinus'], check: scoreSinusEctopic },
+        { id: 'sinusAF', name: 'AF 時段', types: ['maxSinus'], check: scoreSinusAF },
+    ];
+    function scrollIntervals(beats) {
+        const intervals = [];
+        for (let i = 1; i < beats.length; i++) intervals.push(beats[i].offset - beats[i - 1].offset);
+        return intervals.filter(value => value > 0);
+    }
+    // BPM 是否平均：相鄰 RR 與中位 RR 最多相差的比例。Longest R-R 不計最長的那一段（暫停本身）。
+    function scoreEvenRate({ beats, config }) {
+        const intervals = scrollIntervals(beats);
+        if (config.longest && intervals.length) intervals.splice(intervals.indexOf(Math.max(...intervals)), 1);
+        if (intervals.length < 2) return { penalty: 50, note: '心搏標籤不足，無法判斷速度' };
+        const middle = median(intervals);
+        const deviation = Math.max(...intervals.map(value => Math.abs(value - middle) / middle));
+        const rates = intervals.map(value => 60 / value);
+        const range = `${Math.round(Math.min(...rates))}–${Math.round(Math.max(...rates))} bpm`;
+        const step = SCROLL_EVEN_STEPS.find(([limit]) => deviation <= limit);
+        const penalty = step ? step[1] : 60;
+        return penalty ? { penalty, note: `速度不平均：RR 最多相差 ${Math.round(deviation * 100)}%（${range}）` }
+            : { penalty: 0, note: `速度平均（${range}）` };
+    }
+    // 標籤是否集中：白色區段內有一段超過 2 倍中位 RR 沒有標籤（可能漏標或雜訊），或某一段的標籤數超過平均的 2 倍。
+    function scoreLabelSpread({ beats, white }) {
+        const [from, to] = white;
+        if (beats.length < 3) return { penalty: 50, note: '白色區段內的心搏標籤少於 3 顆' };
+        const at = value => (value - from).toFixed(1);
+        const middle = median(scrollIntervals(beats)) || 1;
+        const gaps = [[from, beats[0].offset], ...beats.slice(1).map((beat, i) => [beats[i].offset, beat.offset]),
+            [beats[beats.length - 1].offset, to]];
+        const widest = gaps.reduce((best, gap) => gap[1] - gap[0] > best[1] - best[0] ? gap : best);
+        const notes = [];
+        let penalty = 0;
+        if (widest[1] - widest[0] > Math.max(2 * middle, 1.2)) {
+            penalty += 40;
+            notes.push(`第 ${at(widest[0])}–${at(widest[1])} 秒沒有標籤`);
+        }
+        const bins = new Array(SCROLL_SPREAD_BINS).fill(0);
+        const size = (to - from) / bins.length;
+        for (const beat of beats) bins[Math.min(bins.length - 1, Math.max(0, Math.floor((beat.offset - from) / size)))]++;
+        const peak = bins.indexOf(Math.max(...bins));
+        if (beats.length >= bins.length && bins[peak] >= 2 * beats.length / bins.length) {
+            penalty += 30;
+            notes.push(`標籤集中在第 ${at(from + peak * size)}–${at(from + (peak + 1) * size)} 秒`);
+        }
+        return penalty ? { penalty, note: notes.join('；') } : { penalty: 0, note: '標籤分布平均' };
+    }
+    // Max HR sinus：整張心電圖有 V 或 S 標籤（含未儲存的修改）即零分。
+    function scoreSinusEctopic({ all }) {
+        const v = all.filter(beat => beat.type === 'V').length;
+        const s = all.filter(beat => beat.type === 'S').length;
+        if (!v && !s) return { penalty: 0, note: '沒有 V／S 標籤' };
+        return { penalty: 100, note: `含 ${[v ? `V×${v}` : '', s ? `S×${s}` : ''].filter(Boolean).join(' ')}` };
+    }
+    // Max HR sinus：與 AF 時段（含未儲存的 AF 編輯）重疊即零分。
+    function scoreSinusAF({ af, start, duration }) {
+        const end = start + duration;
+        return getAFRanges(af).some(([from, to]) => from < end && to > start)
+            ? { penalty: 100, note: '與 AF 時段重疊' } : { penalty: 0, note: '不在 AF 時段' };
+    }
+    function scoreScrollItem(view, item) {
+        const { config, type, af } = view.ctx;
+        const start = item.time - config.before;
+        const duration = config.before + config.after;
+        const all = effectiveEventBeats(item.data, af.ecgAnno?.modifiedData, start)
+            .filter(beat => beat.offset >= 0 && beat.offset < duration);
+        const [from, to] = config.white;
+        const beats = all.filter(beat => beat.offset >= from && beat.offset <= to);
+        const input = { beats, all, white: config.white, start, duration, config, af, type };
+        const results = SCROLL_CRITERIA.filter(criterion => !criterion.types || criterion.types.includes(type))
+            .map(criterion => {
+                let outcome;
+                try { outcome = criterion.check(input) || { penalty: 0 }; } catch (_) { outcome = { penalty: 0, note: '無法判斷' }; }
+                return { id: criterion.id, name: criterion.name, penalty: Math.max(0, Number(outcome.penalty) || 0), note: outcome.note || '' };
+            });
+        const score = Math.max(0, 100 - results.reduce((sum, result) => sum + result.penalty, 0));
+        const intervals = scrollIntervals(beats);
+        const mean = intervals.length ? intervals.reduce((sum, value) => sum + value, 0) / intervals.length : 0;
+        return { score, results, light: score >= 100 ? 'green' : score > 0 ? 'yellow' : 'red', bpm: mean ? Math.round(60 / mean) : null };
+    }
+
+    const scrollStyle = document.createElement('style');
+    scrollStyle.textContent = `
+        .rc-scroll-open { display:inline-flex; align-items:center; gap:5px; height:22px; margin:0 6px; padding:0 10px; border:1px solid #8fb43a;
+            border-radius:11px; background:#f4f9e8; color:#4f6b1a; font-family:inherit; font-weight:600; font-size:12px; line-height:20px;
+            cursor:pointer; vertical-align:middle; box-shadow:0 1px 3px rgba(0,0,0,.12); transition:background .15s, color .15s; }
+        .rc-scroll-open:hover, .rc-scroll-open.is-on { background:#5b7d1a; border-color:#5b7d1a; color:#fff; }
+        /* 捲動檢視：網站清單改為單頁、一欄，卡片放在固定高度的捲動區內（高度與原本的清單相同），標題列與工具列不會捲走；
+           Minimap 固定在畫面右側，清單右邊留出它的寬度。頁碼列、頁數拉條與選印圓點不需要；捲動區上緣移到 VEB／Misura 下方（見 openScrollView）；
+           捲軸位置預先保留，心電圖寬度不會因出現捲軸而被切掉 */
+        .ngdialog.rc-scroll-mode .ngdialog-content { padding-right:${SCROLL_MAP_WIDTH + 16}px !important; box-sizing:border-box; }
+        .ngdialog.rc-scroll-mode .content-blk { box-sizing:border-box; padding:3px 4px 0 3px;
+            overflow-x:hidden !important; overflow-y:auto !important; scrollbar-gutter:stable; overscroll-behavior:contain; border-radius:6px;
+            box-shadow:inset 0 0 0 1px #e1e6d6; scrollbar-width:thin; scrollbar-color:#8fb43a #eef3e2; }
+        .ngdialog.rc-scroll-mode .content-blk > .ecg-blk { display:flex !important; align-items:stretch; gap:12px; width:auto !important;
+            scroll-margin-top:3px; border-radius:6px; transition:box-shadow .12s; }
+        .ngdialog.rc-scroll-mode .content-blk > .ecg-blk > .ecg-wave { flex:0 0 auto; margin:0 !important; }
+        .rc-scroll-side { display:flex; flex:1 1 auto; flex-direction:column; gap:5px; min-width:220px; max-width:560px; margin:4px 4px 4px 0;
+            padding:8px 10px; box-sizing:border-box; overflow-y:auto; scrollbar-width:thin; border:1px solid #e1e6d6;
+            border-left:4px solid #c4c9cc; border-radius:6px; background:#fafbf7; color:#4a555d; font-size:12px; line-height:1.35; }
+        .rc-scroll-side.is-green { border-left-color:#3c9a5f; }
+        .rc-scroll-side.is-yellow { border-left-color:#e0a526; }
+        .rc-scroll-side.is-red { border-left-color:#c0392b; }
+        .rc-scroll-side-head { display:flex; align-items:center; gap:8px; }
+        .rc-scroll-side-head .rc-scroll-dot { width:14px; height:14px; }
+        .rc-scroll-side-score { font-size:16px; font-weight:700; color:#333; }
+        .rc-scroll-side-state { color:#7d8873; font-size:11px; }
+        /* 扣分的條件：每行一項，依扣分由多到少 */
+        .rc-scroll-side-list { margin:0; padding:0; list-style:none; }
+        .rc-scroll-side-list li { display:flex; align-items:baseline; gap:6px; padding:1px 0; }
+        .rc-scroll-side-list .rc-side-icon { flex:0 0 12px; font-weight:700; text-align:center; }
+        .rc-scroll-side-list .rc-side-name { flex:0 0 auto; font-weight:600; }
+        .rc-scroll-side-list .rc-side-note { flex:1 1 auto; min-width:0; overflow:hidden; color:#6b7780; text-overflow:ellipsis; white-space:nowrap; }
+        .rc-scroll-side-list .rc-side-penalty { flex:0 0 auto; font-weight:700; }
+        .rc-scroll-side-list li.is-minus .rc-side-icon, .rc-scroll-side-list li.is-minus .rc-side-penalty { color:#b07d0e; }
+        .rc-scroll-side-list li.is-zero .rc-side-icon, .rc-scroll-side-list li.is-zero .rc-side-penalty { color:#c0392b; }
+        /* 通過的條件：縮成一排可換行的小標籤，條件增加時也不佔空間（滑過看說明） */
+        .rc-scroll-side-pass { display:flex; flex-wrap:wrap; gap:4px; }
+        .rc-scroll-side-pass span { padding:0 7px; border-radius:9px; background:#e3f3e8; color:#2d7a4a; font-size:11px; font-weight:600;
+            line-height:18px; white-space:nowrap; cursor:default; }
+        .ngdialog.rc-scroll-mode .content-blk > .ecg-blk.rc-scroll-active { box-shadow:0 0 0 3px rgba(91,125,26,.55); }
+        .ngdialog.rc-scroll-mode :is(pagination-event-bar, ul.pagination, .pagination-range, .rc-print-jumps, .rc-print-actions) { display:none !important; }
+        .rc-scroll-badge { display:inline-flex; align-items:center; gap:5px; max-width:52%; margin:0 8px; padding:0 8px 0 4px; height:18px;
+            border-radius:9px; background:#eef0f1; color:#6b7780; font-size:11px; font-weight:600; line-height:18px; vertical-align:middle;
+            white-space:nowrap; overflow:hidden; }
+        .rc-scroll-badge.is-green { background:#e3f3e8; color:#2d7a4a; }
+        .rc-scroll-badge.is-yellow { background:#fbf0d4; color:#8a6410; }
+        .rc-scroll-badge.is-red { background:#fbe3e0; color:#a8321f; }
+        .rc-scroll-dot { display:inline-block; flex:0 0 auto; width:12px; height:12px; border-radius:50%; background:#c4c9cc;
+            box-shadow:inset 0 0 0 1px rgba(0,0,0,.12); }
+        .is-green > .rc-scroll-dot, .rc-scroll-dot.is-green { background:#3c9a5f; }
+        .is-yellow > .rc-scroll-dot, .rc-scroll-dot.is-yellow { background:#e0a526; }
+        .is-red > .rc-scroll-dot, .rc-scroll-dot.is-red { background:#c0392b; }
+        .rc-scroll-panel { position:fixed; top:${SCROLL_TOP_OFFSET}px; right:10px; bottom:10px; z-index:10001; width:${SCROLL_MAP_WIDTH}px;
+            display:flex; flex-direction:column; gap:6px; padding:6px; box-sizing:border-box; border-radius:8px; background:#f3f5ee;
+            box-shadow:0 2px 10px rgba(0,0,0,.22); font-size:11px; color:#4a555d; }
+        .rc-scroll-counts { display:flex; flex-direction:column; gap:2px; font-weight:600; }
+        .rc-scroll-counts > span { display:flex; align-items:center; gap:5px; }
+        .rc-scroll-next, .rc-scroll-exit { height:22px; padding:0; border:1px solid #8fb43a; border-radius:11px; background:#fff; color:#4f6b1a;
+            font-family:inherit; font-size:11px; font-weight:600; cursor:pointer; }
+        .rc-scroll-next:hover, .rc-scroll-exit:hover { background:#5b7d1a; border-color:#5b7d1a; color:#fff; }
+        .rc-scroll-map { position:relative; flex:1 1 auto; min-height:0; overflow:hidden; border-radius:5px; background:#e6eadf;
+            box-shadow:inset 0 0 0 1px #d3d9c6; cursor:pointer; user-select:none; touch-action:none; }
+        .rc-scroll-map-track { position:absolute; top:0; left:0; right:0; will-change:transform; }
+        .rc-scroll-map-tick { position:absolute; left:0; width:${SCROLL_MAP_GUTTER - 4}px; height:0; border-top:1px solid #c6cdb8;
+            pointer-events:none; }
+        .rc-scroll-map-tick span { position:absolute; right:0; top:-6px; padding-right:1px; background:#e6eadf; color:#7d8873;
+            font-size:9px; font-weight:600; line-height:11px; }
+        .rc-scroll-map-cell { position:absolute; left:${SCROLL_MAP_GUTTER}px; right:4px; box-sizing:border-box; display:flex; align-items:center;
+            justify-content:space-between; padding:0 3px; border-radius:3px; background:#c4c9cc; color:#fff; font-size:9px; font-weight:700;
+            line-height:1; overflow:hidden; transition:filter .1s; }
+        .rc-scroll-map-cell.is-green { background:#3c9a5f; }
+        .rc-scroll-map-cell.is-yellow { background:#e0a526; }
+        .rc-scroll-map-cell.is-red { background:#c0392b; }
+        .rc-scroll-map-cell.is-printed { box-shadow:inset 3px 0 0 #1f3d05; }
+        .rc-scroll-map-cell .rc-map-star { color:#ffe066; text-shadow:0 0 2px rgba(0,0,0,.6); }
+        /* 燈號太小放不下文字時，星號改為右側的金色圓點 */
+        .rc-scroll-map-cell.is-small.is-starred::after { content:''; position:absolute; top:50%; right:2px; width:4px; height:4px; margin-top:-2px;
+            border-radius:50%; background:#ffe066; box-shadow:0 0 0 1px rgba(0,0,0,.35); }
+        .rc-scroll-map-cell.is-active { left:${SCROLL_MAP_GUTTER - 3}px; right:1px; outline:2px solid #1a3fb8; outline-offset:0; z-index:1; }
+        .rc-scroll-map-cell:hover { filter:brightness(1.15); }
+        .rc-scroll-map-view { position:absolute; left:${SCROLL_MAP_GUTTER - 4}px; right:0; z-index:2; box-sizing:border-box;
+            border:1px solid rgba(26,63,184,.6); border-radius:4px; background:rgba(26,63,184,.10); pointer-events:none; }
+    `;
+    document.head.appendChild(scrollStyle);
+
+    // 捲動檢視的狀態：ctx 為清單、saved 為進入前的分頁設定；items 依網站卡片順序（currentData 的索引），
+    // 同一時間的心電圖資料與評分共用 entries（以時間為鍵）。
+    let scrollView = null;
+    function getScrollListContext(dialog = null) {
+        if (!window.angular) return null;
+        const dialogs = dialog ? [dialog] : SCROLL_DIALOG_IDS.map(id => document.getElementById(id));
+        for (const element of dialogs) {
+            if (!isHRDialogShown(element)) continue;
+            let scope;
+            try { scope = window.angular.element(element).scope(); } catch (_) { continue; }
+            const af = scope?.af;
+            const ed = af?.eventDialog;
+            const type = ed?.dscp?.type;
+            const config = SCROLL_VIEW_TYPES[type];
+            if (!config || !Array.isArray(ed.pageData)) continue;
+            let host = scope;
+            while (host && !Object.prototype.hasOwnProperty.call(host, 'pageChanged')) host = host.$parent;
+            if (typeof host?.pageChanged !== 'function') continue;
+            return { dialog: element, root: element.closest('.ngdialog'), scope, af, ed, type, config, host };
+        }
+        return null;
+    }
+    function scrollModSignature(af) {
+        const list = af.ecgAnno?.modifiedData;
+        const count = Array.isArray(list) ? list.length : 0;
+        return `${count}|${count ? JSON.stringify(list[count - 1]) : ''}|${JSON.stringify(getAFRanges(af))}`;
+    }
+    // 效能：網站每張卡片的心電圖都監看同一份未儲存修改（af.ecgAnno.modifiedData），改一個標籤時所有卡片都會重畫標籤層；
+    // 分頁時只有 6 張，捲動檢視時有數百張，每次修改會卡住數秒。因此只讓捲動區附近的卡片參與網站的更新（Angular digest）：
+    // 離開這個範圍的卡片把整個 scope 樹的 $$watchers 暫時移開，回到範圍內時放回，網站隨即補畫一次最新的標籤。
+    function walkScope(scope, visit) {
+        visit(scope);
+        for (let child = scope.$$childHead; child; child = child.$$nextSibling) walkScope(child, visit);
+    }
+    function suspendScrollCard(card) {
+        const scope = window.angular.element(card).scope();
+        if (!scope || scope.$$rcSuspended) return false;
+        walkScope(scope, node => {
+            if (node.$$rcSuspended) return;
+            node.$$rcSuspended = node.$$watchers || [];
+            node.$$watchers = [];
+        });
+        return true;
+    }
+    function resumeScrollCard(card) {
+        const scope = window.angular.element(card).scope();
+        if (!scope?.$$rcSuspended) return false;
+        walkScope(scope, node => {
+            const saved = node.$$rcSuspended;
+            if (!saved) return;
+            // 暫停期間新加入的監看（通常沒有）放在前面，與 Angular 新增監看的順序相同。
+            if (node.$$watchers?.length) saved.unshift(...node.$$watchers);
+            node.$$watchers = saved;
+            delete node.$$rcSuspended;
+        });
+        return true;
+    }
+    function resumeAllScrollCards(view) {
+        for (const card of getScrollCards(view)) resumeScrollCard(card);
+    }
+    function observeScrollCards(view, cards) {
+        for (const card of cards) {
+            if (view.observedCards.has(card)) continue;
+            view.observedCards.add(card);
+            view.liveObserver.observe(card);
+        }
+    }
+    function getScrollCards(view) {
+        return [...view.ctx.dialog.querySelectorAll(HR_CARD_SELECTOR)];
+    }
+    function scrollCardData(card) {
+        try { return window.angular.element(card).scope()?.currentData || null; } catch (_) { return null; }
+    }
+    // 換頁：分頁資料 pages、目前頁碼 page，交給網站的 pageChanged 重新建立卡片並讀取心電圖。
+    // 「排除 ±1 分」等排除中的清單（hrExclusion.pages）一併換成新的分頁，避免被當成網站換回完整清單而重新套用。
+    // 先清空卡片再換頁：網站以 $index 沿用卡片，灰色遮罩（ecgMask）只在卡片建立時依寬度畫一次，沿用的卡片會留著舊寬度。
+    function setScrollPages(ctx, pages, perPage, page) {
+        const { ed, host, type } = ctx;
+        const replaced = hrExclusion.pages === ed.pageData;
+        // 分兩次套用：網站的頁碼元件在總張數改變的同一次更新中，會以舊的總頁數把頁碼夾回 1，因此先換總張數、再設頁碼。
+        host.$apply(() => {
+            ed.currentData = [];
+            ed.pageData = pages;
+            ed.pagination.itemsPerPage = perPage;
+            ed.pagination.totalItems = pages.reduce((sum, list) => sum + list.length, 0);
+        });
+        host.$apply(() => {
+            ed.pagination.currentPage = page;
+            ed.indexAdjust = (page - 1) * perPage;
+            host.pageChanged(type);
+        });
+        if (replaced) hrExclusion.pages = ed.pageData;
+    }
+    function openScrollView(ctx) {
+        if (scrollView) closeScrollView();
+        if (!ctx.root) return;
+        const pagination = ctx.ed.pagination;
+        const flat = ctx.ed.pageData.flat();
+        const perPage = Number(pagination.itemsPerPage) || 6;
+        const view = { ctx, saved: { perPage }, entries: new Map(), active: Math.max(0, (Number(pagination.currentPage) - 1) * perPage),
+            panel: null, map: null, mapView: null, cells: [], count: 0, modSignature: scrollModSignature(ctx.af), timer: null, loadJob: null };
+        scrollView = view;
+        // 捲動區高度：使整個清單視窗與原本分頁時一樣高（先量原本的高度，改版後再補上差距）。
+        const content = view.content = ctx.dialog.querySelector('.content-blk');
+        if (!content) { scrollView = null; return; }
+        const dialogBox = ctx.root.querySelector('.ngdialog-content') || ctx.dialog;
+        const originalDialog = dialogBox.offsetHeight;
+        const originalContent = content.offsetHeight;
+        // 先改成一欄再換頁：網站依卡片當時的寬度畫心電圖。
+        ctx.root.classList.add('rc-scroll-mode');
+        // 頁碼列隱藏後，右上角的 VEB／Misura（絕對定位）會壓到第一張卡片：捲動區上緣移到它下方。
+        const tools = ctx.dialog.querySelector('.tool-btns');
+        if (tools && tools.offsetParent === content.offsetParent) {
+            const gap = tools.offsetTop + tools.offsetHeight + 6 - content.offsetTop;
+            if (gap > 0) content.style.marginTop = `${gap}px`;
+        }
+        content.style.height = `${Math.max(SCROLL_MIN_HEIGHT, originalContent)}px`;
+        const adjusted = Math.max(SCROLL_MIN_HEIGHT, content.offsetHeight + originalDialog - dialogBox.offsetHeight);
+        content.style.height = `${adjusted}px`;
+        ctx.root.scrollTop = 0;
+        setScrollPages(ctx, [flat], SCROLL_ALL_PER_PAGE, 1);
+        const panel = view.panel = document.createElement('div');
+        panel.className = 'rc-scroll-panel';
+        panel.innerHTML = '<div class="rc-scroll-counts"></div>'
+            + '<button type="button" class="rc-scroll-next" title="跳到下一張綠燈（G）">▼ 綠燈</button>'
+            + '<div class="rc-scroll-map" title="點燈號跳到該張心電圖；點空白處或拖曳可捲動"></div>'
+            + '<button type="button" class="rc-scroll-exit" title="回到分頁顯示（Esc）">返回分頁</button>';
+        view.map = panel.querySelector('.rc-scroll-map');
+        panel.querySelector('.rc-scroll-next').addEventListener('click', () => jumpNextGreen(view));
+        panel.querySelector('.rc-scroll-exit').addEventListener('click', () => closeScrollView());
+        installScrollMapDrag(view);
+        ctx.root.appendChild(panel);
+        view.onScroll = () => updateScrollMapView(view);
+        // Minimap 的高度會隨上方計數文字變動，大小改變時重新排列燈號，避免超出面板。
+        view.mapObserver = new ResizeObserver(() => layoutScrollMap(view));
+        view.mapObserver.observe(view.map);
+        view.onResize = () => layoutScrollMap(view);
+        content.addEventListener('scroll', view.onScroll, { passive: true });
+        window.addEventListener('resize', view.onResize);
+        // 滑鼠按在卡片上即設為目前這張（P、F、Enter 作用的對象）。
+        view.onPointer = event => {
+            const card = event.target.closest?.(HR_CARD_SELECTOR);
+            if (card) setScrollActive(view, getScrollCards(view).indexOf(card), false);
+        };
+        ctx.root.addEventListener('mousedown', view.onPointer, true);
+        view.observedCards = new WeakSet();
+        view.liveObserver = new IntersectionObserver(entries => {
+            let resumed = false;
+            for (const entry of entries) {
+                if (entry.isIntersecting) resumed = resumeScrollCard(entry.target) || resumed;
+                else suspendScrollCard(entry.target);
+            }
+            // 放回監看後跑一次網站的更新，補畫暫停期間的標籤修改與尚未畫出的心電圖。
+            if (resumed) view.ctx.host.$applyAsync();
+        }, { root: content, rootMargin: SCROLL_LIVE_MARGIN });
+        view.timer = setInterval(() => tickScrollView(view), 600);
+        tickScrollView(view);
+        requestAnimationFrame(() => scrollToCard(view, view.active, 'auto'));
+        decorateScrollButtons();
+    }
+    // 回到分頁：依原本每頁張數重新分頁，停在目前這張所在的頁。清單已關閉時只還原每頁張數（網站各清單共用分頁設定）。
+    function closeScrollView() {
+        const view = scrollView;
+        if (!view) return;
+        scrollView = null;
+        clearInterval(view.timer);
+        view.mapObserver?.disconnect();
+        view.liveObserver?.disconnect();
+        resumeAllScrollCards(view);
+        const { ctx } = view;
+        view.content.removeEventListener('scroll', view.onScroll);
+        view.content.style.height = '';
+        view.content.style.marginTop = '';
+        ctx.root.removeEventListener('mousedown', view.onPointer, true);
+        window.removeEventListener('resize', view.onResize);
+        view.panel.remove();
+        ctx.root.classList.remove('rc-scroll-mode');
+        for (const node of ctx.dialog.querySelectorAll('.rc-scroll-badge, .rc-scroll-side')) node.remove();
+        for (const node of ctx.dialog.querySelectorAll('.rc-scroll-active')) node.classList.remove('rc-scroll-active');
+        const perPage = view.saved.perPage;
+        if (isHRDialogShown(ctx.dialog) && ctx.ed.dscp?.type === ctx.type && Array.isArray(ctx.ed.pageData)) {
+            const flat = ctx.ed.pageData.flat();
+            const pages = [];
+            for (let i = 0; i < flat.length; i += perPage) pages.push(flat.slice(i, i + perPage));
+            const page = Math.min(Math.max(1, Math.floor(view.active / perPage) + 1), Math.max(1, pages.length));
+            setScrollPages(ctx, pages.length ? pages : [[]], perPage, page);
+            ctx.root.scrollTop = 0;
+        } else if (Number(ctx.ed.pagination?.itemsPerPage) === SCROLL_ALL_PER_PAGE) {
+            ctx.ed.pagination.itemsPerPage = perPage;
+        }
+        decorateScrollButtons();
+    }
+    // 依網站目前的卡片更新：讀取並評分每個時間的心電圖、卡片上的燈號與 Minimap。
+    function tickScrollView(view) {
+        if (scrollView !== view) return;
+        const ctx = getScrollListContext(view.ctx.dialog);
+        if (!ctx || ctx.type !== view.ctx.type || ctx.root !== view.ctx.root) { closeScrollView(); return; }
+        view.ctx = ctx;
+        // 網站或排除功能把清單換回多頁（例如選印後重新分頁）時，再合併成一頁。
+        if (ctx.ed.pageData.length > 1 || Number(ctx.ed.pagination.itemsPerPage) !== SCROLL_ALL_PER_PAGE) {
+            setScrollPages(ctx, [ctx.ed.pageData.flat()], SCROLL_ALL_PER_PAGE, 1);
+        }
+        const signature = scrollModSignature(ctx.af);
+        if (signature !== view.modSignature) {
+            view.modSignature = signature;
+            for (const entry of view.entries.values()) if (entry.status === 'ready') entry.result = scoreScrollItem(view, entry);
+        }
+        const cards = getScrollCards(view);
+        if (cards.length !== view.count) {
+            view.count = cards.length;
+            view.active = Math.min(view.active, Math.max(0, cards.length - 1));
+            buildScrollMap(view);
+        }
+        observeScrollCards(view, cards);
+        view.items = cards.map(card => toEventTime(scrollCardData(card)?.startTime));
+        const missing = view.items.filter(time => time !== null && !view.entries.has(time));
+        for (const time of missing) view.entries.set(time, { time, data: null, status: 'idle', result: null });
+        if (missing.length) loadScrollEntries(view);
+        cards.forEach((card, index) => decorateScrollCard(view, card, index));
+        updateScrollSummary(view);
+        updateScrollMapView(view);
+    }
+    async function loadScrollEntries(view) {
+        const job = view.loadJob = {};
+        const pending = [...view.entries.values()].filter(entry => entry.status === 'idle');
+        const { af, config } = view.ctx;
+        await runLimited(pending, QUICK_FETCH_CONCURRENCY, async entry => {
+            if (scrollView !== view || view.loadJob !== job || entry.status !== 'idle') return;
+            entry.status = 'loading';
+            try {
+                entry.data = await fetchEventECG(af, entry.time, config.before, config.after);
+                entry.status = 'ready';
+                entry.result = scoreScrollItem(view, entry);
+            } catch (_) {
+                entry.status = 'error';
+            }
+        });
+        if (scrollView === view) tickScrollView(view);
+    }
+    function scrollEntryLight(entry) {
+        return entry?.status === 'ready' && entry.result ? entry.result.light : '';
+    }
+    // 卡片標題列：時間後方加上燈號與分數；右側評分欄列出各條件的明細。
+    function decorateScrollCard(view, card, index) {
+        const header = card.querySelector('.event-blk-header');
+        if (!header) return;
+        let badge = header.querySelector('.rc-scroll-badge');
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'rc-scroll-badge';
+            badge.innerHTML = '<span class="rc-scroll-dot"></span><b></b>';
+            const anchor = header.querySelector('.pop-out-bnt');
+            if (anchor) anchor.after(badge); else header.appendChild(badge);
+        }
+        const entry = view.entries.get(view.items[index]);
+        const light = scrollEntryLight(entry);
+        const score = light ? `${entry.result.score} 分` : entry?.status === 'error' ? '讀取失敗' : '評分中…';
+        if (badge.dataset.signature !== `${light}|${score}`) {
+            badge.dataset.signature = `${light}|${score}`;
+            badge.className = 'rc-scroll-badge' + (light ? ` is-${light}` : '');
+            badge.querySelector('b').textContent = score;
+        }
+        decorateScrollSide(view, card, index, entry, light, score);
+        card.classList.toggle('rc-scroll-active', index === view.active);
+        updateScrollCell(view, card, index, entry, light);
+    }
+    // 右側評分欄：分數；扣分的條件逐行列出原因與扣分（由多到少），通過的條件縮成一排小標籤（滑過看說明）。
+    // 條件增加時通過的標籤會換行排列；內容超過卡片高度時評分欄自己捲動，卡片高度不變。
+    function decorateScrollSide(view, card, index, entry, light, score) {
+        let side = card.querySelector(':scope > .rc-scroll-side');
+        if (!side) {
+            side = document.createElement('div');
+            side.className = 'rc-scroll-side';
+            side.innerHTML = '<div class="rc-scroll-side-head"><span class="rc-scroll-dot"></span><b class="rc-scroll-side-score"></b>'
+                + '<span class="rc-scroll-side-state"></span></div><ul class="rc-scroll-side-list"></ul><div class="rc-scroll-side-pass"></div>';
+            card.appendChild(side);
+        }
+        const results = light ? entry.result.results : [];
+        const minus = results.filter(result => result.penalty > 0).sort((a, b) => b.penalty - a.penalty);
+        const passed = results.filter(result => result.penalty <= 0);
+        const state = light ? (minus.length ? `${minus.length} 項扣分・${passed.length} 項通過` : `${passed.length} 項全部通過`) : '';
+        const signature = JSON.stringify([light, score, state, results.map(result => [result.id, result.penalty, result.note])]);
+        if (side.dataset.signature === signature) return;
+        side.dataset.signature = signature;
+        side.className = 'rc-scroll-side' + (light ? ` is-${light}` : '');
+        side.querySelector('.rc-scroll-side-head').className = 'rc-scroll-side-head' + (light ? ` is-${light}` : '');
+        side.querySelector('.rc-scroll-side-score').textContent = score;
+        side.querySelector('.rc-scroll-side-state').textContent = state;
+        const list = side.querySelector('.rc-scroll-side-list');
+        list.textContent = '';
+        for (const result of minus) {
+            const item = document.createElement('li');
+            item.className = result.penalty >= 100 ? 'is-zero' : 'is-minus';
+            item.innerHTML = '<span class="rc-side-icon">✗</span><span class="rc-side-name"></span>'
+                + '<span class="rc-side-note"></span><span class="rc-side-penalty"></span>';
+            item.querySelector('.rc-side-name').textContent = result.name;
+            item.querySelector('.rc-side-note').textContent = result.note;
+            item.querySelector('.rc-side-penalty').textContent = `−${result.penalty}`;
+            item.title = `${result.name}：${result.note}（扣 ${result.penalty} 分）`;
+            list.appendChild(item);
+        }
+        const pass = side.querySelector('.rc-scroll-side-pass');
+        pass.textContent = '';
+        for (const result of passed) {
+            const chip = document.createElement('span');
+            chip.textContent = `✓ ${result.name}`;
+            chip.title = `${result.name}：${result.note}`;
+            pass.appendChild(chip);
+        }
+    }
+
+    // ── Minimap：每張卡片一個燈號，左側深色條／「印」為選印、★（小燈號為金色圓點）為星號；藍框為目前畫面中的卡片 ──
+    // 燈號有最小高度（SCROLL_MAP_CELL_MIN），張數多到放不下時，Minimap 依清單的捲動比例跟著捲動（與 VS Code 的 Minimap 相同）。
+    // 左側為編號刻度。
+    function buildScrollMap(view) {
+        view.map.textContent = '';
+        view.cells = [];
+        const track = view.mapTrack = document.createElement('div');
+        track.className = 'rc-scroll-map-track';
+        view.mapTicks = document.createElement('div');
+        track.appendChild(view.mapTicks);
+        for (let i = 0; i < view.count; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'rc-scroll-map-cell';
+            cell.dataset.index = String(i);
+            cell.innerHTML = '<span class="rc-map-print"></span><span class="rc-map-star"></span>';
+            view.cells.push(cell);
+            track.appendChild(cell);
+        }
+        view.mapView = document.createElement('div');
+        view.mapView.className = 'rc-scroll-map-view';
+        track.appendChild(view.mapView);
+        view.map.appendChild(track);
+        layoutScrollMap(view);
+    }
+    function layoutScrollMap(view) {
+        if (!view.mapTrack) return;
+        const height = view.map.clientHeight;
+        const pitch = Math.min(SCROLL_MAP_CELL_MAX, Math.max(SCROLL_MAP_CELL_MIN, height / Math.max(1, view.count)));
+        const gap = pitch >= 12 ? 3 : 2;
+        view.mapCell = pitch;
+        view.mapTrack.style.height = `${view.count * pitch}px`;
+        view.cells.forEach((cell, i) => {
+            cell.style.top = `${i * pitch}px`;
+            cell.style.height = `${pitch - gap}px`;
+        });
+        // 編號刻度：第 1 張與每 step 張標一次。
+        const step = SCROLL_MAP_TICK_STEPS.find(value => value * pitch >= 28) || SCROLL_MAP_TICK_STEPS[SCROLL_MAP_TICK_STEPS.length - 1];
+        view.mapTicks.textContent = '';
+        for (let n = 1; n <= view.count; n = n === 1 ? step : n + step) {
+            const tick = document.createElement('div');
+            tick.className = 'rc-scroll-map-tick';
+            tick.style.top = `${(n - 1) * pitch + (pitch - gap) / 2}px`;
+            tick.innerHTML = `<span>${n}</span>`;
+            view.mapTicks.appendChild(tick);
+        }
+        for (const cell of view.cells) cell.dataset.signature = '';
+        updateScrollMapView(view);
+    }
+    function updateScrollCell(view, card, index, entry, light) {
+        const cell = view.cells[index];
+        if (!cell) return;
+        const data = scrollCardData(card);
+        const time = view.items[index];
+        const printed = time !== null && toEventTime(view.ctx.config.printed(view.ctx.af)) === time;
+        const starred = !!data?.isSpecific;
+        const big = view.mapCell - 3 >= 9;
+        const signature = `${light}|${printed}|${starred}|${index === view.active}|${big}`;
+        if (cell.dataset.signature === signature) return;
+        cell.dataset.signature = signature;
+        cell.className = 'rc-scroll-map-cell' + (light ? ` is-${light}` : '') + (printed ? ' is-printed' : '')
+            + (starred ? ' is-starred' : '') + (big ? '' : ' is-small') + (index === view.active ? ' is-active' : '');
+        cell.querySelector('.rc-map-print').textContent = big && printed ? '印' : '';
+        cell.querySelector('.rc-map-star').textContent = big && starred ? '★' : '';
+        cell.title = `#${index + 1}` + (light ? `　${entry.result.score} 分` : '') + (printed ? '　已選印' : '') + (starred ? '　★' : '');
+    }
+    // 藍框：目前畫面中看得到的卡片範圍。Minimap 放不下所有燈號時，依清單捲動的比例移動，使藍框保持在 Minimap 內。
+    function updateScrollMapView(view) {
+        if (!view.mapView || !view.count) return;
+        const { content } = view;
+        const overflow = Math.max(0, view.count * view.mapCell - view.map.clientHeight);
+        const range = content.scrollHeight - content.clientHeight;
+        view.mapOffset = overflow && range > 0 ? overflow * Math.min(1, Math.max(0, content.scrollTop / range)) : 0;
+        view.mapTrack.style.transform = `translateY(${-view.mapOffset}px)`;
+        // 卡片依序排列：以 offsetTop 二分搜尋畫面中第一張與最後一張。
+        const cards = getScrollCards(view);
+        const top = content.scrollTop;
+        const bottom = top + content.clientHeight;
+        const firstBelow = edge => {
+            let low = 0, high = cards.length;
+            while (low < high) {
+                const mid = (low + high) >> 1;
+                if (cards[mid].offsetTop + cards[mid].offsetHeight <= edge) low = mid + 1; else high = mid;
+            }
+            return low;
+        };
+        const first = firstBelow(top);
+        let last = firstBelow(bottom);
+        if (last >= cards.length || cards[last].offsetTop >= bottom) last--;
+        if (first >= cards.length || last < first) { view.mapView.style.display = 'none'; return; }
+        view.mapView.style.display = '';
+        view.mapView.style.top = `${first * view.mapCell - 1}px`;
+        view.mapView.style.height = `${Math.max(4, (last - first + 1) * view.mapCell + 1)}px`;
+    }
+    // 點燈號跳到該張；點空白處或拖曳時依位置比例捲動；在 Minimap 上滾動滑鼠滾輪即捲動清單。
+    function installScrollMapDrag(view) {
+        const { map } = view;
+        const scrollToPoint = clientY => {
+            const rect = map.getBoundingClientRect();
+            const total = view.count * view.mapCell;
+            const { content } = view;
+            if (total <= rect.height) {
+                const index = Math.max(0, Math.min(view.count - 1, Math.floor((clientY - rect.top) / Math.max(1, view.mapCell))));
+                scrollToCard(view, index, 'auto');
+            } else {
+                const ratio = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+                content.scrollTop = ratio * (content.scrollHeight - content.clientHeight);
+            }
+        };
+        map.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || !view.count) return;
+            event.preventDefault();
+            const cell = event.target.closest('.rc-scroll-map-cell');
+            if (cell) { setScrollActive(view, Number(cell.dataset.index), true); return; }
+            map.setPointerCapture(event.pointerId);
+            scrollToPoint(event.clientY);
+            const move = moveEvent => scrollToPoint(moveEvent.clientY);
+            const up = () => { map.removeEventListener('pointermove', move); map.removeEventListener('pointerup', up); };
+            map.addEventListener('pointermove', move);
+            map.addEventListener('pointerup', up);
+        });
+        map.addEventListener('wheel', event => {
+            event.preventDefault();
+            view.content.scrollTop += event.deltaY;
+        }, { passive: false });
+    }
+    function scrollToCard(view, index, behavior = 'smooth') {
+        const card = getScrollCards(view)[index];
+        // 只捲動卡片捲動區（卡片的 offsetTop 以 .content-blk 為基準，它是 position: relative）。
+        if (card) view.content.scrollTo({ top: Math.max(0, card.offsetTop - 3), behavior });
+    }
+    function setScrollActive(view, index, scroll = true) {
+        if (!(index >= 0 && index < view.count)) return;
+        view.active = index;
+        getScrollCards(view).forEach((card, i) => {
+            card.classList.toggle('rc-scroll-active', i === index);
+            updateScrollCell(view, card, i, view.entries.get(view.items?.[i]), scrollEntryLight(view.entries.get(view.items?.[i])));
+        });
+        if (scroll) scrollToCard(view, index);
+    }
+    function jumpNextGreen(view) {
+        const order = [...Array(view.count).keys()];
+        const next = [...order.slice(view.active + 1), ...order.slice(0, view.active + 1)]
+            .find(i => scrollEntryLight(view.entries.get(view.items?.[i])) === 'green');
+        if (next !== undefined) setScrollActive(view, next, true);
+        else quickToast(view.panel.querySelector('.rc-scroll-next'), '沒有綠燈的心電圖', true);
+    }
+    function updateScrollSummary(view) {
+        const counts = { green: 0, yellow: 0, red: 0 };
+        let waiting = 0;
+        for (const time of view.items || []) {
+            const light = scrollEntryLight(view.entries.get(time));
+            if (light) counts[light]++; else waiting++;
+        }
+        const html = `<span><span class="rc-scroll-dot is-green"></span>${counts.green}</span>`
+            + `<span><span class="rc-scroll-dot is-yellow"></span>${counts.yellow}</span>`
+            + `<span><span class="rc-scroll-dot is-red"></span>${counts.red}</span>`
+            + `<span>共 ${view.count} 張${waiting ? `・評分中 ${view.count - waiting}/${view.count}` : ''}</span>`;
+        const holder = view.panel.querySelector('.rc-scroll-counts');
+        if (holder.innerHTML !== html) holder.innerHTML = html;
+    }
+    // P、F：點目前這張卡片上網站自己的選印、星號勾選框（需編輯模式）；Enter：點時間開啟心電圖視窗。
+    function clickScrollCard(view, selector, anchorSelector) {
+        const card = getScrollCards(view)[view.active];
+        const target = card?.querySelector(selector);
+        if (!target) return;
+        if (target.disabled) { quickToast(card.querySelector(anchorSelector) || card, '需先開啟編輯模式才能選印或加星號', true); return; }
+        target.click();
+        setTimeout(() => tickScrollView(view), 50);
+    }
+    // 心電圖視窗或網站的確認視窗開在清單上方時，按鍵交給它們（正在關閉或已隱藏的視窗不算）。
+    function isAboveScrollView(root) {
+        return [...document.querySelectorAll('.ngdialog')].some(dialog =>
+            dialog !== root && (root.compareDocumentPosition(dialog) & Node.DOCUMENT_POSITION_FOLLOWING)
+            && !dialog.classList.contains('ngdialog-closing') && dialog.getClientRects().length > 0);
+    }
+    window.addEventListener('keydown', event => {
+        const view = scrollView;
+        if (!view || !event.isTrusted || event.isComposing || isAboveScrollView(view.ctx.root)) return;
+        // Esc 一律回到分頁（不讓網站關閉清單），即使游標在時間輸入框中。
+        if (event.code === 'Escape') {
+            if (isEditingText()) document.activeElement.blur();
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            closeScrollView();
+            return;
+        }
+        if (isEditingText()) return;
+        if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+        switch (event.code) {
+            case 'ArrowUp': setScrollActive(view, view.active - 1); break;
+            case 'ArrowDown': setScrollActive(view, view.active + 1); break;
+            case 'KeyP': clickScrollCard(view, 'input[ng-model="currentData.selectedEvent"]', '.icon-print-check, .tag-label'); break;
+            case 'KeyF': clickScrollCard(view, 'input[ng-model="currentData.isSpecific"]', '.tag-label'); break;
+            case 'KeyG': jumpNextGreen(view); break;
+            case 'Enter': case 'NumpadEnter': clickScrollCard(view, '.pop-out-bnt', '.pop-out-bnt'); break;
+            default: return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+    }, true);
+    // 清單標題列的「☰ 捲動檢視」按鈕（時間輸入框之後、排除開關之前）；捲動檢視中改為「☰ 返回分頁」。
+    function decorateScrollButtons() {
+        if (isDisabledPage()) return;
+        for (const id of SCROLL_DIALOG_IDS) {
+            const dialog = document.getElementById(id);
+            if (!dialog) continue;
+            const ctx = getScrollListContext(dialog);
+            let button = dialog.querySelector('.rc-scroll-open');
+            const toolbar = dialog.querySelector('.data-tool-blk .float-left');
+            if (!ctx || !toolbar) { button?.remove(); continue; }
+            if (!button) {
+                button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'rc-scroll-open';
+                button.addEventListener('click', event => {
+                    event.preventDefault(); event.stopPropagation();
+                    if (scrollView?.ctx.dialog === dialog) { closeScrollView(); return; }
+                    const current = getScrollListContext(dialog);
+                    if (current) openScrollView(current);
+                });
+                toolbar.insertBefore(button, toolbar.querySelector('.rc-hr-af, .rc-hr-restore'));
+            }
+            const on = scrollView?.ctx.dialog === dialog;
+            const text = on ? '☰ 返回分頁' : `☰ 捲動檢視 ${ctx.ed.pageData.flat().length}`;
+            if (button.textContent !== text) button.textContent = text;
+            button.classList.toggle('is-on', on);
+            button.title = on ? '回到原本的分頁顯示（Esc）'
+                : '所有心電圖改為一頁、由上往下連續排列，並依條件評分以燈號標示；右側 Minimap 可跳到任一張';
+        }
+    }
+    let scrollButtonPending = false;
+    function scheduleScrollButtons() {
+        if (scrollButtonPending) return;
+        scrollButtonPending = true;
+        requestAnimationFrame(() => { scrollButtonPending = false; decorateScrollButtons(); });
+    }
+    new MutationObserver(scheduleScrollButtons).observe(document.body, { childList: true, subtree: true });
 
     // ── Event Tag 選印時間：從 Event Tag 清單開啟的心電圖視窗中，滑鼠移到心電圖（上方 20 秒或下方 60 秒長條）
     // 時以虛線框顯示 10 秒的選印範圍，點一下即把選印時間移到該處，取代逐次點 ◀ ▶。
