@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare ECG 變動率自動標註器
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.2.2
+// @version      1.2.3
 // @description  依相鄰心搏間隔計算變動率，預設達 12% 時標紅並加粗；按住反引號鍵顯示各組平均心率（排除灰色背景區段）。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -159,32 +159,63 @@
         return (rates.reduce((acc, val) => acc + val, 0) / rates.length).toFixed(2);
     }
 
+    // 浮層至少要有這麼高的可見範圍才顯示（群組本身較矮時需整條可見），避免只露出一小條的群組把浮層蓋到標題列或相鄰區塊上。
+    const MIN_VISIBLE_HEIGHT = 24;
+
+    // 群組在畫面上實際看得到的範圍：與每一層會裁切內容的父元素（捲動區、對話框等）及視窗取交集。
+    // 清單改為捲動顯示（如「RootiCare 標註快捷鍵」的捲動檢視）時，捲出清單外的卡片仍有位置，
+    // 不裁切的話平均值會蓋在對話框標題列上或畫到畫面外。clipCache 讓同一次顯示中共用的父元素只算一次。
+    function getVisibleRect(element, clipCache) {
+        const rect = element.getBoundingClientRect();
+        let { left, top, right, bottom } = rect;
+        for (let node = element.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+            let clip = clipCache.get(node);
+            if (clip === undefined) {
+                const style = getComputedStyle(node);
+                clip = /auto|scroll|hidden|clip/.test(`${style.overflowX} ${style.overflowY}`) ? node.getBoundingClientRect() : null;
+                clipCache.set(node, clip);
+            }
+            if (!clip) continue;
+            left = Math.max(left, clip.left);
+            top = Math.max(top, clip.top);
+            right = Math.min(right, clip.right);
+            bottom = Math.min(bottom, clip.bottom);
+        }
+        left = Math.max(left, 0);
+        top = Math.max(top, 0);
+        right = Math.min(right, window.innerWidth);
+        bottom = Math.min(bottom, window.innerHeight);
+        const minHeight = Math.min(MIN_VISIBLE_HEIGHT, rect.height) - 0.5; // 0.5：容許小數像素誤差
+        return right - left > 0 && bottom - top > 0 && bottom - top >= minHeight ? { left, top, right, bottom } : null;
+    }
+
     // 為有平均心率的群組建立顯示浮層。
-    // 依快取的群組位置建立平均心率浮層；忽略沒有可計算平均值的群組。
+    // 依快取的群組位置建立平均心率浮層；忽略沒有可計算平均值或目前看不到的群組。
     function showAverages() {
         // 建立前先清除上一次的顯示。
         hideAverages();
+        const clipCache = new Map();
 
         groupDataCache.forEach((groupData, idx) => {
+            if (!groupData.element.isConnected) return;
+            // 只放在群組看得到的部分中央（部分捲出捲動區時仍留在可見範圍內）。
+            const visible = getVisibleRect(groupData.element, clipCache);
+            if (!visible) return;
+
             const avgHR = getWhiteAverage(groupData);
             if (!avgHR) return; // 沒有白色區段的心率就不顯示
 
-            // 取得群組在可視視窗中的位置。
-            const rect = groupData.element.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return; // 如果元素目前不可見則跳過
-
-            // 加入捲動位移，換算為頁面中的群組中心。
-            const centerX = rect.left + window.scrollX + (rect.width / 2);
-            const centerY = rect.top + window.scrollY + (rect.height / 2);
+            const centerX = (visible.left + visible.right) / 2;
+            const centerY = (visible.top + visible.bottom) / 2;
 
             // 建立平均心率的顯示節點。
             const overlay = document.createElement('div');
             overlay.className = 'ecg-avg-overlay';
             overlay.textContent = `Avg: ${avgHR} bpm`;
 
-            // 設定浮層的位置、顏色與文字樣式。
+            // 設定浮層的位置、顏色與文字樣式（以視窗座標固定，捲動時由 refreshAverages 重新排列）。
             Object.assign(overlay.style, {
-                position: 'absolute',
+                position: 'fixed',
                 left: `${centerX}px`,
                 top: `${centerY}px`,
                 transform: 'translate(-50%, -50%)', // 完美居中
@@ -229,6 +260,25 @@
             isKeyPressed = false;
             hideAverages();
         }
+    });
+
+    // 按住按鍵時捲動（頁面或清單內的捲動區），浮層跟著卡片重新排列；每個畫面更新最多一次。
+    let refreshPending = false;
+    function refreshAverages() {
+        if (!isKeyPressed || refreshPending) return;
+        refreshPending = true;
+        requestAnimationFrame(() => {
+            refreshPending = false;
+            if (isKeyPressed) showAverages();
+        });
+    }
+    window.addEventListener('scroll', refreshAverages, { capture: true, passive: true });
+    window.addEventListener('resize', refreshAverages);
+
+    // 按住按鍵時切換視窗會收不到 keyup，離開視窗即隱藏，避免浮層留在畫面上。
+    window.addEventListener('blur', () => {
+        isKeyPressed = false;
+        hideAverages();
     });
 
     // 後續以 DOM 更新觸發分析，並合併連續通知。
