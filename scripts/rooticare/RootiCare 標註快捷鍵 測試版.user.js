@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.57.0
+// @version      1.57.1
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -6098,6 +6098,19 @@
         event.preventDefault();
         event.stopImmediatePropagation();
     }, true);
+    // 捲動檢視中網站替清單重新分頁時會用到捲動檢視的每頁張數（全部一頁），例如 Max HR 的「Sync to Max Sinus HR」
+    // 關閉清單後立即重建 Max HR sinus 的分頁；之後開啟該清單會變成一頁、兩欄列出全部心電圖。
+    // 清單不在捲動檢視中、卻有某頁超過每頁張數時，依每頁張數重新分頁（停在第 1 頁）。
+    function repairScrollPaging(ctx) {
+        if (scrollView?.ctx.dialog === ctx.dialog) return;
+        const perPage = Number(ctx.ed.pagination?.itemsPerPage);
+        if (!(perPage > 0) || perPage >= SCROLL_ALL_PER_PAGE) return;
+        if (!ctx.ed.pageData.some(page => Array.isArray(page) && page.length > perPage)) return;
+        const flat = ctx.ed.pageData.flat();
+        const pages = [];
+        for (let i = 0; i < flat.length; i += perPage) pages.push(flat.slice(i, i + perPage));
+        setScrollPages(ctx, pages.length ? pages : [[]], perPage, 1);
+    }
     // 清單標題列的「☰ 捲動檢視」按鈕（時間輸入框之後、排除開關之前）；捲動檢視中改為「☰ 返回分頁」。
     function decorateScrollButtons() {
         if (isDisabledPage()) return;
@@ -6108,6 +6121,7 @@
             let button = dialog.querySelector('.rc-scroll-open');
             const toolbar = dialog.querySelector('.data-tool-blk .float-left');
             if (!ctx || !toolbar) { button?.remove(); continue; }
+            repairScrollPaging(ctx);
             if (!button) {
                 button = document.createElement('button');
                 button.type = 'button';
