@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.59.3
+// @version      1.61.0
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -87,13 +87,17 @@
  *                          與卡片右上角的清單 HR 相差超出 ±10 BPM 扣 40 分；另檢查合理心率：平均超出 30–220 bpm 扣 60 分，
  *                          單一 R-R 超過 2.5 秒或短於 0.27 秒各扣 40 分（多半是漏標、重複標註或雜訊）；
  *                          Max HR sinus 另檢查含 V／S 標籤或與 AF 時段重疊（皆為零分）；
- *                          所有清單另檢查雜訊（超出畫面或密集震盪的時間：0.4 秒以上扣 20、1 秒以上扣 40、2.5 秒以上扣 60），
+ *                          所有清單另檢查雜訊（振幅過大或密集震盪的時間：0.4 秒以上扣 20、1 秒以上扣 40、2.5 秒以上扣 60），
  *                          Longest R-R 的最長 R-R 內或兩端有雜訊再扣 40（暫停可能是雜訊造成或心搏被雜訊蓋住）；
  *                          只看報告印出的白色 8 秒，含未儲存的標籤修改；
  *                          右側 Minimap 為所有燈號（左側深色條／「印」＝選印、★ 或金色圓點＝星號，藍框為畫面中的卡片），
  *                          左側為編號刻度；張數多時燈號維持可辨識的大小，Minimap 跟著清單捲動；點燈號跳到該張，
  *                          點空白處或拖曳可捲動，在 Minimap 上滾動滾輪即捲動清單；「返回分頁」或 Esc 回到原本的分頁，停在目前這張所在的頁。
  *                          按鍵：↑ ↓ 上一張、下一張（藍框標示目前這張，點卡片也可選），P 選印，F 星號，Enter 開啟心電圖視窗，G 下一個綠燈
+ *   VEB／SVEB 清單（Isolated、Couplet、Triplet、Bigeminy、Trigeminy、VT、SVE run、SVT）  同樣有「☰ 捲動檢視」，但不評分：
+ *                          張數可達數千張，每頁 100 張、一欄連續排列，以上方頁碼列換頁；Minimap 為本頁各張（綠色／「印」＝選印、★＝星號），
+ *                          頁數拉條、選印圓點、「選印 N 張」（選印清單）與「⚡ 快速選印」照常可用；點選印圓點會換到該頁並捲到該頁第一張選印；
+ *                          按鍵與上方相同（沒有 G）；選印清單開著時按鍵交給選印清單（Esc 只關閉選印清單）
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
  *   V / S 事件清單          「⚡ 快速選印」依規則補足選印（時段分散、相隔 1 分鐘以上）；
  *                          按「選印 N 張」開啟選印清單：上方為心電圖視窗（可改標籤並 Save），
@@ -4940,6 +4944,7 @@
     window.addEventListener('keydown', event => {
         if (!review || event.key !== 'Escape' || event.isComposing || review.grouping) return;
         if (labelDrag || rangeMode || rangeHint.style.display !== 'none') return;
+        event.rcReviewClosed = true; // 捲動檢視的 Esc 據此不再回到分頁
         closePrintReview();
     }, true);
 
@@ -5421,14 +5426,24 @@
     // 標題列加上燈號與分數，右側多出的空間放評分欄（各條件的通過／扣分明細）；
     // 每張依 SCROLL_CRITERIA 打分數（綠：滿分、黃：有扣分、紅：零分），右側 Minimap 列出所有燈號，點一下跳到該張。
     // 清單內容取自目前的分頁資料（eventDialog.pageData），「排除 ±1 分」等排除後的結果也一併反映。
+    const SCROLL_EVENT_PER_PAGE = 100; // VEB／SVEB 清單捲動檢視的每頁張數
     const SCROLL_VIEW_TYPES = {
         minHR: { name: 'Min HR', before: 0, after: 10, white: [0, 8], printed: af => af.record?.minAvgHR?.[0] },
         maxHR: { name: 'Max HR', before: 0, after: 10, white: [0, 8], printed: af => af.record?.maxAvgHR?.[0] },
         maxSinus: { name: 'Max HR sinus', before: 0, after: 10, white: [0, 8], printed: af => af.record?.maxSinusAvgHR?.[0] },
         // Longest R-R：心電圖為事件前 4 秒至後 6 秒，頭尾各 1 秒為灰色（報告印出中間 8 秒）。
         rr: { name: 'Longest R-R', before: 4, after: 6, white: [1, 9], printed: af => af.record?.longestRR?.[0] },
+        // VEB／SVEB 清單（af-event-dialog）：只提供捲動檢視，不評分（score: false）。
+        // 張數可達數千張，網站會替同一頁每張卡片讀取並畫出心電圖，全部放在同一頁會讓頁面停住；
+        // 因此每頁 SCROLL_EVENT_PER_PAGE 張，由網站的頁碼列換頁。選印由每張卡片的勾選框判斷（Minimap 的「印」）。
+        ...Object.fromEntries([
+            ['V_isolated', 'VEB Isolated'], ['couplets', 'VEB Couplet'], ['triplets', 'VEB Triplet'],
+            ['bigemini', 'VEB Bigeminy'], ['trigemini', 'VEB Trigeminy'], ['vt', 'VT'],
+            ['S_isolated', 'SVEB Isolated'], ['sveb2s', 'SVEB Couplet'], ['sveb3s', 'SVEB Triplet'],
+            ['S_bigemini', 'SVEB Bigeminy'], ['S_trigemini', 'SVEB Trigeminy'], ['sve', 'SVE run'], ['psvt', 'SVT'],
+        ].map(([type, name]) => [type, { name, score: false, perPage: SCROLL_EVENT_PER_PAGE }])),
     };
-    const SCROLL_DIALOG_IDS = ['af-hr-dialog', 'af-rr-dialog'];
+    const SCROLL_DIALOG_IDS = ['af-hr-dialog', 'af-rr-dialog', 'af-event-dialog'];
     const SCROLL_ALL_PER_PAGE = 100000; // 捲動檢視時的每頁張數（全部放在同一頁）
     const SCROLL_MIN_HEIGHT = 320; // 卡片捲動區的最小高度（原本清單很短時）
     const SCROLL_LIVE_MARGIN = '1200px 0px'; // 捲動區上下這個範圍內的卡片才參與網站的更新（其餘暫停，見 suspendScrollCard）
@@ -5620,12 +5635,15 @@
         }
         return penalty ? { penalty, note: notes.join('；') } : { penalty: 0, note: '心率與 R-R 都在合理範圍' };
     }
-    // 雜訊：白色區段每 0.2 秒一格，波形超出卡片畫面（網站以 10 mm/mV 繪製，零線在高度 2/3 處，約 +2.1～−1.05 mV），
-    // 或格內有 4 次以上超過 0.15 mV 的轉向（密集震盪；正常 QRS 約 2 次），即為雜訊格。回傳 [{ from, to }]（秒，自心電圖起點）。
+    // 雜訊：白色區段每 0.2 秒一格，符合其一即為雜訊格。回傳 [{ from, to, big }]（秒，自心電圖起點）。
+    // · 振幅過大：格內峰對峰超過 5 mV，且為這張各格峰對峰中位數的 6 倍以上（雜訊爆發常達 7～20 mV）。
+    //   不用「超出卡片畫面」判斷：寬大的 QRS（VT、早搏）本來就常超出畫面，會被誤判。
+    // · 密集震盪：格內有 8 次以上超過 0.15 mV 的轉向。正常心電圖（含 120 bpm 以上、QRS 較大者）一格最多約 6 次。
     const SCROLL_NOISE_WINDOW = 0.2; // 每格秒數
-    const SCROLL_NOISE_RANGE = [-1.05, 2.1]; // 卡片畫面可顯示的範圍（mV）
+    const SCROLL_NOISE_BIG = 5; // 振幅過大的峰對峰下限（mV）
+    const SCROLL_NOISE_BIG_RATIO = 6; // 振幅過大須為各格峰對峰中位數的倍數
     const SCROLL_NOISE_SWING = 0.15; // 算作一次轉向的最小振幅（mV）
-    const SCROLL_NOISE_TURNS = 4; // 一格內轉向達此次數即為雜訊
+    const SCROLL_NOISE_TURNS = 8; // 一格內轉向達此次數即為雜訊
     const SCROLL_NOISE_STEPS = [[2.5, 60], [1, 40], [0.4, 20]]; // 雜訊秒數達此值 → 扣分（取第一個符合的）
     const SCROLL_PAUSE_NOISE_PENALTY = 40; // 最長 R-R 內或兩端有雜訊的扣分
     function scrollNoiseWindows(data, start, white) {
@@ -5634,17 +5652,17 @@
         const fromTime = Number(data?.fromTimestamp);
         if (!values.length || !Number.isFinite(fromTime)) return [];
         const index = second => Math.max(0, Math.min(values.length, Math.round((start + second - fromTime) * sampleRate)));
-        const [low, high] = SCROLL_NOISE_RANGE;
         const step = Math.max(1, Math.round(SCROLL_NOISE_WINDOW * sampleRate));
         const end = index(white[1]);
-        const windows = [];
+        const cells = [];
         for (let a = index(white[0]); a < end; a += step) {
             const b = Math.min(end, a + step);
-            let clipped = false, turns = 0, dir = 0, top = values[a], bottom = values[a];
+            let turns = 0, dir = 0, top = values[a], bottom = values[a], high = -Infinity, low = Infinity;
             for (let i = a; i < b; i++) {
                 const value = values[i];
                 if (!Number.isFinite(value)) continue;
-                if (value > high || value < low) clipped = true;
+                if (value > high) high = value;
+                if (value < low) low = value;
                 if (dir !== -1) {
                     if (value > top) top = value;
                     if (top - value > SCROLL_NOISE_SWING) { turns++; dir = -1; bottom = value; }
@@ -5654,19 +5672,20 @@
                     if (value - bottom > SCROLL_NOISE_SWING) { turns++; dir = 1; top = value; }
                 }
             }
-            if (clipped || turns >= SCROLL_NOISE_TURNS) {
-                const from = fromTime + a / sampleRate - start;
-                windows.push({ from, to: from + (b - a) / sampleRate, clipped });
-            }
+            const from = fromTime + a / sampleRate - start;
+            cells.push({ from, to: from + (b - a) / sampleRate, span: high > low ? high - low : 0, turns });
         }
-        return windows;
+        const spans = cells.map(cell => cell.span).sort((x, y) => x - y);
+        const bigLimit = Math.max(SCROLL_NOISE_BIG, SCROLL_NOISE_BIG_RATIO * (spans[spans.length >> 1] || 0));
+        return cells.filter(cell => cell.span > bigLimit || cell.turns >= SCROLL_NOISE_TURNS)
+            .map(cell => ({ from: cell.from, to: cell.to, big: cell.span > bigLimit }));
     }
     function scoreNoise({ noise }) {
         const seconds = noise.length * SCROLL_NOISE_WINDOW;
         const step = SCROLL_NOISE_STEPS.find(([limit]) => seconds >= limit - 1e-6);
         if (!step) return { penalty: 0, note: seconds ? `雜訊約 ${seconds.toFixed(1)} 秒（未達扣分）` : '白色區段內沒有明顯雜訊' };
-        const clipped = noise.filter(window => window.clipped).length * SCROLL_NOISE_WINDOW;
-        const parts = [clipped ? `超出畫面 ${clipped.toFixed(1)} 秒` : '', seconds > clipped ? `密集震盪 ${(seconds - clipped).toFixed(1)} 秒` : '']
+        const big = noise.filter(window => window.big).length * SCROLL_NOISE_WINDOW;
+        const parts = [big ? `振幅過大 ${big.toFixed(1)} 秒` : '', seconds > big + 1e-6 ? `密集震盪 ${(seconds - big).toFixed(1)} 秒` : '']
             .filter(Boolean).join('、');
         return { penalty: step[1], note: `白色區段內雜訊約 ${seconds.toFixed(1)} 秒（${parts}）` };
     }
@@ -5750,7 +5769,15 @@
         .rc-scroll-side-pass span { padding:0 7px; border-radius:9px; background:#e3f3e8; color:#2d7a4a; font-size:11px; font-weight:600;
             line-height:18px; white-space:nowrap; cursor:default; }
         .ngdialog.rc-scroll-mode .content-blk > .ecg-blk.rc-scroll-active { box-shadow:0 0 0 3px rgba(91,125,26,.55); }
-        .ngdialog.rc-scroll-mode :is(pagination-event-bar, ul.pagination, .pagination-range, .rc-print-jumps, .rc-print-actions) { display:none !important; }
+        /* HR／R-R 清單全部一頁，頁數拉條與選印圓點不需要；VEB／SVEB 分頁捲動保留拉條、選印圓點（點擊跳到該頁的選印）、
+           「選印 N 張」（選印清單）與「快速選印」 */
+        .ngdialog.rc-scroll-mode:not(.rc-scroll-paged) :is(pagination-event-bar, .pagination-range, .rc-print-panel, .rc-print-links, .rc-print-jumps, .rc-print-actions) { display:none !important; }
+        .ngdialog.rc-scroll-mode:not(.rc-scroll-paged) ul.pagination { display:none !important; }
+        /* VEB／SVEB 清單分頁捲動（每頁 SCROLL_EVENT_PER_PAGE 張）：保留上方頁碼列換頁，下方的頁碼列不需要 */
+        .ngdialog.rc-scroll-mode.rc-scroll-paged .content-blk ~ .pagination-blk { display:none !important; }
+        /* 不評分的清單：Minimap 為灰色，已選印的改為綠色 */
+        .rc-scroll-map-cell.is-plain.is-printed { background:#8fb43a; }
+        .rc-scroll-panel.is-plain .rc-scroll-next { display:none; }
         .rc-scroll-badge { display:inline-flex; align-items:center; gap:5px; max-width:52%; margin:0 8px; padding:0 8px 0 4px; height:18px;
             border-radius:9px; background:#eef0f1; color:#6b7780; font-size:11px; font-weight:600; line-height:18px; vertical-align:middle;
             white-space:nowrap; overflow:hidden; }
@@ -5890,13 +5917,23 @@
         });
         if (replaced) hrExclusion.pages = ed.pageData;
     }
+    function splitScrollPages(flat, perPage) {
+        const pages = [];
+        for (let i = 0; i < flat.length; i += perPage) pages.push(flat.slice(i, i + perPage));
+        return pages.length ? pages : [[]];
+    }
     function openScrollView(ctx) {
         if (scrollView) closeScrollView();
         if (!ctx.root) return;
         const pagination = ctx.ed.pagination;
         const flat = ctx.ed.pageData.flat();
         const perPage = Number(pagination.itemsPerPage) || 6;
-        const view = { ctx, saved: { perPage }, entries: new Map(), active: Math.max(0, (Number(pagination.currentPage) - 1) * perPage),
+        // scrollPer：捲動檢視的每頁張數（HR／R-R 全部一頁；VEB／SVEB 每頁 SCROLL_EVENT_PER_PAGE 張）；active 為目前這頁內的索引。
+        const scrollPer = ctx.config.perPage || SCROLL_ALL_PER_PAGE;
+        const absolute = Math.max(0, (Number(pagination.currentPage) - 1) * perPage);
+        const startPage = Math.floor(absolute / scrollPer) + 1;
+        const view = { ctx, saved: { perPage }, entries: new Map(), active: absolute - (startPage - 1) * scrollPer,
+            scored: ctx.config.score !== false, perPage: scrollPer, page: startPage,
             panel: null, map: null, mapView: null, cells: [], count: 0, modSignature: scrollModSignature(ctx.af), timer: null, loadJob: null,
             modItems: (Array.isArray(ctx.af.ecgAnno?.modifiedData) ? ctx.af.ecgAnno.modifiedData : []).map(item => JSON.stringify(item)) };
         scrollView = view;
@@ -5908,14 +5945,15 @@
         const originalContent = content.offsetHeight;
         // 先改成一欄再換頁：網站依卡片當時的寬度畫心電圖。
         ctx.root.classList.add('rc-scroll-mode');
+        ctx.root.classList.toggle('rc-scroll-paged', scrollPer < SCROLL_ALL_PER_PAGE);
         alignScrollTop(view, false);
         content.style.height = `${Math.max(SCROLL_MIN_HEIGHT, originalContent)}px`;
         const adjusted = Math.max(SCROLL_MIN_HEIGHT, content.offsetHeight + originalDialog - dialogBox.offsetHeight);
         content.style.height = `${adjusted}px`;
         ctx.root.scrollTop = 0;
-        setScrollPages(ctx, [flat], SCROLL_ALL_PER_PAGE, 1);
+        setScrollPages(ctx, splitScrollPages(flat, scrollPer), scrollPer, startPage);
         const panel = view.panel = document.createElement('div');
-        panel.className = 'rc-scroll-panel';
+        panel.className = 'rc-scroll-panel' + (view.scored ? '' : ' is-plain');
         panel.innerHTML = '<div class="rc-scroll-counts"></div>'
             + '<button type="button" class="rc-scroll-next" title="跳到下一張綠燈（G）">▼ 綠燈</button>'
             + '<div class="rc-scroll-map" title="點燈號跳到該張心電圖；點空白處或拖曳可捲動"></div>'
@@ -5938,6 +5976,11 @@
             if (card) setScrollActive(view, getScrollCards(view).indexOf(card), false);
         };
         ctx.root.addEventListener('mousedown', view.onPointer, true);
+        // 點拉條下方的選印圓點（VEB／SVEB）：網站換到該頁後，捲到該頁第一張選印的心電圖（見 tickScrollView）。
+        view.onPrintJump = event => {
+            if (event.target.closest?.('.rc-print-jump')) view.printJump = { at: performance.now() };
+        };
+        ctx.root.addEventListener('click', view.onPrintJump, true);
         view.observedCards = new WeakSet();
         view.liveObserver = new IntersectionObserver(entries => {
             let resumed = false;
@@ -5948,7 +5991,9 @@
             // 放回監看後跑一次網站的更新，補畫暫停期間的標籤修改與尚未畫出的心電圖。
             if (resumed) view.ctx.host.$applyAsync();
         }, { root: content, rootMargin: SCROLL_LIVE_MARGIN });
-        installScrollReuse(view);
+        // 沿用卡片（選印時不重新處理心電圖）只用於 HR／R-R 清單：VEB／SVEB 清單網站讀取心電圖與判斷選印的方式不同，
+        // 而且每頁只有 SCROLL_EVENT_PER_PAGE 張，交給網站處理。
+        if (view.scored) installScrollReuse(view);
         view.timer = setInterval(() => tickScrollView(view), 600);
         tickScrollView(view);
         requestAnimationFrame(() => scrollToCard(view, view.active, 'auto'));
@@ -6024,20 +6069,21 @@
         view.content.style.height = '';
         view.content.style.marginTop = '';
         ctx.root.removeEventListener('mousedown', view.onPointer, true);
+        ctx.root.removeEventListener('click', view.onPrintJump, true);
         window.removeEventListener('resize', view.onResize);
         view.panel.remove();
-        ctx.root.classList.remove('rc-scroll-mode');
+        ctx.root.classList.remove('rc-scroll-mode', 'rc-scroll-paged');
         for (const node of ctx.dialog.querySelectorAll('.rc-scroll-badge, .rc-scroll-side')) node.remove();
         for (const node of ctx.dialog.querySelectorAll('.rc-scroll-active')) node.classList.remove('rc-scroll-active');
         const perPage = view.saved.perPage;
         if (isHRDialogShown(ctx.dialog) && ctx.ed.dscp?.type === ctx.type && Array.isArray(ctx.ed.pageData)) {
             const flat = ctx.ed.pageData.flat();
-            const pages = [];
-            for (let i = 0; i < flat.length; i += perPage) pages.push(flat.slice(i, i + perPage));
-            const page = Math.min(Math.max(1, Math.floor(view.active / perPage) + 1), Math.max(1, pages.length));
-            setScrollPages(ctx, pages.length ? pages : [[]], perPage, page);
+            const pages = splitScrollPages(flat, perPage);
+            const absolute = (Math.max(1, Number(ctx.ed.pagination?.currentPage) || 1) - 1) * view.perPage + view.active;
+            const page = Math.min(Math.max(1, Math.floor(absolute / perPage) + 1), pages.length);
+            setScrollPages(ctx, pages, perPage, page);
             ctx.root.scrollTop = 0;
-        } else if (Number(ctx.ed.pagination?.itemsPerPage) === SCROLL_ALL_PER_PAGE) {
+        } else if ([SCROLL_ALL_PER_PAGE, view.perPage].includes(Number(ctx.ed.pagination?.itemsPerPage))) {
             ctx.ed.pagination.itemsPerPage = perPage;
         }
         decorateScrollButtons();
@@ -6049,8 +6095,24 @@
         if (!ctx || ctx.type !== view.ctx.type || ctx.root !== view.ctx.root) { closeScrollView(); return; }
         view.ctx = ctx;
         // 網站或排除功能把清單換回多頁（例如選印後重新分頁）時，再合併成一頁；卡片寬度不變，沿用卡片只換資料。
-        if (ctx.ed.pageData.length > 1 || Number(ctx.ed.pagination.itemsPerPage) !== SCROLL_ALL_PER_PAGE) {
-            setScrollPages(ctx, [ctx.ed.pageData.flat()], SCROLL_ALL_PER_PAGE, 1, true);
+        const sitePer = Number(ctx.ed.pagination.itemsPerPage);
+        if (view.perPage >= SCROLL_ALL_PER_PAGE) {
+            if (ctx.ed.pageData.length > 1 || sitePer !== SCROLL_ALL_PER_PAGE) {
+                setScrollPages(ctx, [ctx.ed.pageData.flat()], SCROLL_ALL_PER_PAGE, 1, true);
+            }
+        } else if (sitePer !== view.perPage || ctx.ed.pageData.some(page => Array.isArray(page) && page.length > view.perPage)) {
+            // 分頁捲動（VEB／SVEB）：網站以別的每頁張數重新分頁時，換回 SCROLL_EVENT_PER_PAGE 張一頁，停在原本那頁第一張所在的頁。
+            const flat = ctx.ed.pageData.flat();
+            const first = (Math.max(1, Number(ctx.ed.pagination.currentPage) || 1) - 1) * (sitePer > 0 ? sitePer : view.perPage);
+            const pages = splitScrollPages(flat, view.perPage);
+            setScrollPages(ctx, pages, view.perPage, Math.min(pages.length, Math.floor(first / view.perPage) + 1));
+        }
+        // 換頁（上方頁碼列）：回到這頁的第一張。
+        const page = Math.max(1, Number(ctx.ed.pagination.currentPage) || 1);
+        if (page !== view.page) {
+            view.page = page;
+            view.active = 0;
+            view.content.scrollTop = 0;
         }
         alignScrollTop(view);
         // 網頁縮放（視窗寬度改變）時網站依新寬度重畫心電圖，但灰色遮罩（ecgMask）只在卡片建立時畫一次，
@@ -6059,7 +6121,7 @@
         if (view.ecgWidth && ecgWidth && ecgWidth !== view.ecgWidth) rebuildScrollCards(view);
         view.ecgWidth = ecgWidth;
         const signature = scrollModSignature(ctx.af);
-        if (signature !== view.modSignature) {
+        if (view.scored && signature !== view.modSignature) {
             view.modSignature = signature;
             noteSavedScrollMods(view, ctx.af.ecgAnno?.modifiedData);
             for (const entry of view.entries.values()) if (entry.status === 'ready') entry.result = scoreScrollItem(view, entry);
@@ -6071,8 +6133,18 @@
             buildScrollMap(view);
         }
         observeScrollCards(view, cards);
+        // 選印圓點跳頁後：網站約 0.5 秒後才標上各張的選印勾選，等到出現選印的卡片再捲過去（最多等 4 秒）。
+        if (view.printJump) {
+            const age = performance.now() - view.printJump.at;
+            if (age > 4000) view.printJump = null;
+            else if (age > 300) {
+                const index = cards.findIndex(card => scrollCardData(card)?.selectedEvent);
+                if (index >= 0) { view.printJump = null; setScrollActive(view, index, true); }
+            }
+        }
         view.items = cards.map(card => toEventTime(scrollCardData(card)?.startTime));
-        const missing = view.items.filter(time => time !== null && !view.entries.has(time));
+        // 不評分的清單不讀取心電圖（卡片上的心電圖由網站自己讀取）。
+        const missing = view.scored ? view.items.filter(time => time !== null && !view.entries.has(time)) : [];
         for (const time of missing) view.entries.set(time, { time, data: null, status: 'idle', result: null });
         if (missing.length) loadScrollEntries(view);
         cards.forEach((card, index) => decorateScrollCard(view, card, index));
@@ -6158,6 +6230,12 @@
     }
     // 卡片標題列：時間後方加上燈號與分數；右側評分欄列出各條件的明細。
     function decorateScrollCard(view, card, index) {
+        if (!view.scored) {
+            // 不評分的清單：沒有燈號與評分欄，只標示目前這張與更新 Minimap。
+            card.classList.toggle('rc-scroll-active', index === view.active);
+            updateScrollCell(view, card, index, null, '');
+            return;
+        }
         const header = card.querySelector('.event-blk-header');
         if (!header) return;
         let badge = header.querySelector('.rc-scroll-badge');
@@ -6289,13 +6367,15 @@
         if (!cell) return;
         const data = scrollCardData(card);
         const time = view.items[index];
-        const printed = time !== null && toEventTime(view.ctx.config.printed(view.ctx.af)) === time;
+        // HR／R-R 清單只有一張會印出（報告記錄的那張）；VEB／SVEB 清單依卡片的選印勾選框。
+        const printed = view.ctx.config.printed ? time !== null && toEventTime(view.ctx.config.printed(view.ctx.af)) === time
+            : !!data?.selectedEvent;
         const starred = !!data?.isSpecific;
         const big = view.mapCell - 3 >= 9;
         const signature = `${light}|${printed}|${starred}|${index === view.active}|${big}`;
         if (cell.dataset.signature === signature) return;
         cell.dataset.signature = signature;
-        cell.className = 'rc-scroll-map-cell' + (light ? ` is-${light}` : '') + (printed ? ' is-printed' : '')
+        cell.className = 'rc-scroll-map-cell' + (light ? ` is-${light}` : '') + (view.scored ? '' : ' is-plain') + (printed ? ' is-printed' : '')
             + (starred ? ' is-starred' : '') + (big ? '' : ' is-small') + (index === view.active ? ' is-active' : '');
         cell.querySelector('.rc-map-print').textContent = big && printed ? '印' : '';
         cell.querySelector('.rc-map-star').textContent = big && starred ? '★' : '';
@@ -6376,6 +6456,7 @@
         if (scroll) scrollToCard(view, index);
     }
     function jumpNextGreen(view) {
+        if (!view.scored) return;
         const order = [...Array(view.count).keys()];
         const next = [...order.slice(view.active + 1), ...order.slice(0, view.active + 1)]
             .find(i => scrollEntryLight(view.entries.get(view.items?.[i])) === 'green');
@@ -6383,6 +6464,18 @@
         else quickToast(view.panel.querySelector('.rc-scroll-next'), '沒有綠燈的心電圖', true);
     }
     function updateScrollSummary(view) {
+        if (!view.scored) {
+            // 不評分的清單：本頁範圍、總張數與本頁選印張數。
+            const total = view.ctx.ed.pagination?.totalItems ?? view.count;
+            const from = (view.page - 1) * view.perPage;
+            const printed = getScrollCards(view).filter(card => scrollCardData(card)?.selectedEvent).length;
+            const html = `<span>共 ${total} 張</span>`
+                + (total > view.count ? `<span>本頁 ${view.count ? from + 1 : 0}–${from + view.count}</span>` : '')
+                + `<span>本頁選印 ${printed}</span>`;
+            const holder = view.panel.querySelector('.rc-scroll-counts');
+            if (holder.innerHTML !== html) holder.innerHTML = html;
+            return;
+        }
         const counts = { green: 0, yellow: 0, red: 0 };
         let waiting = 0;
         for (const time of view.items || []) {
@@ -6413,7 +6506,8 @@
     }
     window.addEventListener('keydown', event => {
         const view = scrollView;
-        if (!view || !event.isTrusted || event.isComposing || isAboveScrollView(view.ctx.root)) return;
+        // 選印清單（畫面底部）開著時按鍵交給它（A／D 切換、Esc 只關閉選印清單）。
+        if (!view || !event.isTrusted || event.isComposing || review || event.rcReviewClosed || isAboveScrollView(view.ctx.root)) return;
         // Esc 一律回到分頁（不讓網站關閉清單），即使游標在時間輸入框中。
         if (event.code === 'Escape') {
             if (isEditingText()) document.activeElement.blur();
@@ -6477,7 +6571,9 @@
             if (button.textContent !== text) button.textContent = text;
             button.classList.toggle('is-on', on);
             button.title = on ? '回到原本的分頁顯示（Esc）'
-                : '所有心電圖改為一頁、由上往下連續排列，並依條件評分以燈號標示；右側 Minimap 可跳到任一張';
+                : ctx.config.score === false
+                    ? `心電圖改為由上往下連續排列（每頁 ${ctx.config.perPage} 張，以上方頁碼換頁）；右側 Minimap 可跳到本頁任一張`
+                    : '所有心電圖改為一頁、由上往下連續排列，並依條件評分以燈號標示；右側 Minimap 可跳到任一張';
         }
     }
     let scrollButtonPending = false;
