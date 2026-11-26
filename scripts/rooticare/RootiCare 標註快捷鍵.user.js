@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.59.2
+// @version      1.59.3
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -5504,26 +5504,34 @@
     // Longest R-R：整張心電圖（含灰色區段）中最長的 R-R，{ gap, from, to }（秒，自心電圖起點）。
     const SCROLL_PAUSE_EVENT_SLACK = 1; // 事件時間可比暫停起點早的秒數（清單時間以整秒記錄）
     const SCROLL_PAUSE_CONTEXT = 2; // 暫停前、後在白色區段內至少要有的心搏數
-    function longestInterval(all) {
-        let best = null;
+    // 節律規則（例如心搏都約 1.45 秒）時多段 R-R 幾乎一樣長，只差幾毫秒的那段可能剛好跨到灰色區段；
+    // 與最長者相差在 SCROLL_PAUSE_TIE（或 3%）內的都視為同樣最長，優先取位於事件時間（event，秒）的那段。
+    const SCROLL_PAUSE_TIE = 0.05; // 視為同樣最長的差距下限（秒）
+    function longestInterval(all, event = null) {
+        const intervals = [];
         for (let i = 1; i < all.length; i++) {
             const gap = all[i].offset - all[i - 1].offset;
-            if (gap > 0 && (!best || gap > best.gap)) best = { gap, from: all[i - 1].offset, to: all[i].offset };
+            if (gap > 0) intervals.push({ gap, from: all[i - 1].offset, to: all[i].offset });
         }
-        return best;
+        if (!intervals.length) return null;
+        const best = intervals.reduce((top, interval) => interval.gap > top.gap ? interval : top);
+        if (event === null) return best;
+        const tie = Math.max(SCROLL_PAUSE_TIE, best.gap * 0.03);
+        return intervals.find(interval => interval.gap >= best.gap - tie
+            && event >= interval.from - SCROLL_PAUSE_EVENT_SLACK && event <= interval.to) || best;
     }
     const pauseText = pause => `${Math.round(pause.gap * 1000)} ms（第 ${pause.from.toFixed(1)}–${pause.to.toFixed(1)} 秒）`;
     // 暫停兩端的心搏都要在報告印出的白色區段內，報告上才看得到完整的暫停；沒有 R-R 即零分。
-    function scorePauseInWhite({ all, white }) {
-        const pause = longestInterval(all);
+    function scorePauseInWhite({ all, white, config }) {
+        const pause = longestInterval(all, config.before);
         if (!pause) return { penalty: 100, note: '心搏標籤不足，找不到 R-R' };
         const [from, to] = white;
         return pause.from >= from && pause.to <= to ? { penalty: 0, note: `最長 R-R ${pauseText(pause)}完整印在白色區段內` }
             : { penalty: 60, note: `最長 R-R ${pauseText(pause)}超出白色區段，報告上看不到完整的暫停` };
     }
-    // 清單的事件時間應落在最長的 R-R 上，否則畫面中最長的那段不是清單記錄的暫停（例如標籤被改過）。
+    // 清單的事件時間應落在最長的 R-R 上（與最長者幾乎一樣長的也算），否則畫面中最長的那段不是清單記錄的暫停（例如標籤被改過）。
     function scorePauseAtEvent({ all, config }) {
-        const pause = longestInterval(all);
+        const pause = longestInterval(all, config.before);
         if (!pause) return { penalty: 0, note: '找不到 R-R' };
         const event = config.before;
         return event >= pause.from - SCROLL_PAUSE_EVENT_SLACK && event <= pause.to
@@ -5531,8 +5539,8 @@
             : { penalty: 40, note: `最長 R-R 在第 ${pause.from.toFixed(1)}–${pause.to.toFixed(1)} 秒，不在事件時間（第 ${event} 秒）` };
     }
     // 暫停前後各至少 2 顆心搏印在白色區段內，才看得出暫停前後的節律。
-    function scorePauseContext({ all, white }) {
-        const pause = longestInterval(all);
+    function scorePauseContext({ all, white, config }) {
+        const pause = longestInterval(all, config.before);
         if (!pause) return { penalty: 0, note: '找不到 R-R' };
         const [from, to] = white;
         const before = all.filter(beat => beat.offset >= from && beat.offset <= pause.from).length;
@@ -5663,8 +5671,8 @@
         return { penalty: step[1], note: `白色區段內雜訊約 ${seconds.toFixed(1)} 秒（${parts}）` };
     }
     // Longest R-R：最長的 R-R 內或兩端（±0.1 秒）有雜訊時，暫停可能是雜訊造成的（例如飽和後的平線），或心搏被雜訊蓋住而漏標。
-    function scorePauseNoise({ all, noise }) {
-        const pause = longestInterval(all);
+    function scorePauseNoise({ all, noise, config }) {
+        const pause = longestInterval(all, config.before);
         if (!pause) return { penalty: 0, note: '找不到 R-R' };
         const hit = noise.some(window => window.to > pause.from - 0.1 && window.from < pause.to + 0.1);
         return hit ? { penalty: SCROLL_PAUSE_NOISE_PENALTY, note: `最長 R-R（第 ${pause.from.toFixed(1)}–${pause.to.toFixed(1)} 秒）內或兩端有雜訊，暫停可能不可靠` }
