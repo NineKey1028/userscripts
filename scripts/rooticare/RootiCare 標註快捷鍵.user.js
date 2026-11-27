@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.65.2
+// @version      1.67.2
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -98,11 +98,15 @@
  *                          「選印範圍」每張改顯示報告下方 30 秒縮圖的範圍（同選印清單 👁）：一列填滿寬度（格子維持正方形，高度較矮），
  *                          使用網站自己的標籤列與心電圖，標籤可照常點擊或用快捷鍵修改；綠色底為印出的 8 秒，只讀取畫面附近的卡片；
  *                          兩個按鈕互斥，再按一次還原；
- *                          不記住開關，重新整理、重開清單或開新報告都回到顯示評分欄的樣式
+ *                          切換過的顯示方式在重新整理（F5）或重開網頁前，之後開啟的捲動檢視都沿用；重新整理後回到顯示評分欄的樣式
  *   VEB／SVEB 清單（Isolated、Couplet、Triplet、Bigeminy、Trigeminy、VT、SVE run、SVT）  同樣有「☰ 捲動檢視」，但不評分：
  *                          張數可達數千張，每頁 100 張、一欄連續排列，以上方頁碼列換頁；Minimap 為本頁各張（「印」＝有選印：綠色選印、橘色強制選印、藍色區段選印，
  *                          同時有兩種以上時左右分色；★＝星號），
  *                          頁數拉條、選印圓點、「選印 N 張」（選印清單）與「⚡ 快速選印」照常可用；點選印圓點會換到該頁並捲到該頁第一張選印；
+ *                          「僅選印」只顯示有選印的心電圖（綠色、橘色強制、藍色選印），再按一次（顯示全部）或返回分頁即還原；選印紀錄不受影響
+ *                          選印的卡片（綠色、藍色；橘色強制選印除外）時間旁有「換一個」：依快速選印的規則換成另一張，換好後捲到換上的那張，
+ *                          該張加黃框（出現時閃一下）並標「新選印」，Minimap 上黃框並標「新」；只標最近一次新增的選印
+ *                          （換一個、快速選印、加選、點印表機圖示都算，同一次新增多張時一起標），再新增時原本的標示取消
  *   Tachycardia、Bradycardia、Pause（含 2–3／3–4／4–5／≥5 秒）清單  同樣有「☰ 捲動檢視」（不評分、每頁 100 張）；
  *                          編輯模式下（捲動檢視與一般分頁皆可）按住左鍵在心電圖上往下（或往上、橫向）拖曳，經過的卡片一次消除（Artifact），拖到捲動區上下緣會自動捲動，
  *                          按住時轉動滾輪也可捲動，捲到游標下的卡片同樣消除；按下後不會反白文字；
@@ -5453,7 +5457,9 @@
             // Tachycardia、Bradycardia、Pause（含 2–3、3–4、4–5、≥5 秒）：同樣不評分；可按住左鍵在心電圖上拖曳快速消除（見 SWIPE_TYPES）。
             ['tachy', 'Tachycardia'], ['brady', 'Bradycardia'], ['pause', 'Pause'], ['pause23', 'Pause 2–3 s'],
             ['pause34', 'Pause 3–4 s'], ['pause45', 'Pause 4–5 s'], ['pause5', 'Pause ≥5 s'],
-        ].map(([type, name]) => [type, { name, score: false, perPage: SCROLL_EVENT_PER_PAGE }])),
+        ].map(([type, name]) => [type, { name, score: false, perPage: SCROLL_EVENT_PER_PAGE,
+            // VEB／SVEB 清單另有「僅選印」篩選（Tachy／Brady／Pause 沒有）。
+            printFilter: !/^(tachy|brady|pause)/.test(type) }])),
     };
     const SCROLL_DIALOG_IDS = ['af-hr-dialog', 'af-rr-dialog', 'af-event-dialog'];
     const SCROLL_ALL_PER_PAGE = 100000; // 捲動檢視時的每頁張數（全部放在同一頁）
@@ -5826,8 +5832,21 @@
         :is(.rc-scroll-ctx, .rc-scroll-wide) > .ecg-individual-blk { position:relative; }
         .rc-scroll-wide-clip { position:relative; overflow:hidden; }
         .rc-scroll-wide-inner { position:relative; }
-        .rc-scroll-ctx-print { position:absolute; background:rgba(173,209,73,.14); pointer-events:none; z-index:3; }
+        .rc-scroll-ctx-print { position:absolute; background:rgba(173,209,73,.08); pointer-events:none; z-index:3; }
         .rc-scroll-ctx-cover { position:absolute; left:0; right:0; z-index:4; }
+        /* 選印的卡片標題列上的「換一個」（與快速選印相同的規則換成另一張） */
+        .rc-scroll-swap { height:18px; margin:0 6px; padding:0 9px; border:1px solid #8fb43a; border-radius:9px; background:#f4f9e8; color:#4f6b1a;
+            font-family:inherit; font-size:11px; font-weight:600; line-height:16px; vertical-align:middle; cursor:pointer; }
+        .rc-scroll-swap:hover:not(:disabled) { background:#5b7d1a; border-color:#5b7d1a; color:#fff; }
+        .rc-scroll-swap:disabled { cursor:progress; opacity:.75; }
+        .rc-scroll-swap[hidden] { display:none; }
+        /* 最近一次新增的選印：卡片黃框、出現時閃一下，時間旁「新選印」；Minimap 黃框並標「新」 */
+        .ngdialog.rc-scroll-mode .content-blk > .ecg-blk.rc-scroll-new { box-shadow:0 0 0 3px #f0b400; animation:rc-scroll-new-flash 1.2s ease-in-out 2; }
+        @keyframes rc-scroll-new-flash { 50% { box-shadow:0 0 0 6px rgba(240,180,0,.45); background:rgba(255,236,170,.45); } }
+        .rc-scroll-newbadge { margin:0 4px; padding:0 7px; border-radius:9px; background:#f0b400; color:#fff; font-size:11px; font-weight:700;
+            line-height:18px; vertical-align:middle; }
+        .rc-scroll-newbadge[hidden] { display:none; }
+        .rc-scroll-map-cell.is-new { box-shadow:inset 0 0 0 2px #f0b400; color:#fff6d6; }
         .rc-scroll-ctx[data-state]::before { content:attr(data-state); position:absolute; left:10px; top:24px; color:#7d8873; font-size:12px; }
         .rc-scroll-map { position:relative; flex:1 1 auto; min-height:0; overflow:hidden; border-radius:5px; background:#e6eadf;
             box-shadow:inset 0 0 0 1px #d3d9c6; cursor:pointer; user-select:none; touch-action:none; }
@@ -5989,7 +6008,8 @@
         panel.innerHTML = '<div class="rc-scroll-counts"></div>'
             + '<button type="button" class="rc-scroll-next" title="跳到下一張綠燈">▼ 綠燈</button>'
             + '<div class="rc-scroll-tools"><button type="button" class="rc-scroll-top" title="回到這頁第一張">▲ 頂端</button>'
-            + '<button type="button" class="rc-scroll-zoom"></button><button type="button" class="rc-scroll-range"></button></div>'
+            + '<button type="button" class="rc-scroll-zoom"></button><button type="button" class="rc-scroll-range"></button>'
+            + '<button type="button" class="rc-scroll-printonly" hidden>僅選印</button></div>'
             + '<div class="rc-scroll-map" title="點燈號跳到該張心電圖；點空白處或拖曳可捲動"></div>'
             + '<button type="button" class="rc-scroll-exit" title="回到分頁顯示（Esc）">返回分頁</button>';
         view.map = panel.querySelector('.rc-scroll-map');
@@ -5997,7 +6017,11 @@
         panel.querySelector('.rc-scroll-top').addEventListener('click', () => setScrollActive(view, 0, true));
         panel.querySelector('.rc-scroll-zoom').addEventListener('click', () => toggleScrollMode(view, 'zoom'));
         panel.querySelector('.rc-scroll-range').addEventListener('click', () => toggleScrollMode(view, 'context'));
-        setScrollMode(view, '');
+        const printOnly = panel.querySelector('.rc-scroll-printonly');
+        printOnly.hidden = !ctx.config.printFilter;
+        printOnly.title = '只顯示選印的心電圖（綠色選印、橘色強制選印、藍色選印），再按一次顯示全部';
+        printOnly.addEventListener('click', () => toggleScrollPrintFilter(view));
+        setScrollMode(view, lastScrollMode);
         panel.querySelector('.rc-scroll-exit').addEventListener('click', () => closeScrollView());
         installScrollMapDrag(view);
         ctx.root.appendChild(panel);
@@ -6122,7 +6146,8 @@
         for (const node of ctx.dialog.querySelectorAll('.rc-scroll-active')) node.classList.remove('rc-scroll-active');
         const perPage = view.saved.perPage;
         if (isHRDialogShown(ctx.dialog) && ctx.ed.dscp?.type === ctx.type && Array.isArray(ctx.ed.pageData)) {
-            const flat = ctx.ed.pageData.flat();
+            // 僅選印篩選中：回到分頁時還原完整清單。
+            const flat = view.printOnly && view.fullFlat ? view.fullFlat : ctx.ed.pageData.flat();
             const pages = splitScrollPages(flat, perPage);
             const absolute = (Math.max(1, Number(ctx.ed.pagination?.currentPage) || 1) - 1) * view.perPage + view.active;
             const page = Math.min(Math.max(1, Math.floor(absolute / perPage) + 1), pages.length);
@@ -6152,6 +6177,12 @@
             const pages = splitScrollPages(flat, view.perPage);
             setScrollPages(ctx, pages, view.perPage, Math.min(pages.length, Math.floor(first / view.perPage) + 1));
         }
+        // 僅選印篩選中，網站重新建立了完整的清單（例如重新 Group）：以新的清單再篩選一次。
+        if (view.printOnly && ctx.ed.pageData !== view.filterPages) {
+            const flat = ctx.ed.pageData.flat();
+            if (flat.length > view.filterCount) { view.fullFlat = flat; applyScrollPrintFilter(view); }
+            else view.filterPages = ctx.ed.pageData;
+        }
         // 換頁（上方頁碼列）：回到這頁的第一張。
         const page = Math.max(1, Number(ctx.ed.pagination.currentPage) || 1);
         if (page !== view.page) {
@@ -6180,6 +6211,15 @@
         }
         observeScrollCards(view, cards);
         refreshScrollPrintSets(view);
+        trackScrollNewPrints(view);
+        // 換一個之後：等換上的那張出現在卡片中再捲過去（換頁後網站重建卡片，最多等 4 秒）。
+        if (view.itemJump) {
+            if (performance.now() - view.itemJump.at > 4000) view.itemJump = null;
+            else {
+                const index = cards.findIndex(card => toEventTime(scrollCardData(card)?.startTime) === view.itemJump.time);
+                if (index >= 0) { view.itemJump = null; setScrollActive(view, index, true); }
+            }
+        }
         // 選印圓點跳頁後：網站約 0.5 秒後才標上各張的選印勾選，等到出現選印的卡片再捲過去（最多等 4 秒）。
         if (view.printJump) {
             const age = performance.now() - view.printJump.at;
@@ -6218,10 +6258,11 @@
         if (keepHeight && height) content.style.height = `${Math.max(SCROLL_MIN_HEIGHT, height - (next - margin))}px`;
     }
     // 顯示方式（view.mode）：'' 一般（顯示評分欄）、'zoom' 放大 ECG、'context' 選印範圍；兩個按鈕互斥，再按一次回到一般。
-    // 每次開啟捲動檢視預設為一般，不記住開關。
+    // 切換過的顯示方式保留到重新整理頁面（之後開啟的捲動檢視沿用，換清單、換報告也一樣），重新整理後回到一般。
     // 放大 ECG：隱藏評分欄，心電圖拉寬到填滿卡片、高度不變、格子正方形（見 updateScrollZoom）。
     // 選印範圍：隱藏評分欄與網站的 10 秒心電圖，改顯示報告下方 30 秒縮圖的範圍（與選印清單的 👁 相同：印出的 8 秒前 11 秒起），
     // 以網站的元件畫成一列（可編輯標籤）；綠色底為印出的 8 秒。資料只讀取畫面附近的卡片。
+    let lastScrollMode = ''; // 上次切換的顯示方式：之後開啟的捲動檢視沿用，重新整理頁面後回到一般
     const SCROLL_MODE_BUTTONS = {
         zoom: { selector: '.rc-scroll-zoom', off: '放大 ECG', on: '還原大小',
             offTitle: '隱藏評分欄，心電圖拉寬到填滿卡片，高度不變、格子維持正方形（波形跟著變高）', onTitle: '還原心電圖並顯示評分欄' },
@@ -6250,6 +6291,7 @@
         let anchor = getScrollCards(view).findIndex(card => card.offsetTop + card.offsetHeight > content.scrollTop + 4);
         if (anchor < 0) anchor = view.active;
         setScrollMode(view, view.mode === mode ? '' : mode);
+        lastScrollMode = view.mode;
         requestAnimationFrame(() => {
             scrollToCard(view, anchor, 'auto');
             updateScrollMapView(view);
@@ -6502,12 +6544,18 @@
         const ecg = data.ecg.map(Number);
         const seconds = ecg.length / sampleRate;
         const start = Number.isFinite(data.rcStart) ? data.rcStart : eventTime - PRINT_CONTEXT_BEFORE - 3;
+        // 紀錄開頭附近的事件：紀錄開始前沒有資料，伺服器從紀錄開始處回傳（較短），心電圖實際從 dataStart 開始。
+        // 比例固定為 30 秒填滿寬度，較短的資料只畫出對應的寬度，印出範圍依實際起點定位。
+        const recordStart = Number(view.ctx.af.record?.dataRange?.[0]);
+        const dataStart = Number.isFinite(recordStart) && recordStart > start ? recordStart : start;
+        const pxPerSec = width / PRINT_CONTEXT_SECONDS;
+        const stripWidth = Math.min(width, Math.round(seconds * pxPerSec));
         const scope = cardScope.$new();
         scope.rcCtx = {
             ecg,
             anno: Object.entries(data.anno || {}).map(([index, type]) => ({ type, index: Number(index) })),
             posInfo: { idxRange: [data.fromIndex, data.endIndex], sampleRate, morphologyType: data.morphologyType || {} },
-            sampleRate, sec: seconds, start, width, height: size.height,
+            sampleRate, sec: seconds, start: dataStart, width: stripWidth, height: size.height,
         };
         const element = $compile(SCROLL_CONTEXT_TEMPLATE)(scope)[0];
         box.rcScope = scope;
@@ -6515,11 +6563,11 @@
         scope.$digest();
         // 印出的 8 秒（淡綠色）：疊在網站的心電圖上，不攔截滑鼠；遮罩（rc-scroll-ctx-cover）與心電圖同高。
         // 不標事件時間：清單的事件時間只到整秒，事件的心搏實際落在其後約 1 秒內，標出來反而容易誤會。
-        const pxPerSec = width / seconds;
         const overlay = document.createElement('div');
         overlay.className = 'rc-scroll-ctx-print';
-        overlay.style.left = `${PRINT_CONTEXT_BEFORE * pxPerSec}px`;
-        overlay.style.width = `${PRINT_SHOWN_SECONDS * pxPerSec}px`;
+        const printLeft = (start + PRINT_CONTEXT_BEFORE - dataStart) * pxPerSec;
+        overlay.style.left = `${Math.max(0, printLeft)}px`;
+        overlay.style.width = `${Math.max(0, Math.min(stripWidth, printLeft + PRINT_SHOWN_SECONDS * pxPerSec) - Math.max(0, printLeft))}px`;
         element.appendChild(overlay);
         requestAnimationFrame(() => {
             const wave = element.querySelector('.ecgWave');
@@ -6598,6 +6646,7 @@
             // 不評分的清單：沒有燈號與評分欄，只標示目前這張與更新 Minimap。
             card.classList.toggle('rc-scroll-active', index === view.active);
             updateScrollCell(view, card, index, null, '');
+            decorateScrollSwap(view, card);
             return;
         }
         const header = card.querySelector('.event-blk-header');
@@ -6770,21 +6819,23 @@
         const printed = kinds.length > 0;
         const starred = !!data?.isSpecific;
         const big = view.mapCell - 3 >= 9;
-        const signature = `${light}|${kinds.join(',')}|${starred}|${index === view.active}|${big}`;
+        // 最近一次新增的選印（見 trackScrollNewPrints）：Minimap 加黃框並標「新」。
+        const fresh = printed && !!view.newTimes?.has(time);
+        const signature = `${light}|${kinds.join(',')}|${starred}|${index === view.active}|${big}|${fresh}`;
         if (cell.dataset.signature === signature) return;
         cell.dataset.signature = signature;
         cell.className = 'rc-scroll-map-cell' + (light ? ` is-${light}` : '') + (view.scored ? '' : ' is-plain') + (printed ? ' is-printed' : '')
-            + (starred ? ' is-starred' : '') + (big ? '' : ' is-small') + (index === view.active ? ' is-active' : '');
+            + (starred ? ' is-starred' : '') + (big ? '' : ' is-small') + (index === view.active ? ' is-active' : '') + (fresh ? ' is-new' : '');
         // 不評分的清單：燈號顏色即選印種類，同時有多種時左右分色。
         if (!view.scored) {
             const colors = kinds.map(kind => SCROLL_PRINT_KINDS[kind].color);
             cell.style.background = !colors.length ? '' : colors.length === 1 ? colors[0]
                 : `linear-gradient(90deg, ${colors.map((color, i) => `${color} ${i * 100 / colors.length}% ${(i + 1) * 100 / colors.length}%`).join(', ')})`;
         }
-        cell.querySelector('.rc-map-print').textContent = big && printed ? '印' : '';
+        cell.querySelector('.rc-map-print').textContent = big && printed ? (fresh ? '新' : '印') : '';
         cell.querySelector('.rc-map-star').textContent = big && starred ? '★' : '';
         const printText = view.scored ? (printed ? '　已選印' : '') : kinds.map(kind => `　${SCROLL_PRINT_KINDS[kind].name}`).join('');
-        cell.title = `#${index + 1}` + (light ? `　${entry.result.score} 分` : '') + printText + (starred ? '　★' : '');
+        cell.title = `#${index + 1}` + (light ? `　${entry.result.score} 分` : '') + printText + (fresh ? '　最新選印' : '') + (starred ? '　★' : '');
     }
     // 藍框：目前畫面中看得到的卡片範圍。Minimap 放不下所有燈號時，依清單捲動的比例移動，使藍框保持在 Minimap 內。
     function updateScrollMapView(view) {
@@ -6860,6 +6911,155 @@
         });
         if (scroll) scrollToCard(view, index);
     }
+    // 僅選印（VEB／SVEB 清單）：分頁資料只留下有選印的心電圖（綠色選印、橘色強制選印、藍色選印），每頁張數不變；
+    // 完整清單記在 view.fullFlat，再按一次或返回分頁時還原。只改顯示用的分頁資料，選印紀錄與快速選印（讀網站的完整清單）不受影響；
+    // 分頁資料與完整清單張數不同時，「不在清單中的選印」自動取消也不會作用（getOrphanPrints）。
+    function isScrollItemPrinted(view, item) {
+        const { af, ed } = view.ctx;
+        // 清單資料可能是物件（含 startTime）或直接是時間（VEB／SVEB 清單）。
+        if (typeof item === 'object' && item && (item.isPrintSection || isSitePrintSelected(af, item, ed.dscp?.printedEventType))) return true;
+        const time = toEventTime(typeof item === 'object' && item ? item.startTime : item);
+        if (time === null) return false;
+        const selected = af.printDialog?.selectedEvents?.[ed.dscp?.printedEventType];
+        if (Array.isArray(selected) && selected.some(value => toEventTime(value) === time)) return true;
+        const sets = view.printSets;
+        return !!sets && (sets.forced.has(time) || sets.section.has(time));
+    }
+    function applyScrollPrintFilter(view) {
+        const printed = view.fullFlat.filter(item => isScrollItemPrinted(view, item));
+        view.filterCount = printed.length;
+        setScrollPages(view.ctx, splitScrollPages(printed, view.perPage), view.perPage, 1);
+        view.filterPages = view.ctx.ed.pageData;
+    }
+    function toggleScrollPrintFilter(view) {
+        const button = view.panel.querySelector('.rc-scroll-printonly');
+        refreshScrollPrintSets(view);
+        if (!view.printOnly) {
+            const full = view.ctx.ed.pageData.flat();
+            if (!full.some(item => isScrollItemPrinted(view, item))) { quickToast(button, '這個清單沒有選印的心電圖', true); return; }
+            view.fullFlat = full;
+            view.printOnly = true;
+            applyScrollPrintFilter(view);
+        } else {
+            const full = view.fullFlat || view.ctx.ed.pageData.flat();
+            view.printOnly = false;
+            view.fullFlat = null;
+            view.filterPages = null;
+            setScrollPages(view.ctx, splitScrollPages(full, view.perPage), view.perPage, 1);
+        }
+        button.classList.toggle('is-on', view.printOnly);
+        button.textContent = view.printOnly ? '顯示全部' : '僅選印';
+        view.page = 1;
+        view.active = 0;
+        view.content.scrollTop = 0;
+        tickScrollView(view);
+    }
+    // 「新」標示：只標最近一次新增的選印（換一個、快速選印、加選、點印表機圖示都算）；同一次新增多張時一起標。
+    // 比對前後的綠色與藍色選印（不看分頁，強制選印由網站決定不算），出現新的時間就以它們取代原本的「新」。
+    function trackScrollNewPrints(view) {
+        const { af, ed, type } = view.ctx;
+        if (!QUICK_PRINT_TYPES[type]) return;
+        const selected = af.printDialog?.selectedEvents?.[ed.dscp?.printedEventType];
+        const now = new Set([...(Array.isArray(selected) ? selected : []).map(toEventTime), ...(view.printSets?.section || [])]
+            .filter(time => time !== null));
+        if (view.prevPrinted) {
+            const added = [...now].filter(time => !view.prevPrinted.has(time));
+            if (added.length) view.newTimes = new Set(added);
+        }
+        view.prevPrinted = now;
+    }
+    // 換一個（VEB／SVEB 清單的捲動檢視）：選印的卡片標題列加上按鈕，依快速選印的規則（與選印清單的「換一個」相同）
+    // 換成另一張：取消這張、選印找到的那張，這張記為淘汰（之後快速選印、換一個不再選回）。橘色強制選印由網站決定，不顯示。
+    // 選印只改網站記憶體中的資料，與快速選印相同，關閉事件清單時由網站上傳。換好後捲到換上的那張（在其他頁時換頁）。
+    function decorateScrollSwap(view, card) {
+        const header = card.querySelector('.event-blk-header');
+        if (!header) return;
+        let button = header.querySelector('.rc-scroll-swap');
+        const data = scrollCardData(card);
+        const time = toEventTime(data?.startTime);
+        const kinds = time === null ? [] : getScrollPrintKinds(view, data, time);
+        const show = !!QUICK_PRINT_TYPES[view.ctx.type] && !kinds.includes('forced') && (kinds.includes('selected') || kinds.includes('section'));
+        // 最近一次新增的選印（見 trackScrollNewPrints）：卡片加黃框（出現時閃一下）並在時間旁標「新選印」。
+        const fresh = kinds.length > 0 && !!view.newTimes?.has(time);
+        card.classList.toggle('rc-scroll-new', fresh);
+        let badge = header.querySelector('.rc-scroll-newbadge');
+        if (fresh && !badge) {
+            badge = document.createElement('span');
+            badge.className = 'rc-scroll-newbadge';
+            badge.textContent = '新選印';
+            const anchor = header.querySelector('.pop-out-bnt');
+            if (anchor) anchor.after(badge); else header.appendChild(badge);
+        }
+        if (badge) badge.hidden = !fresh;
+        if (!show && !button) return;
+        if (!button) {
+            button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'rc-scroll-swap';
+            button.textContent = '換一個';
+            button.title = '依快速選印的規則換成另一張（這張取消選印並記為淘汰）';
+            button.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const current = toEventTime(scrollCardData(card)?.startTime);
+                if (current !== null) swapScrollPrint(view, current, button);
+            });
+            const anchor = header.querySelector('.pop-out-bnt');
+            if (anchor) anchor.after(button); else header.appendChild(button);
+        }
+        if (!button.disabled) button.hidden = !show;
+    }
+    async function swapScrollPrint(view, time, button) {
+        if (view.swapBusy || quickState.busy || review?.busy) return;
+        const ctx = getQuickContext(button);
+        if (!ctx || !QUICK_PRINT_TYPES[ctx.type]) return;
+        view.swapBusy = true;
+        button.disabled = true;
+        button.textContent = '尋找中…';
+        try {
+            getQuickRejected(ctx).add(time);
+            const { times, candidates } = await getQuickCandidates(ctx, (done, total) => { button.textContent = `${done}/${total}`; });
+            if (scrollView !== view) return;
+            const existing = getQuickPrinted(ctx, times).all.filter(other => other !== time);
+            const range = getQuickRange(ctx, times);
+            button.textContent = '驗證中…';
+            const { valid: [replacement = null], skipped, lowPriority } = await pickValidated(ctx, candidates, existing, 1,
+                (pool, others) => [pickQuickReplacement({ candidates: pool, existing: others, removed: time,
+                    target: ctx.config.target(times.length), ...range, spread: ctx.config.spread !== false })].filter(value => value !== null));
+            if (scrollView !== view) return;
+            if (replacement === null) {
+                getQuickRejected(ctx).delete(time);
+                quickToast(button, '沒有其他符合條件的心電圖（需與其他選印相隔 1 分鐘以上，且不選淘汰過的及其前後 30 秒）'
+                    + (skipped.length ? `；${skipped.length} 張標籤已不符合` : ''), true);
+                return;
+            }
+            setQuickPrint(ctx, time, false);
+            const section = setQuickPrint(ctx, replacement, true);
+            view.newTimes = new Set([replacement]);
+            quickToast(button, `已換成 ${formatQuickTime(ctx, replacement)}` + (section ? '（超過 30 秒，藍色選印）' : '')
+                + (lowPriority ? '（沒有其他候選，使用前兩顆為 V、N 的 S）' : ''));
+            showScrollItem(view, replacement);
+        } catch (error) {
+            quickToast(button, `換一個失敗：${error?.message || error}`, true);
+        } finally {
+            view.swapBusy = false;
+            if (button.isConnected) { button.disabled = false; button.textContent = '換一個'; }
+            if (scrollView === view) tickScrollView(view);
+        }
+    }
+    // 捲到某個時間的卡片：僅選印時重新篩選（換掉的那張移除、換上的加入）；不在目前這頁時換到該頁。
+    function showScrollItem(view, time) {
+        const { ctx } = view;
+        refreshScrollPrintSets(view);
+        if (view.printOnly && view.fullFlat) applyScrollPrintFilter(view);
+        const flat = ctx.ed.pageData.flat();
+        const index = flat.findIndex(item => toEventTime(typeof item === 'object' && item ? item.startTime : item) === time);
+        if (index < 0) return;
+        const page = Math.floor(index / view.perPage) + 1;
+        const current = Math.max(1, Number(ctx.ed.pagination.currentPage) || 1);
+        if (page !== current) setScrollPages(ctx, ctx.ed.pageData, view.perPage, page);
+        view.itemJump = { time, at: performance.now() };
+    }
     function jumpNextGreen(view) {
         if (!view.scored) return;
         const order = [...Array(view.count).keys()];
@@ -6881,7 +7081,7 @@
             const forced = kinds.filter(list => list.includes('forced')).length;
             const section = kinds.filter(list => list.includes('section')).length;
             const detail = [forced ? `強制 ${forced}` : '', section ? `藍色 ${section}` : ''].filter(Boolean).join('、');
-            const html = `<span>共 ${total} 張</span>`
+            const html = (view.printOnly ? `<span>僅選印 ${total} 張</span><span>（全部 ${view.fullFlat?.length ?? total} 張）</span>` : `<span>共 ${total} 張</span>`)
                 + (total > view.count ? `<span>本頁 ${view.count ? from + 1 : 0}–${from + view.count}</span>` : '')
                 + `<span>本頁選印 ${printed}</span>` + (detail ? `<span>（${detail}）</span>` : '');
             const holder = view.panel.querySelector('.rc-scroll-counts');
