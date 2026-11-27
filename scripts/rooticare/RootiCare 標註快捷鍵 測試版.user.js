@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.67.3
+// @version      1.67.4
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -103,7 +103,8 @@
  *                          張數可達數千張，每頁 100 張、一欄連續排列，以上方頁碼列換頁；Minimap 為本頁各張（「印」＝有選印：綠色選印、橘色強制選印、藍色區段選印，
  *                          同時有兩種以上時左右分色；★＝星號），
  *                          頁數拉條、選印圓點、「選印 N 張」（選印清單）與「⚡ 快速選印」照常可用；點選印圓點會換到該頁並捲到該頁第一張選印；
- *                          「僅選印」只顯示有選印的心電圖（綠色、橘色強制、藍色選印），再按一次（顯示全部）或返回分頁即還原；選印紀錄不受影響
+ *                          「僅選印」只顯示有選印的心電圖（綠色、橘色強制、藍色選印），再按一次（顯示全部）或返回分頁即還原；選印紀錄不受影響；
+ *                          篩選中選印有增減（快速選印、換一個、取消選印等）時清單隨即更新，停在原本那頁，新增的選印會捲過去
  *                          選印的卡片（綠色、藍色；橘色強制選印除外）時間旁有「換一個」：依快速選印的規則換成另一張，換好後捲到換上的那張，
  *                          該張加黃框（出現時閃一下）並標「新選印」，Minimap 上黃框並標「新」；只標最近一次新增的選印
  *                          （換一個、快速選印、加選、點印表機圖示都算，同一次新增多張時一起標），再新增時原本的標示取消
@@ -6213,6 +6214,17 @@
         observeScrollCards(view, cards);
         refreshScrollPrintSets(view);
         trackScrollNewPrints(view);
+        // 僅選印篩選中選印有增減（快速選印、選印清單的加選或取消、點印表機圖示等）：重新篩選，停在原本那頁；
+        // 有新增的選印時捲到其中最早的那張。換一個由 showScrollItem 自行處理。
+        if (view.printOnly && view.fullFlat && !view.swapBusy && scrollPrintSignature(view) !== view.filterSignature) {
+            const page = Math.max(1, Number(ctx.ed.pagination.currentPage) || 1);
+            const added = view.newTimes && view.newTimes !== view.filterNewTimes ? [...view.newTimes] : [];
+            applyScrollPrintFilter(view, page);
+            const first = added.length ? Math.min(...added) : null;
+            if (first !== null) showScrollItem(view, first);
+            tickScrollView(view);
+            return;
+        }
         // 換一個之後：等換上的那張出現在卡片中再捲過去（換頁後網站重建卡片，最多等 4 秒）。
         if (view.itemJump) {
             if (performance.now() - view.itemJump.at > 4000) view.itemJump = null;
@@ -6926,11 +6938,20 @@
         const sets = view.printSets;
         return !!sets && (sets.forced.has(time) || sets.section.has(time));
     }
-    function applyScrollPrintFilter(view) {
+    // 完整清單中有選印的時間（依清單順序），用來察覺篩選後選印的增減。
+    function scrollPrintSignature(view) {
+        return view.fullFlat.filter(item => isScrollItemPrinted(view, item))
+            .map(item => toEventTime(typeof item === 'object' && item ? item.startTime : item)).join(',');
+    }
+    // page：篩選後停在第幾頁（超過頁數時停在最後一頁），預設第 1 頁。
+    function applyScrollPrintFilter(view, page = 1) {
         const printed = view.fullFlat.filter(item => isScrollItemPrinted(view, item));
         view.filterCount = printed.length;
-        setScrollPages(view.ctx, splitScrollPages(printed, view.perPage), view.perPage, 1);
+        view.filterSignature = printed.map(item => toEventTime(typeof item === 'object' && item ? item.startTime : item)).join(',');
+        const pages = splitScrollPages(printed, view.perPage);
+        setScrollPages(view.ctx, pages, view.perPage, Math.min(Math.max(1, page), pages.length));
         view.filterPages = view.ctx.ed.pageData;
+        view.filterNewTimes = view.newTimes; // 已反映在這次篩選中的「新」選印
     }
     function toggleScrollPrintFilter(view) {
         const button = view.panel.querySelector('.rc-scroll-printonly');
