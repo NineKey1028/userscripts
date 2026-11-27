@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.67.2
+// @version      1.67.3
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -111,6 +111,7 @@
  *                          編輯模式下（捲動檢視與一般分頁皆可）按住左鍵在心電圖上往下（或往上、橫向）拖曳，經過的卡片一次消除（Artifact），拖到捲動區上下緣會自動捲動，
  *                          按住時轉動滾輪也可捲動，捲到游標下的卡片同樣消除；按下後不會反白文字；
  *                          從已消除的卡片開始拖曳則為恢復；改成 PSVT／VT 的卡片不受影響；只點一下仍是網站原本的切換
+ *                          只消除游標經過心電圖的卡片：拖曳中把游標移到心電圖左右兩側（例如右側空白處）再往下，經過的卡片會略過，移回心電圖上再繼續消除
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
  *   V / S 事件清單          「⚡ 快速選印」依規則補足選印（時段分散、相隔 1 分鐘以上）；
  *                          按「選印 N 張」開啟選印清單：上方為心電圖視窗（可改標籤並 Save），
@@ -7158,7 +7159,8 @@
         });
         if ((data.selectedType || 'none') === swipe.to) swipe.count++;
     }
-    // 捲動檢視為一欄：上次經過的卡片與目前這張之間的卡片（滑鼠移動太快跳過的）也一併處理。分頁顯示為兩欄，只處理經過的卡片。
+    // 捲動檢視為一欄：上次經過的卡片與目前這張之間的卡片（滑鼠移動或滾輪太快跳過的）也一併處理。分頁顯示為兩欄，只處理經過的卡片。
+    // 游標往左右移出心電圖那一欄（例如移到右側空白處）時中斷（swipeBreak），之後經過的卡片不補，可用來略過不想消除的心電圖。
     function swipeReach(card) {
         if (!swipe || !card) return;
         if (swipe.single && swipe.last) {
@@ -7173,6 +7175,20 @@
         swipeApply(card);
         swipe.last = card;
     }
+    // 游標在心電圖那一欄的左右範圍外：中斷補卡（上下移動經過卡片標題列等空隙時不算，仍會補）。
+    function swipeOutsideColumn(x) {
+        const column = swipe?.column;
+        return !!column && (x < column.left || x > column.right);
+    }
+    function swipeBreak() {
+        if (swipe) swipe.last = null;
+    }
+    // 檢查某個游標位置：在心電圖上就處理該張；移出心電圖那一欄就中斷。
+    function swipeSample(x, y) {
+        const card = swipeCardAt(x, y);
+        if (card) swipeReach(card);
+        else if (swipeOutsideColumn(x)) swipeBreak();
+    }
     function swipeAutoScroll() {
         if (!swipe?.active) return;
         const rect = swipe.scroller === document.scrollingElement
@@ -7182,7 +7198,7 @@
         else if (swipe.y < rect.top + SWIPE_EDGE) delta = -Math.min(1, ((rect.top + SWIPE_EDGE) - swipe.y) / SWIPE_EDGE);
         if (delta) swipe.scroller.scrollTop += Math.ceil(Math.abs(delta) * SWIPE_SPEED) * Math.sign(delta);
         // 每格都檢查游標下的卡片：自動捲動或拖曳中轉動滾輪時，捲到游標下的卡片也一併處理。
-        swipeReach(swipeCardAt(swipe.x, swipe.y));
+        swipeSample(swipe.x, swipe.y);
         swipe.raf = requestAnimationFrame(swipeAutoScroll);
     }
     function endSwipe() {
@@ -7213,7 +7229,7 @@
         if (from !== 'none' && from !== 'artifact') return;
         const dialog = card.closest('#af-event-dialog');
         swipe = { start: card, last: null, from, to: from === 'none' ? 'artifact' : 'none', active: false, done: new Set(), count: 0,
-            x: event.clientX, y: event.clientY, dialog, scroller: swipeScroller(card), raf: 0,
+            x: event.clientX, y: event.clientY, dialog, scroller: swipeScroller(card), raf: 0, column: cover.getBoundingClientRect(),
             single: !!dialog.closest('.ngdialog')?.classList.contains('rc-scroll-mode') };
         // 按下時就禁止選取文字：拖曳要移到別張才算開始，在那之前滑鼠移動已會反白心電圖上的文字。
         document.body.classList.add('rc-swipe-armed');
@@ -7224,26 +7240,33 @@
     const SWIPE_PATH_STEP = 16;
     function swipeUpdate(from = null) {
         if (!swipe) return;
+        // 沿路的取樣：卡片，或 null（游標移出心電圖那一欄，中斷補卡）。
         const passed = [];
+        const push = (x, y) => {
+            const card = swipeCardAt(x, y);
+            const item = card || (swipeOutsideColumn(x) ? null : undefined);
+            if (item !== undefined && item !== passed[passed.length - 1]) passed.push(item);
+        };
         if (from) {
             const steps = Math.ceil(Math.hypot(swipe.x - from.x, swipe.y - from.y) / SWIPE_PATH_STEP);
-            for (let i = 1; i < steps; i++) {
-                const card = swipeCardAt(from.x + (swipe.x - from.x) * i / steps, from.y + (swipe.y - from.y) * i / steps);
-                if (card && card !== passed[passed.length - 1]) passed.push(card);
-            }
+            for (let i = 1; i < steps; i++) push(from.x + (swipe.x - from.x) * i / steps, from.y + (swipe.y - from.y) * i / steps);
         }
-        const card = swipeCardAt(swipe.x, swipe.y);
-        if (card && card !== passed[passed.length - 1]) passed.push(card);
+        push(swipe.x, swipe.y);
         // 路徑經過別張卡片即開始拖曳（快速甩動時游標最後可能停在卡片之間的空白處）。
         if (!swipe.active) {
-            if (!passed.some(item => item !== swipe.start)) return;
+            // 還沒開始前就已移出心電圖那一欄：開始後先中斷，不補起點與之後卡片之間的卡片。
+            if (passed.includes(null)) swipe.brokeEarly = true;
+            if (!passed.some(item => item && item !== swipe.start)) return;
             swipe.active = true;
             document.body.classList.add('rc-swiping');
             window.getSelection?.()?.removeAllRanges();
             swipeReach(swipe.start);
+            if (swipe.brokeEarly) swipeBreak();
             swipe.raf = requestAnimationFrame(swipeAutoScroll);
         }
-        for (const item of passed) swipeReach(item);
+        for (const item of passed) {
+            if (item) swipeReach(item); else swipeBreak();
+        }
     }
     document.addEventListener('pointermove', event => {
         if (!swipe) return;
