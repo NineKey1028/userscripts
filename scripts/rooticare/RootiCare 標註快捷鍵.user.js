@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.61.0
+// @version      1.62.3
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -95,9 +95,14 @@
  *                          點空白處或拖曳可捲動，在 Minimap 上滾動滾輪即捲動清單；「返回分頁」或 Esc 回到原本的分頁，停在目前這張所在的頁。
  *                          按鍵：↑ ↓ 上一張、下一張（藍框標示目前這張，點卡片也可選），P 選印，F 星號，Enter 開啟心電圖視窗，G 下一個綠燈
  *   VEB／SVEB 清單（Isolated、Couplet、Triplet、Bigeminy、Trigeminy、VT、SVE run、SVT）  同樣有「☰ 捲動檢視」，但不評分：
- *                          張數可達數千張，每頁 100 張、一欄連續排列，以上方頁碼列換頁；Minimap 為本頁各張（綠色／「印」＝選印、★＝星號），
+ *                          張數可達數千張，每頁 100 張、一欄連續排列，以上方頁碼列換頁；Minimap 為本頁各張（「印」＝有選印：綠色選印、橘色強制選印、藍色區段選印，
+ *                          同時有兩種以上時左右分色；★＝星號），
  *                          頁數拉條、選印圓點、「選印 N 張」（選印清單）與「⚡ 快速選印」照常可用；點選印圓點會換到該頁並捲到該頁第一張選印；
  *                          按鍵與上方相同（沒有 G）；選印清單開著時按鍵交給選印清單（Esc 只關閉選印清單）
+ *   Tachycardia、Bradycardia、Pause（含 2–3／3–4／4–5／≥5 秒）清單  同樣有「☰ 捲動檢視」（不評分、每頁 100 張）；
+ *                          編輯模式下（捲動檢視與一般分頁皆可）按住左鍵在心電圖上往下（或往上、橫向）拖曳，經過的卡片一次消除（Artifact），拖到捲動區上下緣會自動捲動，
+ *                          按住時轉動滾輪也可捲動，捲到游標下的卡片同樣消除；按下後不會反白文字；
+ *                          從已消除的卡片開始拖曳則為恢復；改成 PSVT／VT 的卡片不受影響；只點一下仍是網站原本的切換
  *   事件清單頁碼拉條       選印位置（綠色、橘色強制選印）下方的圓點可點擊跳頁，右側顯示選印張數
  *   V / S 事件清單          「⚡ 快速選印」依規則補足選印（時段分散、相隔 1 分鐘以上）；
  *                          按「選印 N 張」開啟選印清單：上方為心電圖視窗（可改標籤並 Save），
@@ -5441,6 +5446,9 @@
             ['bigemini', 'VEB Bigeminy'], ['trigemini', 'VEB Trigeminy'], ['vt', 'VT'],
             ['S_isolated', 'SVEB Isolated'], ['sveb2s', 'SVEB Couplet'], ['sveb3s', 'SVEB Triplet'],
             ['S_bigemini', 'SVEB Bigeminy'], ['S_trigemini', 'SVEB Trigeminy'], ['sve', 'SVE run'], ['psvt', 'SVT'],
+            // Tachycardia、Bradycardia、Pause（含 2–3、3–4、4–5、≥5 秒）：同樣不評分；可按住左鍵在心電圖上拖曳快速消除（見 SWIPE_TYPES）。
+            ['tachy', 'Tachycardia'], ['brady', 'Bradycardia'], ['pause', 'Pause'], ['pause23', 'Pause 2–3 s'],
+            ['pause34', 'Pause 3–4 s'], ['pause45', 'Pause 4–5 s'], ['pause5', 'Pause ≥5 s'],
         ].map(([type, name]) => [type, { name, score: false, perPage: SCROLL_EVENT_PER_PAGE }])),
     };
     const SCROLL_DIALOG_IDS = ['af-hr-dialog', 'af-rr-dialog', 'af-event-dialog'];
@@ -6133,12 +6141,16 @@
             buildScrollMap(view);
         }
         observeScrollCards(view, cards);
+        refreshScrollPrintSets(view);
         // 選印圓點跳頁後：網站約 0.5 秒後才標上各張的選印勾選，等到出現選印的卡片再捲過去（最多等 4 秒）。
         if (view.printJump) {
             const age = performance.now() - view.printJump.at;
             if (age > 4000) view.printJump = null;
             else if (age > 300) {
-                const index = cards.findIndex(card => scrollCardData(card)?.selectedEvent);
+                const index = cards.findIndex(card => {
+                    const data = scrollCardData(card);
+                    return getScrollPrintKinds(view, data, toEventTime(data?.startTime)).length > 0;
+                });
                 if (index >= 0) { view.printJump = null; setScrollActive(view, index, true); }
             }
         }
@@ -6362,24 +6374,65 @@
         for (const cell of view.cells) cell.dataset.signature = '';
         updateScrollMapView(view);
     }
+    // 選印種類與 Minimap 顏色（與網站心電圖上的選印圖示相同：綠色選印、橘色強制選印、藍色區段選印）。
+    const SCROLL_PRINT_KINDS = {
+        selected: { name: '選印', color: '#8fb43a' },
+        forced: { name: '強制選印', color: '#d88f3f' },
+        section: { name: '藍色選印', color: '#3f7fd0' },
+    };
+    // 本頁選印狀態：強制選印即時讀取 printDialog（不支援的清單改用拉條的 preselectedEvents），
+    // 藍色選印為清單的區段勾選（eventDialog.section）與網站保存的區段範圍（eventRecordRange）。每次 tick 重算一次。
+    function refreshScrollPrintSets(view) {
+        const { af, type, dialog } = view.ctx;
+        let forced = getLiveForcedEvents(af);
+        if (!forced) {
+            try {
+                const bar = dialog.querySelector('.pagination-range svg.paginationEventBar');
+                forced = bar ? window.angular.element(bar).isolateScope()?.preselectedEvents : null;
+            } catch (_) { forced = null; }
+        }
+        const ranges = af.eventRecordRange?.[type];
+        const section = [...(Array.isArray(af.eventDialog?.section) ? af.eventDialog.section : []),
+            ...(ranges && typeof ranges === 'object' ? Object.keys(ranges) : [])];
+        const toSet = list => new Set((Array.isArray(list) ? list : []).map(toEventTime).filter(time => time !== null));
+        view.printSets = { forced: toSet(forced), section: toSet(section) };
+    }
+    function getScrollPrintKinds(view, data, time) {
+        const sets = view.printSets || { forced: new Set(), section: new Set() };
+        const kinds = [];
+        if (data?.selectedEvent) kinds.push('selected');
+        if (time !== null && sets.forced.has(time)) kinds.push('forced');
+        if (data?.isPrintSection || (time !== null && sets.section.has(time))) kinds.push('section');
+        return kinds;
+    }
     function updateScrollCell(view, card, index, entry, light) {
         const cell = view.cells[index];
         if (!cell) return;
         const data = scrollCardData(card);
         const time = view.items[index];
-        // HR／R-R 清單只有一張會印出（報告記錄的那張）；VEB／SVEB 清單依卡片的選印勾選框。
-        const printed = view.ctx.config.printed ? time !== null && toEventTime(view.ctx.config.printed(view.ctx.af)) === time
-            : !!data?.selectedEvent;
+        // HR／R-R 清單只有一張會印出（報告記錄的那張）；其他清單依選印種類：綠色選印（卡片勾選框）、
+        // 橘色強制選印、藍色區段選印，一張可能同時有兩種以上（見 getScrollPrintKinds）。
+        const kinds = view.ctx.config.printed
+            ? (time !== null && toEventTime(view.ctx.config.printed(view.ctx.af)) === time ? ['selected'] : [])
+            : getScrollPrintKinds(view, data, time);
+        const printed = kinds.length > 0;
         const starred = !!data?.isSpecific;
         const big = view.mapCell - 3 >= 9;
-        const signature = `${light}|${printed}|${starred}|${index === view.active}|${big}`;
+        const signature = `${light}|${kinds.join(',')}|${starred}|${index === view.active}|${big}`;
         if (cell.dataset.signature === signature) return;
         cell.dataset.signature = signature;
         cell.className = 'rc-scroll-map-cell' + (light ? ` is-${light}` : '') + (view.scored ? '' : ' is-plain') + (printed ? ' is-printed' : '')
             + (starred ? ' is-starred' : '') + (big ? '' : ' is-small') + (index === view.active ? ' is-active' : '');
+        // 不評分的清單：燈號顏色即選印種類，同時有多種時左右分色。
+        if (!view.scored) {
+            const colors = kinds.map(kind => SCROLL_PRINT_KINDS[kind].color);
+            cell.style.background = !colors.length ? '' : colors.length === 1 ? colors[0]
+                : `linear-gradient(90deg, ${colors.map((color, i) => `${color} ${i * 100 / colors.length}% ${(i + 1) * 100 / colors.length}%`).join(', ')})`;
+        }
         cell.querySelector('.rc-map-print').textContent = big && printed ? '印' : '';
         cell.querySelector('.rc-map-star').textContent = big && starred ? '★' : '';
-        cell.title = `#${index + 1}` + (light ? `　${entry.result.score} 分` : '') + (printed ? '　已選印' : '') + (starred ? '　★' : '');
+        const printText = view.scored ? (printed ? '　已選印' : '') : kinds.map(kind => `　${SCROLL_PRINT_KINDS[kind].name}`).join('');
+        cell.title = `#${index + 1}` + (light ? `　${entry.result.score} 分` : '') + printText + (starred ? '　★' : '');
     }
     // 藍框：目前畫面中看得到的卡片範圍。Minimap 放不下所有燈號時，依清單捲動的比例移動，使藍框保持在 Minimap 內。
     function updateScrollMapView(view) {
@@ -6468,10 +6521,17 @@
             // 不評分的清單：本頁範圍、總張數與本頁選印張數。
             const total = view.ctx.ed.pagination?.totalItems ?? view.count;
             const from = (view.page - 1) * view.perPage;
-            const printed = getScrollCards(view).filter(card => scrollCardData(card)?.selectedEvent).length;
+            const kinds = getScrollCards(view).map(card => {
+                const data = scrollCardData(card);
+                return getScrollPrintKinds(view, data, toEventTime(data?.startTime));
+            });
+            const printed = kinds.filter(list => list.length).length;
+            const forced = kinds.filter(list => list.includes('forced')).length;
+            const section = kinds.filter(list => list.includes('section')).length;
+            const detail = [forced ? `強制 ${forced}` : '', section ? `藍色 ${section}` : ''].filter(Boolean).join('、');
             const html = `<span>共 ${total} 張</span>`
                 + (total > view.count ? `<span>本頁 ${view.count ? from + 1 : 0}–${from + view.count}</span>` : '')
-                + `<span>本頁選印 ${printed}</span>`;
+                + `<span>本頁選印 ${printed}</span>` + (detail ? `<span>（${detail}）</span>` : '');
             const holder = view.panel.querySelector('.rc-scroll-counts');
             if (holder.innerHTML !== html) holder.innerHTML = html;
             return;
@@ -6530,6 +6590,150 @@
         event.preventDefault();
         event.stopImmediatePropagation();
     }, true);
+    // ── Tachy／Brady／Pause 清單：按住左鍵在心電圖上拖曳，經過的卡片一次消除（標為 Artifact） ──
+    // 網站點一下心電圖（graphy-cover 的 eventOperationControl）會循環切換類型：Tachy 為 none → artifact → psvt → vt，
+    // Brady、Pause 為 none ↔ artifact，並取消該張的選印；需編輯模式。拖曳時不循環：
+    // 從未消除（none）的卡片開始拖曳為「消除」，只改經過的未消除卡片；從已消除（artifact）的卡片開始為「恢復」，只改已消除的卡片；
+    // 改成 PSVT、VT 的卡片不受影響。只點一下（沒有拖到別張）時照常交給網站。
+    // 捲動檢視（一欄）中快速拖曳跳過的卡片也一併處理；拖到捲動區上下緣時自動捲動。
+    const SWIPE_TYPES = ['tachy', 'brady', 'pause', 'pause23', 'pause34', 'pause45', 'pause5'];
+    const SWIPE_EDGE = 56; // 捲動區上下緣多少 px 內自動捲動
+    const SWIPE_SPEED = 22; // 自動捲動每格最快的 px
+    let swipe = null;
+    const swipeStyle = document.createElement('style');
+    swipeStyle.textContent = `
+        body.rc-swipe-armed, body.rc-swipe-armed * { user-select:none !important; }
+        body.rc-swiping, body.rc-swiping * { user-select:none !important; cursor:ns-resize !important; }
+        body.rc-swiping #af-event-dialog .graphy-cover { box-shadow:inset 0 0 0 2px rgba(192,57,43,.35); }
+    `;
+    document.head.appendChild(swipeStyle);
+    function swipeCardAt(x, y) {
+        const cover = document.elementFromPoint(x, y)?.closest?.('#af-event-dialog .graphy-cover');
+        return cover ? cover.closest(HR_CARD_SELECTOR) : null;
+    }
+    function swipeScroller(card) {
+        for (let node = card.parentElement; node && node !== document.body; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) return node;
+        }
+        return document.scrollingElement;
+    }
+    function swipeApply(card) {
+        if (!swipe || swipe.done.has(card)) return;
+        swipe.done.add(card);
+        let scope;
+        try { scope = window.angular.element(card).scope(); } catch (_) { return; }
+        const data = scope?.currentData;
+        if (!data || typeof scope.eventOperationControl !== 'function' || (data.selectedType || 'none') !== swipe.from) return;
+        // 網站每點一次切換到下一個類型：一直點到目標類型為止（Tachy 由 artifact 恢復需經過 psvt、vt）。
+        scope.$apply(() => {
+            for (let i = 0; i < 4 && (data.selectedType || 'none') !== swipe.to; i++) scope.eventOperationControl(data);
+        });
+        if ((data.selectedType || 'none') === swipe.to) swipe.count++;
+    }
+    // 捲動檢視為一欄：上次經過的卡片與目前這張之間的卡片（滑鼠移動太快跳過的）也一併處理。分頁顯示為兩欄，只處理經過的卡片。
+    function swipeReach(card) {
+        if (!swipe || !card) return;
+        if (swipe.single && swipe.last) {
+            const cards = [...swipe.dialog.querySelectorAll(HR_CARD_SELECTOR)];
+            const from = cards.indexOf(swipe.last);
+            const to = cards.indexOf(card);
+            if (from >= 0 && to >= 0) {
+                const step = to >= from ? 1 : -1;
+                for (let i = from; i !== to; i += step) swipeApply(cards[i]);
+            }
+        }
+        swipeApply(card);
+        swipe.last = card;
+    }
+    function swipeAutoScroll() {
+        if (!swipe?.active) return;
+        const rect = swipe.scroller === document.scrollingElement
+            ? { top: 0, bottom: window.innerHeight } : swipe.scroller.getBoundingClientRect();
+        let delta = 0;
+        if (swipe.y > rect.bottom - SWIPE_EDGE) delta = Math.min(1, (swipe.y - (rect.bottom - SWIPE_EDGE)) / SWIPE_EDGE);
+        else if (swipe.y < rect.top + SWIPE_EDGE) delta = -Math.min(1, ((rect.top + SWIPE_EDGE) - swipe.y) / SWIPE_EDGE);
+        if (delta) swipe.scroller.scrollTop += Math.ceil(Math.abs(delta) * SWIPE_SPEED) * Math.sign(delta);
+        // 每格都檢查游標下的卡片：自動捲動或拖曳中轉動滾輪時，捲到游標下的卡片也一併處理。
+        swipeReach(swipeCardAt(swipe.x, swipe.y));
+        swipe.raf = requestAnimationFrame(swipeAutoScroll);
+    }
+    function endSwipe() {
+        const ended = swipe;
+        swipe = null;
+        if (!ended) return;
+        cancelAnimationFrame(ended.raf);
+        document.body.classList.remove('rc-swiping', 'rc-swipe-armed');
+        if (!ended.active) return;
+        // 放開時若回到起點那張，網站會把這次當成點一下再切換一次：攔下緊接的 click。
+        const block = event => { event.preventDefault(); event.stopImmediatePropagation(); };
+        window.addEventListener('click', block, { capture: true, once: true });
+        setTimeout(() => window.removeEventListener('click', block, true), 0);
+        if (scrollView) setTimeout(() => tickScrollView(scrollView), 50);
+        quickToast(ended.start.isConnected ? ended.start.querySelector('.graphy-cover') : null,
+            ended.to === 'artifact' ? `已消除 ${ended.count} 張（Artifact）` : `已恢復 ${ended.count} 張`);
+    }
+    document.addEventListener('pointerdown', event => {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || isDisabledPage()) return;
+        const cover = event.target.closest?.('#af-event-dialog .graphy-cover');
+        const card = cover?.closest(HR_CARD_SELECTOR);
+        if (!card || !window.angular) return;
+        let scope;
+        try { scope = window.angular.element(card).scope(); } catch (_) { return; }
+        const af = scope?.af;
+        if (!af?.editingSwitch || !SWIPE_TYPES.includes(af.eventDialog?.dscp?.type)) return;
+        const from = scope.currentData?.selectedType || 'none';
+        if (from !== 'none' && from !== 'artifact') return;
+        const dialog = card.closest('#af-event-dialog');
+        swipe = { start: card, last: null, from, to: from === 'none' ? 'artifact' : 'none', active: false, done: new Set(), count: 0,
+            x: event.clientX, y: event.clientY, dialog, scroller: swipeScroller(card), raf: 0,
+            single: !!dialog.closest('.ngdialog')?.classList.contains('rc-scroll-mode') };
+        // 按下時就禁止選取文字：拖曳要移到別張才算開始，在那之前滑鼠移動已會反白心電圖上的文字。
+        document.body.classList.add('rc-swipe-armed');
+    }, true);
+    // 游標下換成別張卡片時開始拖曳；拖曳中處理經過的卡片。滑鼠移動與捲動（滾輪）都會呼叫。
+    // from：上一個游標位置（滑鼠移動時）。快速移動時兩次事件之間可能跨過整張卡片，沿路每 SWIPE_PATH_STEP px 檢查一次，
+    // 分頁顯示（兩欄）與捲動檢視都只處理游標實際經過的卡片。
+    const SWIPE_PATH_STEP = 16;
+    function swipeUpdate(from = null) {
+        if (!swipe) return;
+        const passed = [];
+        if (from) {
+            const steps = Math.ceil(Math.hypot(swipe.x - from.x, swipe.y - from.y) / SWIPE_PATH_STEP);
+            for (let i = 1; i < steps; i++) {
+                const card = swipeCardAt(from.x + (swipe.x - from.x) * i / steps, from.y + (swipe.y - from.y) * i / steps);
+                if (card && card !== passed[passed.length - 1]) passed.push(card);
+            }
+        }
+        const card = swipeCardAt(swipe.x, swipe.y);
+        if (card && card !== passed[passed.length - 1]) passed.push(card);
+        // 路徑經過別張卡片即開始拖曳（快速甩動時游標最後可能停在卡片之間的空白處）。
+        if (!swipe.active) {
+            if (!passed.some(item => item !== swipe.start)) return;
+            swipe.active = true;
+            document.body.classList.add('rc-swiping');
+            window.getSelection?.()?.removeAllRanges();
+            swipeReach(swipe.start);
+            swipe.raf = requestAnimationFrame(swipeAutoScroll);
+        }
+        for (const item of passed) swipeReach(item);
+    }
+    document.addEventListener('pointermove', event => {
+        if (!swipe) return;
+        if (!(event.buttons & 1)) { endSwipe(); return; }
+        const from = { x: swipe.x, y: swipe.y };
+        swipe.x = event.clientX;
+        swipe.y = event.clientY;
+        event.preventDefault();
+        swipeUpdate(from);
+    }, true);
+    // 按住左鍵時轉動滾輪：清單照常捲動，捲到游標下的卡片同樣消除（或恢復）。
+    document.addEventListener('scroll', () => swipeUpdate(), true);
+    document.addEventListener('selectstart', event => { if (swipe) event.preventDefault(); }, true);
+    document.addEventListener('pointerup', () => endSwipe(), true);
+    document.addEventListener('pointercancel', () => endSwipe(), true);
+    window.addEventListener('blur', () => endSwipe());
+
     // 捲動檢視中網站替清單重新分頁時會用到捲動檢視的每頁張數（全部一頁），例如 Max HR 的「Sync to Max Sinus HR」
     // 關閉清單後立即重建 Max HR sinus 的分頁；之後開啟該清單會變成一頁、兩欄列出全部心電圖。
     // 清單不在捲動檢視中、卻有某頁超過每頁張數時，依每頁張數重新分頁（停在第 1 頁）。
