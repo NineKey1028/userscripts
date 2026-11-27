@@ -104,7 +104,7 @@
  *                          同時有兩種以上時左右分色；★＝星號），
  *                          頁數拉條、選印圓點、「選印 N 張」（選印清單）與「⚡ 快速選印」照常可用；點選印圓點會換到該頁並捲到該頁第一張選印；
  *                          「僅選印」只顯示有選印的心電圖（綠色、橘色強制、藍色選印），再按一次（顯示全部）或返回分頁即還原；選印紀錄不受影響；
- *                          篩選中選印有增減（快速選印、換一個、取消選印等）時清單隨即更新，停在原本那頁，新增的選印會捲過去
+ *                          僅選印中有新的選印（快速選印、加選、換一個等）時自動重新篩選並捲到第一張新的
  *                          選印的卡片（綠色、藍色；橘色強制選印除外）時間旁有「換一個」：依快速選印的規則換成另一張，換好後捲到換上的那張，
  *                          該張加黃框（出現時閃一下）並標「新選印」，Minimap 上黃框並標「新」；只標最近一次新增的選印
  *                          （換一個、快速選印、加選、點印表機圖示都算，同一次新增多張時一起標），再新增時原本的標示取消
@@ -6213,18 +6213,8 @@
         }
         observeScrollCards(view, cards);
         refreshScrollPrintSets(view);
-        trackScrollNewPrints(view);
-        // 僅選印篩選中選印有增減（快速選印、選印清單的加選或取消、點印表機圖示等）：重新篩選，停在原本那頁；
-        // 有新增的選印時捲到其中最早的那張。換一個由 showScrollItem 自行處理。
-        if (view.printOnly && view.fullFlat && !view.swapBusy && scrollPrintSignature(view) !== view.filterSignature) {
-            const page = Math.max(1, Number(ctx.ed.pagination.currentPage) || 1);
-            const added = view.newTimes && view.newTimes !== view.filterNewTimes ? [...view.newTimes] : [];
-            applyScrollPrintFilter(view, page);
-            const first = added.length ? Math.min(...added) : null;
-            if (first !== null) showScrollItem(view, first);
-            tickScrollView(view);
-            return;
-        }
+        // 僅選印中有新的選印而重新篩選：卡片換新，下一輪再處理。
+        if (trackScrollNewPrints(view)) { setTimeout(() => tickScrollView(view), 50); return; }
         // 換一個之後：等換上的那張出現在卡片中再捲過去（換頁後網站重建卡片，最多等 4 秒）。
         if (view.itemJump) {
             if (performance.now() - view.itemJump.at > 4000) view.itemJump = null;
@@ -6938,20 +6928,11 @@
         const sets = view.printSets;
         return !!sets && (sets.forced.has(time) || sets.section.has(time));
     }
-    // 完整清單中有選印的時間（依清單順序），用來察覺篩選後選印的增減。
-    function scrollPrintSignature(view) {
-        return view.fullFlat.filter(item => isScrollItemPrinted(view, item))
-            .map(item => toEventTime(typeof item === 'object' && item ? item.startTime : item)).join(',');
-    }
-    // page：篩選後停在第幾頁（超過頁數時停在最後一頁），預設第 1 頁。
-    function applyScrollPrintFilter(view, page = 1) {
+    function applyScrollPrintFilter(view) {
         const printed = view.fullFlat.filter(item => isScrollItemPrinted(view, item));
         view.filterCount = printed.length;
-        view.filterSignature = printed.map(item => toEventTime(typeof item === 'object' && item ? item.startTime : item)).join(',');
-        const pages = splitScrollPages(printed, view.perPage);
-        setScrollPages(view.ctx, pages, view.perPage, Math.min(Math.max(1, page), pages.length));
+        setScrollPages(view.ctx, splitScrollPages(printed, view.perPage), view.perPage, 1);
         view.filterPages = view.ctx.ed.pageData;
-        view.filterNewTimes = view.newTimes; // 已反映在這次篩選中的「新」選印
     }
     function toggleScrollPrintFilter(view) {
         const button = view.panel.querySelector('.rc-scroll-printonly');
@@ -6980,15 +6961,27 @@
     // 比對前後的綠色與藍色選印（不看分頁，強制選印由網站決定不算），出現新的時間就以它們取代原本的「新」。
     function trackScrollNewPrints(view) {
         const { af, ed, type } = view.ctx;
-        if (!QUICK_PRINT_TYPES[type]) return;
+        if (!QUICK_PRINT_TYPES[type]) return false;
         const selected = af.printDialog?.selectedEvents?.[ed.dscp?.printedEventType];
         const now = new Set([...(Array.isArray(selected) ? selected : []).map(toEventTime), ...(view.printSets?.section || [])]
             .filter(time => time !== null));
+        let refiltered = false;
         if (view.prevPrinted) {
             const added = [...now].filter(time => !view.prevPrinted.has(time));
-            if (added.length) view.newTimes = new Set(added);
+            if (added.length) {
+                view.newTimes = new Set(added);
+                // 僅選印中有新的選印（快速選印、加選、換一個等）：重新篩選，新的加入清單（取消的移除），並捲到第一張新的。
+                if (view.printOnly && view.fullFlat) {
+                    view.prevPrinted = now;
+                    applyScrollPrintFilter(view);
+                    const first = view.ctx.ed.pageData.flat().map(scrollItemTime).find(time => added.includes(time));
+                    if (first !== undefined) jumpScrollItem(view, first);
+                    refiltered = true;
+                }
+            }
         }
         view.prevPrinted = now;
+        return refiltered;
     }
     // 換一個（VEB／SVEB 清單的捲動檢視）：選印的卡片標題列加上按鈕，依快速選印的規則（與選印清單的「換一個」相同）
     // 換成另一張：取消這張、選印找到的那張，這張記為淘汰（之後快速選印、換一個不再選回）。橘色強制選印由網站決定，不顯示。
@@ -7069,13 +7062,18 @@
             if (scrollView === view) tickScrollView(view);
         }
     }
-    // 捲到某個時間的卡片：僅選印時重新篩選（換掉的那張移除、換上的加入）；不在目前這頁時換到該頁。
+    function scrollItemTime(item) {
+        return toEventTime(typeof item === 'object' && item ? item.startTime : item);
+    }
+    // 捲到某個時間的卡片：僅選印時先依最新的選印重新篩選（換掉的那張移除、換上的加入）；不在目前這頁時換到該頁。
     function showScrollItem(view, time) {
-        const { ctx } = view;
         refreshScrollPrintSets(view);
-        if (view.printOnly && view.fullFlat) applyScrollPrintFilter(view);
-        const flat = ctx.ed.pageData.flat();
-        const index = flat.findIndex(item => toEventTime(typeof item === 'object' && item ? item.startTime : item) === time);
+        if (view.printOnly && view.fullFlat && !trackScrollNewPrints(view)) applyScrollPrintFilter(view);
+        jumpScrollItem(view, time);
+    }
+    function jumpScrollItem(view, time) {
+        const { ctx } = view;
+        const index = ctx.ed.pageData.flat().findIndex(item => scrollItemTime(item) === time);
         if (index < 0) return;
         const page = Math.floor(index / view.perPage) + 1;
         const current = Math.max(1, Number(ctx.ed.pagination.currentPage) || 1);
