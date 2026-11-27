@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.62.3
+// @version      1.63.1
 // @description  以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -93,12 +93,13 @@
  *                          右側 Minimap 為所有燈號（左側深色條／「印」＝選印、★ 或金色圓點＝星號，藍框為畫面中的卡片），
  *                          左側為編號刻度；張數多時燈號維持可辨識的大小，Minimap 跟著清單捲動；點燈號跳到該張，
  *                          點空白處或拖曳可捲動，在 Minimap 上滾動滾輪即捲動清單；「返回分頁」或 Esc 回到原本的分頁，停在目前這張所在的頁。
- *                          按鍵：↑ ↓ 上一張、下一張（藍框標示目前這張，點卡片也可選），P 選印，F 星號，Enter 開啟心電圖視窗，G 下一個綠燈
+ *                          捲動檢視只有 Esc（返回分頁）一個按鍵，沒有其他快捷鍵；選印清單開著時 Esc 只關閉選印清單
+ *                          Minimap 上方「▲ 頂端」回到這頁第一張；「放大 ECG」隱藏評分欄，心電圖等比例放大到填滿寬度，
+ *                          再按一次還原；不記住開關，重新整理、重開清單或開新報告都回到顯示評分欄的樣式
  *   VEB／SVEB 清單（Isolated、Couplet、Triplet、Bigeminy、Trigeminy、VT、SVE run、SVT）  同樣有「☰ 捲動檢視」，但不評分：
  *                          張數可達數千張，每頁 100 張、一欄連續排列，以上方頁碼列換頁；Minimap 為本頁各張（「印」＝有選印：綠色選印、橘色強制選印、藍色區段選印，
  *                          同時有兩種以上時左右分色；★＝星號），
  *                          頁數拉條、選印圓點、「選印 N 張」（選印清單）與「⚡ 快速選印」照常可用；點選印圓點會換到該頁並捲到該頁第一張選印；
- *                          按鍵與上方相同（沒有 G）；選印清單開著時按鍵交給選印清單（Esc 只關閉選印清單）
  *   Tachycardia、Bradycardia、Pause（含 2–3／3–4／4–5／≥5 秒）清單  同樣有「☰ 捲動檢視」（不評分、每頁 100 張）；
  *                          編輯模式下（捲動檢視與一般分頁皆可）按住左鍵在心電圖上往下（或往上、橫向）拖曳，經過的卡片一次消除（Artifact），拖到捲動區上下緣會自動捲動，
  *                          按住時轉動滾輪也可捲動，捲到游標下的卡片同樣消除；按下後不會反白文字；
@@ -5805,6 +5806,14 @@
         .rc-scroll-next, .rc-scroll-exit { height:22px; padding:0; border:1px solid #8fb43a; border-radius:11px; background:#fff; color:#4f6b1a;
             font-family:inherit; font-size:11px; font-weight:600; cursor:pointer; }
         .rc-scroll-next:hover, .rc-scroll-exit:hover { background:#5b7d1a; border-color:#5b7d1a; color:#fff; }
+        /* 回到頂端、放大 ECG（Minimap 上方） */
+        .rc-scroll-tools { display:flex; flex-direction:column; gap:4px; }
+        .rc-scroll-tools button { height:22px; padding:0; border:1px solid #b9c6a0; border-radius:11px; background:#fff; color:#4f6b1a;
+            font-family:inherit; font-size:11px; font-weight:600; cursor:pointer; }
+        .rc-scroll-tools button:hover, .rc-scroll-tools button.is-on { background:#5b7d1a; border-color:#5b7d1a; color:#fff; }
+        /* 放大 ECG：隱藏右側評分欄，心電圖（含標題列）以 zoom 等比例放大到填滿卡片寬度（倍率見 updateScrollZoom） */
+        .ngdialog.rc-scroll-mode.rc-scroll-zoomed .content-blk > .ecg-blk > .rc-scroll-side { display:none !important; }
+        .ngdialog.rc-scroll-mode.rc-scroll-zoomed .content-blk > .ecg-blk > .ecg-wave { zoom:var(--rc-ecg-zoom, 1); }
         .rc-scroll-map { position:relative; flex:1 1 auto; min-height:0; overflow:hidden; border-radius:5px; background:#e6eadf;
             box-shadow:inset 0 0 0 1px #d3d9c6; cursor:pointer; user-select:none; touch-action:none; }
         .rc-scroll-map-track { position:absolute; top:0; left:0; right:0; will-change:transform; }
@@ -5963,11 +5972,16 @@
         const panel = view.panel = document.createElement('div');
         panel.className = 'rc-scroll-panel' + (view.scored ? '' : ' is-plain');
         panel.innerHTML = '<div class="rc-scroll-counts"></div>'
-            + '<button type="button" class="rc-scroll-next" title="跳到下一張綠燈（G）">▼ 綠燈</button>'
+            + '<button type="button" class="rc-scroll-next" title="跳到下一張綠燈">▼ 綠燈</button>'
+            + '<div class="rc-scroll-tools"><button type="button" class="rc-scroll-top" title="回到這頁第一張">▲ 頂端</button>'
+            + '<button type="button" class="rc-scroll-zoom"></button></div>'
             + '<div class="rc-scroll-map" title="點燈號跳到該張心電圖；點空白處或拖曳可捲動"></div>'
             + '<button type="button" class="rc-scroll-exit" title="回到分頁顯示（Esc）">返回分頁</button>';
         view.map = panel.querySelector('.rc-scroll-map');
         panel.querySelector('.rc-scroll-next').addEventListener('click', () => jumpNextGreen(view));
+        panel.querySelector('.rc-scroll-top').addEventListener('click', () => setScrollActive(view, 0, true));
+        panel.querySelector('.rc-scroll-zoom').addEventListener('click', () => toggleScrollZoom(view));
+        setScrollZoom(view, false);
         panel.querySelector('.rc-scroll-exit').addEventListener('click', () => closeScrollView());
         installScrollMapDrag(view);
         ctx.root.appendChild(panel);
@@ -5978,7 +5992,7 @@
         view.onResize = () => layoutScrollMap(view);
         content.addEventListener('scroll', view.onScroll, { passive: true });
         window.addEventListener('resize', view.onResize);
-        // 滑鼠按在卡片上即設為目前這張（P、F、Enter 作用的對象）。
+        // 滑鼠按在卡片上即設為目前這張（藍框）。
         view.onPointer = event => {
             const card = event.target.closest?.(HR_CARD_SELECTOR);
             if (card) setScrollActive(view, getScrollCards(view).indexOf(card), false);
@@ -6080,7 +6094,8 @@
         ctx.root.removeEventListener('click', view.onPrintJump, true);
         window.removeEventListener('resize', view.onResize);
         view.panel.remove();
-        ctx.root.classList.remove('rc-scroll-mode', 'rc-scroll-paged');
+        ctx.root.classList.remove('rc-scroll-mode', 'rc-scroll-paged', 'rc-scroll-zoomed');
+        ctx.root.style.removeProperty('--rc-ecg-zoom');
         for (const node of ctx.dialog.querySelectorAll('.rc-scroll-badge, .rc-scroll-side')) node.remove();
         for (const node of ctx.dialog.querySelectorAll('.rc-scroll-active')) node.classList.remove('rc-scroll-active');
         const perPage = view.saved.perPage;
@@ -6123,6 +6138,7 @@
             view.content.scrollTop = 0;
         }
         alignScrollTop(view);
+        updateScrollZoom(view);
         // 網頁縮放（視窗寬度改變）時網站依新寬度重畫心電圖，但灰色遮罩（ecgMask）只在卡片建立時畫一次，
         // 留著舊寬度會與心電圖錯位、蓋到右側評分欄：心電圖寬度改變時重建所有卡片。
         const ecgWidth = Number(ctx.af.ecgChart?.width) || 0;
@@ -6177,6 +6193,42 @@
         content.style.marginTop = next ? `${next}px` : '';
         const height = parseFloat(content.style.height);
         if (keepHeight && height) content.style.height = `${Math.max(SCROLL_MIN_HEIGHT, height - (next - margin))}px`;
+    }
+    // 放大 ECG：每次開啟捲動檢視預設為一般大小（顯示評分欄），不記住開關；倍率 = 卡片可用寬度 ÷ 心電圖原本寬度。
+    function setScrollZoom(view, on) {
+        view.zoomed = !!on;
+        view.ctx.root.classList.toggle('rc-scroll-zoomed', view.zoomed);
+        const button = view.panel?.querySelector('.rc-scroll-zoom');
+        if (button) {
+            button.classList.toggle('is-on', view.zoomed);
+            button.textContent = view.zoomed ? '還原大小' : '放大 ECG';
+            button.title = view.zoomed ? '還原心電圖大小並顯示評分欄' : '隱藏評分欄，心電圖放大到填滿寬度';
+        }
+        updateScrollZoom(view);
+    }
+    function toggleScrollZoom(view) {
+        // 切換後停在原本畫面最上方的那張。
+        const content = view.content;
+        let anchor = getScrollCards(view).findIndex(card => card.offsetTop + card.offsetHeight > content.scrollTop + 4);
+        if (anchor < 0) anchor = view.active;
+        setScrollZoom(view, !view.zoomed);
+        requestAnimationFrame(() => {
+            scrollToCard(view, anchor, 'auto');
+            updateScrollMapView(view);
+        });
+    }
+    function updateScrollZoom(view) {
+        const root = view.ctx.root;
+        if (!view.zoomed) { root.style.removeProperty('--rc-ecg-zoom'); return; }
+        const wave = view.content.querySelector(':scope > .ecg-blk > .ecg-wave');
+        if (!wave) return;
+        const current = parseFloat(root.style.getPropertyValue('--rc-ecg-zoom')) || 1;
+        const natural = wave.getBoundingClientRect().width / current;
+        const style = getComputedStyle(view.content);
+        const available = view.content.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 2;
+        if (!(natural > 0) || !(available > 0)) return;
+        const factor = Math.max(1, Math.floor(available / natural * 1000) / 1000);
+        if (Math.abs(factor - current) > 0.002) root.style.setProperty('--rc-ecg-zoom', String(factor));
     }
     function rebuildScrollCards(view) {
         const { ctx, content } = view;
@@ -6549,46 +6601,21 @@
         const holder = view.panel.querySelector('.rc-scroll-counts');
         if (holder.innerHTML !== html) holder.innerHTML = html;
     }
-    // P、F：點目前這張卡片上網站自己的選印、星號勾選框（需編輯模式）；Enter：點時間開啟心電圖視窗。
-    function clickScrollCard(view, selector, anchorSelector) {
-        const card = getScrollCards(view)[view.active];
-        const target = card?.querySelector(selector);
-        if (!target) return;
-        if (target.disabled) { quickToast(card.querySelector(anchorSelector) || card, '需先開啟編輯模式才能選印或加星號', true); return; }
-        target.click();
-        setTimeout(() => tickScrollView(view), 50);
-    }
-    // 心電圖視窗或網站的確認視窗開在清單上方時，按鍵交給它們（正在關閉或已隱藏的視窗不算）。
+    // 心電圖視窗或網站的確認視窗開在清單上方時，Esc 交給它們（正在關閉或已隱藏的視窗不算）。
     function isAboveScrollView(root) {
         return [...document.querySelectorAll('.ngdialog')].some(dialog =>
             dialog !== root && (root.compareDocumentPosition(dialog) & Node.DOCUMENT_POSITION_FOLLOWING)
             && !dialog.classList.contains('ngdialog-closing') && dialog.getClientRects().length > 0);
     }
+    // 捲動檢視只保留 Esc：回到分頁（不讓網站關閉清單），即使游標在時間輸入框中；選印清單開著時 Esc 只關閉選印清單。
     window.addEventListener('keydown', event => {
         const view = scrollView;
-        // 選印清單（畫面底部）開著時按鍵交給它（A／D 切換、Esc 只關閉選印清單）。
-        if (!view || !event.isTrusted || event.isComposing || review || event.rcReviewClosed || isAboveScrollView(view.ctx.root)) return;
-        // Esc 一律回到分頁（不讓網站關閉清單），即使游標在時間輸入框中。
-        if (event.code === 'Escape') {
-            if (isEditingText()) document.activeElement.blur();
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            closeScrollView();
-            return;
-        }
-        if (isEditingText()) return;
-        if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-        switch (event.code) {
-            case 'ArrowUp': setScrollActive(view, view.active - 1); break;
-            case 'ArrowDown': setScrollActive(view, view.active + 1); break;
-            case 'KeyP': clickScrollCard(view, 'input[ng-model="currentData.selectedEvent"]', '.icon-print-check, .tag-label'); break;
-            case 'KeyF': clickScrollCard(view, 'input[ng-model="currentData.isSpecific"]', '.tag-label'); break;
-            case 'KeyG': jumpNextGreen(view); break;
-            case 'Enter': case 'NumpadEnter': clickScrollCard(view, '.pop-out-bnt', '.pop-out-bnt'); break;
-            default: return;
-        }
+        if (!view || event.code !== 'Escape' || !event.isTrusted || event.isComposing || review || event.rcReviewClosed
+            || isAboveScrollView(view.ctx.root)) return;
+        if (isEditingText()) document.activeElement.blur();
         event.preventDefault();
         event.stopImmediatePropagation();
+        closeScrollView();
     }, true);
     // ── Tachy／Brady／Pause 清單：按住左鍵在心電圖上拖曳，經過的卡片一次消除（標為 Artifact） ──
     // 網站點一下心電圖（graphy-cover 的 eventOperationControl）會循環切換類型：Tachy 為 none → artifact → psvt → vt，
