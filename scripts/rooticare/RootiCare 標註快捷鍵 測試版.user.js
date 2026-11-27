@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RootiCare 標註快捷鍵 測試版
 // @namespace    https://editoreu.rooticare.com/
-// @version      1.63.1
+// @version      1.65.2
 // @description  【測試版：含早搏判讀】以數字鍵與滑鼠中鍵新增、修改或刪除 V / S / N 標籤；支援區間篩選修改、早搏判讀、W / S 心電圖縮放與 A / D 半步切換時間。
 // @author       Alex
 // @homepageURL  https://github.com/NineKey1028/userscripts/tree/main/scripts/rooticare
@@ -94,8 +94,11 @@
  *                          左側為編號刻度；張數多時燈號維持可辨識的大小，Minimap 跟著清單捲動；點燈號跳到該張，
  *                          點空白處或拖曳可捲動，在 Minimap 上滾動滾輪即捲動清單；「返回分頁」或 Esc 回到原本的分頁，停在目前這張所在的頁。
  *                          捲動檢視只有 Esc（返回分頁）一個按鍵，沒有其他快捷鍵；選印清單開著時 Esc 只關閉選印清單
- *                          Minimap 上方「▲ 頂端」回到這頁第一張；「放大 ECG」隱藏評分欄，心電圖等比例放大到填滿寬度，
- *                          再按一次還原；不記住開關，重新整理、重開清單或開新報告都回到顯示評分欄的樣式
+ *                          Minimap 上方「▲ 頂端」回到這頁第一張；「放大 ECG」隱藏評分欄，心電圖拉寬到填滿卡片，高度不變、格子維持正方形（波形跟著變高，標籤可照常修改）；
+ *                          「選印範圍」每張改顯示報告下方 30 秒縮圖的範圍（同選印清單 👁）：一列填滿寬度（格子維持正方形，高度較矮），
+ *                          使用網站自己的標籤列與心電圖，標籤可照常點擊或用快捷鍵修改；綠色底為印出的 8 秒，只讀取畫面附近的卡片；
+ *                          兩個按鈕互斥，再按一次還原；
+ *                          不記住開關，重新整理、重開清單或開新報告都回到顯示評分欄的樣式
  *   VEB／SVEB 清單（Isolated、Couplet、Triplet、Bigeminy、Trigeminy、VT、SVE run、SVT）  同樣有「☰ 捲動檢視」，但不評分：
  *                          張數可達數千張，每頁 100 張、一欄連續排列，以上方頁碼列換頁；Minimap 為本頁各張（「印」＝有選印：綠色選印、橘色強制選印、藍色區段選印，
  *                          同時有兩種以上時左右分色；★＝星號），
@@ -5811,9 +5814,21 @@
         .rc-scroll-tools button { height:22px; padding:0; border:1px solid #b9c6a0; border-radius:11px; background:#fff; color:#4f6b1a;
             font-family:inherit; font-size:11px; font-weight:600; cursor:pointer; }
         .rc-scroll-tools button:hover, .rc-scroll-tools button.is-on { background:#5b7d1a; border-color:#5b7d1a; color:#fff; }
-        /* 放大 ECG：隱藏右側評分欄，心電圖（含標題列）以 zoom 等比例放大到填滿卡片寬度（倍率見 updateScrollZoom） */
+        /* 放大 ECG：隱藏評分欄與網站的心電圖（標題列保留），改顯示拉寬到填滿卡片、高度不變的同一張心電圖（見 updateScrollZoom） */
         .ngdialog.rc-scroll-mode.rc-scroll-zoomed .content-blk > .ecg-blk > .rc-scroll-side { display:none !important; }
-        .ngdialog.rc-scroll-mode.rc-scroll-zoomed .content-blk > .ecg-blk > .ecg-wave { zoom:var(--rc-ecg-zoom, 1); }
+        .ngdialog.rc-scroll-mode.rc-scroll-zoomed .content-blk > .ecg-blk > .ecg-wave { flex:1 1 auto; width:auto !important; min-width:0; }
+        .ngdialog.rc-scroll-mode.rc-scroll-zoomed .content-blk > .ecg-blk > .ecg-wave > .ecg-graphy-blk { display:none !important; }
+        /* 選印範圍：隱藏評分欄與網站的心電圖（標題列保留），改顯示 30 秒的範圍（見 renderScrollContext） */
+        .ngdialog.rc-scroll-mode.rc-scroll-context .content-blk > .ecg-blk > .rc-scroll-side { display:none !important; }
+        .ngdialog.rc-scroll-mode.rc-scroll-context .content-blk > .ecg-blk > .ecg-wave { flex:1 1 auto; width:auto !important; min-width:0; }
+        .ngdialog.rc-scroll-mode.rc-scroll-context .content-blk > .ecg-blk > .ecg-wave > .ecg-graphy-blk { display:none !important; }
+        .rc-scroll-ctx, .rc-scroll-wide { position:relative; margin:2px 0 6px; }
+        :is(.rc-scroll-ctx, .rc-scroll-wide) > .ecg-individual-blk { position:relative; }
+        .rc-scroll-wide-clip { position:relative; overflow:hidden; }
+        .rc-scroll-wide-inner { position:relative; }
+        .rc-scroll-ctx-print { position:absolute; background:rgba(173,209,73,.14); pointer-events:none; z-index:3; }
+        .rc-scroll-ctx-cover { position:absolute; left:0; right:0; z-index:4; }
+        .rc-scroll-ctx[data-state]::before { content:attr(data-state); position:absolute; left:10px; top:24px; color:#7d8873; font-size:12px; }
         .rc-scroll-map { position:relative; flex:1 1 auto; min-height:0; overflow:hidden; border-radius:5px; background:#e6eadf;
             box-shadow:inset 0 0 0 1px #d3d9c6; cursor:pointer; user-select:none; touch-action:none; }
         .rc-scroll-map-track { position:absolute; top:0; left:0; right:0; will-change:transform; }
@@ -5974,18 +5989,25 @@
         panel.innerHTML = '<div class="rc-scroll-counts"></div>'
             + '<button type="button" class="rc-scroll-next" title="跳到下一張綠燈">▼ 綠燈</button>'
             + '<div class="rc-scroll-tools"><button type="button" class="rc-scroll-top" title="回到這頁第一張">▲ 頂端</button>'
-            + '<button type="button" class="rc-scroll-zoom"></button></div>'
+            + '<button type="button" class="rc-scroll-zoom"></button><button type="button" class="rc-scroll-range"></button></div>'
             + '<div class="rc-scroll-map" title="點燈號跳到該張心電圖；點空白處或拖曳可捲動"></div>'
             + '<button type="button" class="rc-scroll-exit" title="回到分頁顯示（Esc）">返回分頁</button>';
         view.map = panel.querySelector('.rc-scroll-map');
         panel.querySelector('.rc-scroll-next').addEventListener('click', () => jumpNextGreen(view));
         panel.querySelector('.rc-scroll-top').addEventListener('click', () => setScrollActive(view, 0, true));
-        panel.querySelector('.rc-scroll-zoom').addEventListener('click', () => toggleScrollZoom(view));
-        setScrollZoom(view, false);
+        panel.querySelector('.rc-scroll-zoom').addEventListener('click', () => toggleScrollMode(view, 'zoom'));
+        panel.querySelector('.rc-scroll-range').addEventListener('click', () => toggleScrollMode(view, 'context'));
+        setScrollMode(view, '');
         panel.querySelector('.rc-scroll-exit').addEventListener('click', () => closeScrollView());
         installScrollMapDrag(view);
         ctx.root.appendChild(panel);
-        view.onScroll = () => updateScrollMapView(view);
+        view.onScroll = () => {
+            updateScrollMapView(view);
+            // 選印範圍：捲到的卡片才讀取、畫出（每個畫面更新一次）。
+            if (view.mode && !view.contextFrame) {
+                view.contextFrame = requestAnimationFrame(() => { view.contextFrame = 0; updateScrollZoom(view); updateScrollContext(view); });
+            }
+        };
         // Minimap 的高度會隨上方計數文字變動，大小改變時重新排列燈號，避免超出面板。
         view.mapObserver = new ResizeObserver(() => layoutScrollMap(view));
         view.mapObserver.observe(view.map);
@@ -6094,9 +6116,9 @@
         ctx.root.removeEventListener('click', view.onPrintJump, true);
         window.removeEventListener('resize', view.onResize);
         view.panel.remove();
-        ctx.root.classList.remove('rc-scroll-mode', 'rc-scroll-paged', 'rc-scroll-zoomed');
-        ctx.root.style.removeProperty('--rc-ecg-zoom');
-        for (const node of ctx.dialog.querySelectorAll('.rc-scroll-badge, .rc-scroll-side')) node.remove();
+        ctx.root.classList.remove('rc-scroll-mode', 'rc-scroll-paged', 'rc-scroll-zoomed', 'rc-scroll-context');
+        for (const box of ctx.dialog.querySelectorAll('.rc-scroll-ctx, .rc-scroll-wide')) clearScrollContextBox(box);
+        for (const node of ctx.dialog.querySelectorAll('.rc-scroll-badge, .rc-scroll-side, .rc-scroll-ctx, .rc-scroll-wide')) node.remove();
         for (const node of ctx.dialog.querySelectorAll('.rc-scroll-active')) node.classList.remove('rc-scroll-active');
         const perPage = view.saved.perPage;
         if (isHRDialogShown(ctx.dialog) && ctx.ed.dscp?.type === ctx.type && Array.isArray(ctx.ed.pageData)) {
@@ -6177,6 +6199,7 @@
         if (missing.length) loadScrollEntries(view);
         cards.forEach((card, index) => decorateScrollCard(view, card, index));
         updateScrollSummary(view);
+        updateScrollContext(view);
         updateScrollMapView(view);
     }
     // 清空後重建所有卡片（網站重新建立卡片並以目前寬度畫心電圖與灰色遮罩），重建後停在原本畫面最上方的那張。
@@ -6194,41 +6217,318 @@
         const height = parseFloat(content.style.height);
         if (keepHeight && height) content.style.height = `${Math.max(SCROLL_MIN_HEIGHT, height - (next - margin))}px`;
     }
-    // 放大 ECG：每次開啟捲動檢視預設為一般大小（顯示評分欄），不記住開關；倍率 = 卡片可用寬度 ÷ 心電圖原本寬度。
-    function setScrollZoom(view, on) {
-        view.zoomed = !!on;
-        view.ctx.root.classList.toggle('rc-scroll-zoomed', view.zoomed);
-        const button = view.panel?.querySelector('.rc-scroll-zoom');
-        if (button) {
-            button.classList.toggle('is-on', view.zoomed);
-            button.textContent = view.zoomed ? '還原大小' : '放大 ECG';
-            button.title = view.zoomed ? '還原心電圖大小並顯示評分欄' : '隱藏評分欄，心電圖放大到填滿寬度';
+    // 顯示方式（view.mode）：'' 一般（顯示評分欄）、'zoom' 放大 ECG、'context' 選印範圍；兩個按鈕互斥，再按一次回到一般。
+    // 每次開啟捲動檢視預設為一般，不記住開關。
+    // 放大 ECG：隱藏評分欄，心電圖拉寬到填滿卡片、高度不變、格子正方形（見 updateScrollZoom）。
+    // 選印範圍：隱藏評分欄與網站的 10 秒心電圖，改顯示報告下方 30 秒縮圖的範圍（與選印清單的 👁 相同：印出的 8 秒前 11 秒起），
+    // 以網站的元件畫成一列（可編輯標籤）；綠色底為印出的 8 秒。資料只讀取畫面附近的卡片。
+    const SCROLL_MODE_BUTTONS = {
+        zoom: { selector: '.rc-scroll-zoom', off: '放大 ECG', on: '還原大小',
+            offTitle: '隱藏評分欄，心電圖拉寬到填滿卡片，高度不變、格子維持正方形（波形跟著變高）', onTitle: '還原心電圖並顯示評分欄' },
+        context: { selector: '.rc-scroll-range', off: '選印範圍', on: '還原心電圖',
+            offTitle: '每張改顯示報告下方 30 秒縮圖的範圍（原比例，綠色為印出的 8 秒）', onTitle: '回到原本的心電圖並顯示評分欄' },
+    };
+    function setScrollMode(view, mode) {
+        view.mode = mode || '';
+        const root = view.ctx.root;
+        root.classList.toggle('rc-scroll-zoomed', view.mode === 'zoom');
+        root.classList.toggle('rc-scroll-context', view.mode === 'context');
+        for (const [key, config] of Object.entries(SCROLL_MODE_BUTTONS)) {
+            const button = view.panel?.querySelector(config.selector);
+            if (!button) continue;
+            const on = view.mode === key;
+            button.classList.toggle('is-on', on);
+            button.textContent = on ? config.on : config.off;
+            button.title = on ? config.onTitle : config.offTitle;
         }
         updateScrollZoom(view);
+        updateScrollContext(view);
     }
-    function toggleScrollZoom(view) {
+    function toggleScrollMode(view, mode) {
         // 切換後停在原本畫面最上方的那張。
         const content = view.content;
         let anchor = getScrollCards(view).findIndex(card => card.offsetTop + card.offsetHeight > content.scrollTop + 4);
         if (anchor < 0) anchor = view.active;
-        setScrollZoom(view, !view.zoomed);
+        setScrollMode(view, view.mode === mode ? '' : mode);
         requestAnimationFrame(() => {
             scrollToCard(view, anchor, 'auto');
             updateScrollMapView(view);
+            updateScrollContext(view);
         });
     }
+    // 放大 ECG：把目前的心電圖拉寬到填滿卡片，高度不變，格子維持正方形（振幅一起放大）。依卡片上網站元件（標籤列、心電圖、灰色遮罩）原本的設定複製一份，
+    // 只把寬度改成卡片寬度，資料仍是卡片自己的（currentData），標籤可照常點擊或用快捷鍵修改；點心電圖與原本相同
+    // （複製網站的 graphy-cover：Tachy／Brady／Pause 點一下消除、拖曳快速消除都可用）。只畫捲動區附近的卡片。
+    const SCROLL_WIDE_TAGS = { ecgRMarker: 'ecg-r-marker', ecgWave: 'ecg-wave', ecgMask: 'ecg-mask', ecgAnno: 'ecg-anno' };
+    function escapeAttr(value) {
+        return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    }
+    // 由卡片上已建立的網站元件（指令以 replace 建立，原本的屬性仍留在元素上）組出模板；回傳 { html, heightExpr, widthExpr }。
+    function buildScrollWideTemplate(card) {
+        const block = card.querySelector('.ecg-graphy-blk .ecg-individual-blk');
+        if (!block) return null;
+        let html = '<div class="ecg-individual-blk">';
+        let heightExpr = null, widthExpr = null;
+        for (const element of block.children) {
+            const name = Object.keys(SCROLL_WIDE_TAGS).find(cls => element.classList.contains(cls));
+            if (!name) continue;
+            const tag = SCROLL_WIDE_TAGS[name];
+            const attrs = [...element.attributes].filter(attr => attr.name.includes('-')).map(attr => {
+                let value = attr.value;
+                if (attr.name === 'canvas-width') {
+                    if (tag === 'ecg-wave') widthExpr = value;
+                    value = 'rcWide.width';
+                }
+                else if (attr.name === 'canvas-height' && tag !== 'ecg-r-marker') {
+                    if (tag === 'ecg-wave') heightExpr = value;
+                    value = 'rcWide.height';
+                }
+                return `${attr.name}="${escapeAttr(value)}"`;
+            });
+            const keep = [...element.classList].filter(cls => /^margin-/.test(cls));
+            html += `<${tag} ${attrs.join(' ')}${keep.length ? ` class="${keep.join(' ')}"` : ''}></${tag}>`;
+        }
+        const siteCover = card.querySelector('.ecg-graphy-blk > .graphy-cover');
+        const coverAttrs = siteCover ? [...siteCover.attributes].filter(attr => /^ng-(click|class)$/.test(attr.name))
+            .map(attr => `${attr.name}="${escapeAttr(attr.value)}"`).join(' ') : '';
+        html += `<div class="rc-scroll-ctx-cover${siteCover ? ' graphy-cover' : ''}" ng-show="!af.ecgEnlargedChart.chartSwitch" ${coverAttrs}></div></div>`;
+        return heightExpr && widthExpr ? { html, heightExpr, widthExpr } : null;
+    }
     function updateScrollZoom(view) {
-        const root = view.ctx.root;
-        if (!view.zoomed) { root.style.removeProperty('--rc-ecg-zoom'); return; }
-        const wave = view.content.querySelector(':scope > .ecg-blk > .ecg-wave');
-        if (!wave) return;
-        const current = parseFloat(root.style.getPropertyValue('--rc-ecg-zoom')) || 1;
-        const natural = wave.getBoundingClientRect().width / current;
+        if (scrollView !== view) return;
+        const boxes = view.content.querySelectorAll('.rc-scroll-wide');
+        if (view.mode !== 'zoom') {
+            for (const box of boxes) { clearScrollContextBox(box); box.remove(); }
+            return;
+        }
+        const width = Math.floor(scrollCardWidth(view)) - 4;
+        const top = view.content.scrollTop - SCROLL_CONTEXT_NEAR;
+        const bottom = view.content.scrollTop + view.content.clientHeight + SCROLL_CONTEXT_NEAR;
+        for (const card of getScrollCards(view)) {
+            const wave = card.querySelector(':scope > .ecg-wave');
+            const data = scrollCardData(card);
+            if (!wave || !data) continue;
+            let box = wave.querySelector(':scope > .rc-scroll-wide');
+            if (!box) {
+                box = document.createElement('div');
+                box.className = 'rc-scroll-wide';
+                wave.appendChild(box);
+            }
+            if (!view.wideTemplate) view.wideTemplate = buildScrollWideTemplate(card);
+            const template = view.wideTemplate;
+            const cardScope = window.angular?.element(card).scope();
+            if (!template || !cardScope) continue;
+            // 高度不變、格子維持正方形：以拉寬的倍率畫出較高的心電圖（振幅一起放大），只顯示原本高度的範圍，
+            // 基準線維持在原本的位置（網站的 0 mV 在心電圖高度的 2/3），超出的波形裁掉。
+            const baseWidth = Number(cardScope.$eval(template.widthExpr)) || width;
+            const visible = Number(cardScope.$eval(template.heightExpr)) || 106;
+            const height = Math.round(visible * width / baseWidth);
+            const label = Number(view.ctx.af.ecgAnno?.height) || 20;
+            box.style.minHeight = `${label + visible + 6}px`;
+            if (card.offsetTop + card.offsetHeight < top || card.offsetTop > bottom) continue;
+            // 網站尚未讀到這張的心電圖：等讀到後再畫（卡片資料換新時也重畫）。
+            if (!Array.isArray(data.ecgData) || !data.ecgData.length) continue;
+            if (box.rcSource === data.ecgData && box.rcWidth === width && box.rcScope) continue;
+            renderScrollWide(box, cardScope, template.html, width, height, visible);
+            box.rcSource = data.ecgData;
+            box.rcWidth = width;
+        }
+    }
+    function renderScrollWide(box, cardScope, html, width, height, visible) {
+        const $compile = window.angular?.element(document.body).injector()?.get('$compile');
+        clearScrollContextBox(box);
+        if (!$compile) return;
+        const scope = cardScope.$new();
+        scope.rcWide = { width, height };
+        const element = $compile(html)(scope)[0];
+        box.rcScope = scope;
+        box.appendChild(element);
+        scope.$digest();
+        // 心電圖與灰色遮罩放進固定高度的裁切框，往上移動使基準線落在原本的高度。
+        const parts = [...element.children].filter(child => child.matches('.ecgWave, .ecgMask, .ecgAnno'));
+        if (parts.length) {
+            const clip = document.createElement('div');
+            clip.className = 'rc-scroll-wide-clip';
+            clip.style.height = `${visible}px`;
+            const inner = document.createElement('div');
+            inner.className = 'rc-scroll-wide-inner';
+            inner.style.marginTop = `${-Math.round((height - visible) * 2 / 3)}px`;
+            parts[0].before(clip);
+            clip.appendChild(inner);
+            for (const part of parts) inner.appendChild(part);
+        }
+        requestAnimationFrame(() => {
+            const clip = element.querySelector('.rc-scroll-wide-clip');
+            const cover = element.querySelector('.rc-scroll-ctx-cover');
+            if (clip && cover) { cover.style.top = `${clip.offsetTop}px`; cover.style.height = `${clip.offsetHeight}px`; }
+        });
+    }
+    function scrollCardWidth(view) {
         const style = getComputedStyle(view.content);
-        const available = view.content.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 2;
-        if (!(natural > 0) || !(available > 0)) return;
-        const factor = Math.max(1, Math.floor(available / natural * 1000) / 1000);
-        if (Math.abs(factor - current) > 0.002) root.style.setProperty('--rc-ecg-zoom', String(factor));
+        return view.content.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 2;
+    }
+    const SCROLL_CONTEXT_NEAR = 1500; // 捲動區上下這個範圍內的卡片才讀取、畫出選印範圍（px）
+    const SCROLL_CONTEXT_CONCURRENCY = 3;
+    // 報告印出的 8 秒的起點（與 reviewPrintStart 相同的規則）：Min／Max HR、Max HR sinus 有 10 秒平均心率時為該時間，
+    // Pause 為事件前 4 秒，其他（含 Longest R-R）為事件前 3 秒。
+    function scrollPrintStart(view, time) {
+        const { type, af } = view.ctx;
+        if (['minHR', 'maxHR', 'maxSinus'].includes(type) && af.record?.hasAvgHRIn10s) return time;
+        if (/^pause/.test(type)) return time - 4;
+        return time - 3;
+    }
+    // 30 秒畫成一列、填滿卡片寬度：寬高比與網站的 10 秒卡片相同（格子維持正方形），因此高度較矮。
+    function scrollContextSize(view, width) {
+        const layout = view.ctx.af.eventDialogLayout || {};
+        const pxPerSec = width / PRINT_CONTEXT_SECONDS;
+        const sitePxPerSec = (Number(layout.width) || 800) / 10;
+        const height = Math.round((Number(layout.height) || 106) * pxPerSec / sitePxPerSec);
+        const label = Number(view.ctx.af.ecgAnno?.height) || 20;
+        return { pxPerSec, height, total: label + height + 6 };
+    }
+    // 卡片內的標籤列與心電圖沿用網站自己的元件（ecg-r-marker、ecg-wave），改餵 30 秒的資料：
+    // 標籤可照常點擊修改（需編輯模式），數字鍵、中鍵等快捷鍵也作用在這一列（.ecg-individual-blk）。
+    const SCROLL_CONTEXT_TEMPLATE = '<div class="ecg-individual-blk">'
+        + '<ecg-r-marker anno-data="rcCtx.anno" canvas-width="rcCtx.width" canvas-height="af.ecgAnno.height" seg-sec="rcCtx.sec"'
+        + ' sample-rate="rcCtx.sampleRate" border-color="{{af.ecgChart.chartMajorGridColor}}" idx-adjust="rcCtx.adjust"'
+        + ' modified-data="af.ecgAnno.modifiedData" start-time="rcCtx.start" event-disabled="!af.editingSwitch" font-size="12"'
+        + ' interval-switch="true" pos-info="rcCtx.posInfo" class="margin-2"></ecg-r-marker>'
+        + '<ecg-wave open-p-r-dialog="openPRDialog" pr-edit="true" pr-data="af.PREditing" ecg-data="rcCtx.ecg" canvas-width="rcCtx.width"'
+        + ' canvas-height="rcCtx.height" sample-rate="rcCtx.sampleRate" seg-sec="rcCtx.sec"'
+        + ' major-grid-color="{{af.ecgChart.chartMajorGridColor}}" minor-grid-color="{{af.ecgChart.chartMinorGridColor}}"'
+        + ' bg-color="#fff" ecg-color="#262626" minor-grid-width="af.ecgChart.minorGridWidth" major-grid-width="af.ecgChart.majorGridWidth"'
+        + ' splited-data="af.eventDialog.splitedData" event-switch="af.ecgEnlargedChart.chartSwitch" anno-data="rcCtx.anno"'
+        + ' modified-data="af.ecgAnno.modifiedData" start-time="rcCtx.start" splited-anno="af.eventDialog.splitedAnno"'
+        + ' pos-info="rcCtx.posInfo" splited-pos-info="af.eventDialog.splitedPosInfo" zoom-scale="af.hrChart.zoomScale"'
+        + ' channel-switch="af.record.channelSwitch"></ecg-wave>'
+        // 與網站卡片的 graphy-cover 相同：蓋住心電圖，滑鼠移過不會出現量測線；開啟 Measure 時才移開。
+        + '<div class="rc-scroll-ctx-cover" ng-show="!af.ecgEnlargedChart.chartSwitch"></div></div>';
+    function clearScrollContextBox(box) {
+        box.rcScope?.$destroy();
+        box.rcScope = null;
+        box.textContent = '';
+        delete box.dataset.key;
+    }
+    function updateScrollContext(view) {
+        if (scrollView !== view) return;
+        const cards = getScrollCards(view);
+        if (view.mode !== 'context') {
+            for (const box of view.content.querySelectorAll('.rc-scroll-ctx')) { clearScrollContextBox(box); box.remove(); }
+            return;
+        }
+        if (!view.contextData) view.contextData = new Map();
+        // 未儲存的修改減少（按了 Save 或放棄修改）：讀到的伺服器標籤已過期，等寫入完成後重新讀取（畫面先保留舊圖）。
+        const mods = Array.isArray(view.ctx.af.ecgAnno?.modifiedData) ? view.ctx.af.ecgAnno.modifiedData.length : 0;
+        if (view.contextMods > mods) {
+            for (const delay of SCROLL_REFRESH_DELAYS) {
+                setTimeout(() => {
+                    if (scrollView !== view || view.mode !== 'context') return;
+                    view.contextData.clear();
+                    updateScrollContext(view);
+                }, delay);
+            }
+        }
+        view.contextMods = mods;
+        const width = Math.floor(scrollCardWidth(view)) - 4;
+        const size = scrollContextSize(view, width);
+        const top = view.content.scrollTop - SCROLL_CONTEXT_NEAR;
+        const bottom = view.content.scrollTop + view.content.clientHeight + SCROLL_CONTEXT_NEAR;
+        let queued = false;
+        cards.forEach(card => {
+            const wave = card.querySelector(':scope > .ecg-wave');
+            const time = toEventTime(scrollCardData(card)?.startTime);
+            if (!wave || time === null) return;
+            let box = wave.querySelector(':scope > .rc-scroll-ctx');
+            if (!box) {
+                box = document.createElement('div');
+                box.className = 'rc-scroll-ctx';
+                wave.appendChild(box);
+            }
+            // 尚未畫出的卡片先預留高度，捲動位置與 Minimap 才不會跳動。
+            box.style.minHeight = `${size.total}px`;
+            if (card.offsetTop + card.offsetHeight < top || card.offsetTop > bottom) return;
+            const entry = view.contextData.get(time);
+            if (!entry) {
+                view.contextData.set(time, { status: 'idle', data: null });
+                queued = true;
+                if (!box.childElementCount) box.dataset.state = '讀取中…';
+                return;
+            }
+            if (entry.status === 'error') { clearScrollContextBox(box); box.dataset.state = '讀取失敗'; return; }
+            if (entry.status !== 'ready') return;
+            const key = `${time}|${width}|${entry.version}`;
+            if (box.dataset.key === key) return;
+            renderScrollContext(view, card, box, entry.data, time, width, size);
+            box.dataset.key = key;
+            delete box.dataset.state;
+        });
+        if (queued) loadScrollContext(view);
+    }
+    async function loadScrollContext(view) {
+        if (view.contextLoading) return;
+        view.contextLoading = true;
+        try {
+            const pending = [...view.contextData].filter(([, entry]) => entry.status === 'idle').map(([time]) => time);
+            await runLimited(pending, SCROLL_CONTEXT_CONCURRENCY, async time => {
+                const entry = view.contextData.get(time);
+                if (scrollView !== view || view.mode !== 'context' || entry?.status !== 'idle') return;
+                entry.status = 'loading';
+                const start = scrollPrintStart(view, time) - PRINT_CONTEXT_BEFORE;
+                try {
+                    entry.data = await fetchEventECG(view.ctx.af, time, time - start, start + PRINT_CONTEXT_SECONDS - time);
+                    entry.data.rcStart = start;
+                    entry.version = ++scrollContextSeq;
+                    entry.status = 'ready';
+                } catch (_) {
+                    entry.status = 'error';
+                }
+                if (scrollView === view) updateScrollContext(view);
+            });
+        } finally {
+            view.contextLoading = false;
+        }
+        // 讀取期間又捲到新的卡片：再讀一輪。
+        if (scrollView === view && view.mode === 'context' && [...view.contextData.values()].some(entry => entry.status === 'idle')) {
+            loadScrollContext(view);
+        }
+    }
+    let scrollContextSeq = 0;
+    function renderScrollContext(view, card, box, data, eventTime, width, size) {
+        const cardScope = window.angular?.element(card).scope();
+        const $compile = window.angular?.element(document.body).injector()?.get('$compile');
+        clearScrollContextBox(box);
+        if (!cardScope || !$compile) { box.dataset.state = '無法顯示'; return; }
+        const sampleRate = Number(data.sampleRate) || Number(view.ctx.af.ecgChart?.sampleRate) || 250;
+        const ecg = data.ecg.map(Number);
+        const seconds = ecg.length / sampleRate;
+        const start = Number.isFinite(data.rcStart) ? data.rcStart : eventTime - PRINT_CONTEXT_BEFORE - 3;
+        const scope = cardScope.$new();
+        scope.rcCtx = {
+            ecg,
+            anno: Object.entries(data.anno || {}).map(([index, type]) => ({ type, index: Number(index) })),
+            posInfo: { idxRange: [data.fromIndex, data.endIndex], sampleRate, morphologyType: data.morphologyType || {} },
+            sampleRate, sec: seconds, start, width, height: size.height,
+        };
+        const element = $compile(SCROLL_CONTEXT_TEMPLATE)(scope)[0];
+        box.rcScope = scope;
+        box.appendChild(element);
+        scope.$digest();
+        // 印出的 8 秒（淡綠色）：疊在網站的心電圖上，不攔截滑鼠；遮罩（rc-scroll-ctx-cover）與心電圖同高。
+        // 不標事件時間：清單的事件時間只到整秒，事件的心搏實際落在其後約 1 秒內，標出來反而容易誤會。
+        const pxPerSec = width / seconds;
+        const overlay = document.createElement('div');
+        overlay.className = 'rc-scroll-ctx-print';
+        overlay.style.left = `${PRINT_CONTEXT_BEFORE * pxPerSec}px`;
+        overlay.style.width = `${PRINT_SHOWN_SECONDS * pxPerSec}px`;
+        element.appendChild(overlay);
+        requestAnimationFrame(() => {
+            const wave = element.querySelector('.ecgWave');
+            if (!wave) return;
+            overlay.style.top = `${wave.offsetTop}px`;
+            overlay.style.height = `${wave.offsetHeight}px`;
+            const cover = element.querySelector('.rc-scroll-ctx-cover');
+            if (cover) { cover.style.top = `${wave.offsetTop}px`; cover.style.height = `${wave.offsetHeight}px`; }
+        });
     }
     function rebuildScrollCards(view) {
         const { ctx, content } = view;
